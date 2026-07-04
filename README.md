@@ -1,4 +1,4 @@
-# keeplin-srv
+# Keeplin Server
 
 The sync server for [Keeplin](https://github.com/jsunyermias/keeplin): the
 production relay that `keeplin-daemon`'s server mode (`DbBackend`) needs and
