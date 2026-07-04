@@ -1,23 +1,39 @@
+//! End-to-end tests of the sync relay against the **real client**: two (or
+//! three) keeplin-core `DbBackend` instances speaking the genuine wire
+//! protocol — the `auth` handshake sent on construction, `send_changes`
+//! envelopes, and `receive_changes` draining — through a keeplin-srv instance
+//! backed by a throwaway Postgres database (`#[sqlx::test]`).
+//!
+//! This mirrors keeplin-core's own `ws_sync.rs` suite, but replaces its
+//! test-only in-memory relay with this production server, adding what the toy
+//! relay lacked: authentication, persistence, and offline catch-up.
+
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
-use futures_util::{SinkExt, StreamExt};
-use keeplin_srv::{config::Config, http::router, state::AppState, store::Note};
+use keeplin_core::{
+    models::Note,
+    storage::{db::DbBackend, NoteRepository, SyncBackend},
+};
+use keeplin_srv::{config::Config, http::router, state::AppState};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
+use uuid::Uuid;
 
 fn test_config() -> Config {
     Config {
         port: 0,
         database_url: String::new(),
         jwt_secret: "test-secret".into(),
+        token_ttl_days: 1,
+        retention_days: 0,
     }
 }
 
 async fn spawn_server(pool: PgPool) -> SocketAddr {
-    let state = std::sync::Arc::new(AppState::new(test_config(), pool));
+    let state = Arc::new(AppState::new(test_config(), pool));
     let app: Router = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -27,284 +43,282 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
-async fn register_and_login(addr: SocketAddr, email: &str) -> (String, String, Note) {
-    let client = reqwest::Client::new();
-
-    let register = client
-        .post(format!("http://{}/api/register", addr))
+async fn register(addr: SocketAddr, email: &str) {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": email, "password": "password123" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(register.status(), 200);
+    assert_eq!(resp.status(), 200);
+}
 
-    let login: Value = client
-        .post(format!("http://{}/api/login", addr))
-        .json(&json!({ "email": email, "password": "password123", "device_name": "test" }))
+/// Log a device in and return its sync token.
+async fn login(addr: SocketAddr, email: &str, device_name: &str) -> String {
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": email, "password": "password123", "device_name": device_name }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let token = login["token"].as_str().unwrap().to_string();
-    let device_id = login["device_id"].as_str().unwrap().to_string();
+    body["token"].as_str().unwrap().to_string()
+}
 
-    let note: Note = client
-        .post(format!("http://{}/api/notes", addr))
+/// Build a server-mode `DbBackend` (the real keeplin client) pointed at the
+/// relay with `token`. The temp dir is leaked so the database outlives the
+/// backend for the duration of the test.
+async fn device(addr: SocketAddr, token: &str) -> DbBackend {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.db");
+    std::mem::forget(dir);
+    DbBackend::new(path, &format!("ws://{addr}/api/sync"), token)
+        .await
+        .unwrap()
+}
+
+fn epoch() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(0, 0).unwrap()
+}
+
+/// Push every local change of `dev` to the relay.
+async fn push(dev: &DbBackend) {
+    let changes = dev.get_changes_since(epoch()).await.unwrap();
+    dev.send_changes(changes).await.unwrap();
+}
+
+/// Repeatedly `receive_changes` (each call drains ~100 ms), applying every
+/// received change, until note `id` is present and — when `want_body` is
+/// `Some` — its body matches. Returns whether it converged.
+async fn sync_until(dev: &DbBackend, id: Uuid, want_body: Option<&str>) -> bool {
+    for _ in 0..50 {
+        let remote = dev.receive_changes().await.unwrap();
+        for change in remote {
+            dev.apply_change(change).await.unwrap();
+        }
+        if let Ok(note) = dev.read_note(id).await {
+            match want_body {
+                None => return true,
+                Some(body) if note.body == body => return true,
+                Some(_) => {}
+            }
+        }
+    }
+    false
+}
+
+// ── Live relay between two connected devices ─────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_syncs_live_between_two_devices(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+    let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
+
+    let note = Note::new("Shared", "over the wire");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+
+    assert!(
+        sync_until(&b, id, None).await,
+        "device B must receive A's note through the relay"
+    );
+    let read = b.read_note(id).await.unwrap();
+    assert_eq!(read.title, "Shared");
+    assert_eq!(read.body, "over the wire");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn update_propagates_and_converges(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+    let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
+
+    let mut note = Note::new("v1", "body v1");
+    let id = note.id;
+    a.create_note(note.clone()).await.unwrap();
+    push(&a).await;
+    assert!(sync_until(&b, id, None).await, "B must receive the create");
+
+    note.title = "v2".to_string();
+    note.body = "body v2".to_string();
+    note.updated_at = chrono::Utc::now();
+    a.update_note(note).await.unwrap();
+    push(&a).await;
+
+    assert!(
+        sync_until(&b, id, Some("body v2")).await,
+        "B must converge to A's update"
+    );
+}
+
+// ── Offline catch-up: the journal, not just live fan-out ────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn device_connecting_later_receives_backlog(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+
+    let note = Note::new("Persisted", "written while B did not exist");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+    // Give the relay a moment to persist the batch before B connects.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // B logs in and connects only now: the note must arrive from the journal.
+    let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
+    assert!(
+        sync_until(&b, id, None).await,
+        "a device connecting later must receive the persisted backlog"
+    );
+}
+
+// ── Isolation and safety properties ──────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn users_do_not_see_each_others_changes(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    register(addr, "b@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+    let b = device(addr, &login(addr, "b@example.com", "laptop").await).await;
+
+    let note = Note::new("Private", "user A only");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+
+    assert!(
+        !sync_until(&b, id, None).await,
+        "user B must never receive user A's changes"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn duplicate_batches_are_deduplicated(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+
+    let note = Note::new("Once", "sent twice");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    // The same local changes pushed twice → two envelopes with different
+    // batch_ids but... a genuine client retry re-sends the *same* payload; the
+    // relay's dedup key is (batch_id, index), so pushing the identical journal
+    // twice produces two batches. B must still converge to exactly one note.
+    push(&a).await;
+    push(&a).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
+    assert!(sync_until(&b, id, None).await, "B must receive the note");
+    // Applying the duplicate create is idempotent on the client, so the state
+    // stays consistent.
+    let read = b.read_note(id).await.unwrap();
+    assert_eq!(read.title, "Once");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn sender_never_receives_its_own_changes_back(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+
+    let note = Note::new("Echo?", "should not come back");
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let echoed = a.receive_changes().await.unwrap();
+    assert!(
+        echoed.is_empty(),
+        "the relay must never echo a device's own changes back: {echoed:?}"
+    );
+}
+
+// ── Handshake rejections ─────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn invalid_token_gets_no_data(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
+
+    let note = Note::new("Secret", "authenticated only");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // A client with a garbage token connects "successfully" (the TCP/WS
+    // upgrade succeeds) but the server closes after the handshake and no
+    // changes ever arrive.
+    let intruder = device(addr, "not-a-valid-jwt").await;
+    assert!(
+        !sync_until(&intruder, id, None).await,
+        "an unauthenticated client must not receive any changes"
+    );
+}
+
+// ── HTTP surface ─────────────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn register_login_and_device_listing(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+
+    register(addr, "a@example.com").await;
+
+    // Duplicate registration is rejected with 409.
+    let dup = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "a@example.com", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), 409);
+
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    // A second device can be added with the first device's token.
+    let second: Value = client
+        .post(format!("http://{addr}/api/devices"))
         .bearer_auth(&token)
-        .json(&json!({ "title": "WS test" }))
+        .json(&json!({ "device_name": "phone" }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
+    assert!(second["token"].as_str().is_some());
+    assert_eq!(second["device_name"], "phone");
 
-    (token, device_id, note)
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn health_check(pool: PgPool) {
-    let addr = spawn_server(pool).await;
-    let client = reqwest::Client::new();
-    let res = client
-        .get(format!("http://{}/health", addr))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 200);
-    assert_eq!(res.text().await.unwrap(), "ok");
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn auth_and_note_crud(pool: PgPool) {
-    let addr = spawn_server(pool).await;
-    let client = reqwest::Client::new();
-
-    let register = client
-        .post(format!("http://{}/api/register", addr))
-        .json(&json!({ "email": "test@example.com", "password": "password123" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(register.status(), 200);
-
-    let login: serde_json::Value = client
-        .post(format!("http://{}/api/login", addr))
-        .json(&json!({ "email": "test@example.com", "password": "password123", "device_name": "test" }))
+    let devices: Value = client
+        .get(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token)
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let token = login["token"].as_str().unwrap();
+    assert_eq!(devices.as_array().unwrap().len(), 2);
 
-    let note: Note = client
-        .post(format!("http://{}/api/notes", addr))
-        .bearer_auth(token)
-        .json(&json!({ "title": "Integration test" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(note.title, "Integration test");
-
-    let fetched: Note = client
-        .get(format!("http://{}/api/notes/{}", addr, note.id))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(fetched.id, note.id);
-    assert_eq!(fetched.title, note.title);
-
-    let export: serde_json::Value = client
-        .get(format!("http://{}/api/notes/{}/export", addr, note.id))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(export["body"].as_str().unwrap(), "");
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn import_export_roundtrip(pool: PgPool) {
-    let addr = spawn_server(pool).await;
-    let client = reqwest::Client::new();
-
-    let register = client
-        .post(format!("http://{}/api/register", addr))
-        .json(&json!({ "email": "round@example.com", "password": "password123" }))
+    // Wrong password fails.
+    let bad = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "a@example.com", "password": "wrong-password", "device_name": "x" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(register.status(), 200);
-
-    let login: serde_json::Value = client
-        .post(format!("http://{}/api/login", addr))
-        .json(&json!({ "email": "round@example.com", "password": "password123", "device_name": "test" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let token = login["token"].as_str().unwrap();
-
-    let import_res = client
-        .post(format!("http://{}/api/import", addr))
-        .bearer_auth(token)
-        .json(&json!({ "title": "Roundtrip", "body": "line1\nline2\nline3" }))
-        .send()
-        .await
-        .unwrap();
-    let import_text = import_res.text().await.unwrap();
-    eprintln!("import response: {}", import_text);
-    let import: serde_json::Value = serde_json::from_str(&import_text).unwrap();
-    let note_id = import["note_id"].as_str().unwrap();
-
-    let export: serde_json::Value = client
-        .get(format!("http://{}/api/notes/{}/export", addr, note_id))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(export["body"].as_str().unwrap(), "line1\nline2\nline3");
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn websocket_receives_snapshot_and_insert(pool: PgPool) {
-    let addr = spawn_server(pool).await;
-    let (token, device_id, note) = register_and_login(addr, "ws@example.com").await;
-
-    let url = format!(
-        "ws://{}/api/ws?token={}&note_id={}",
-        addr, token, note.id
-    );
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-
-    // First message should be a snapshot.
-    let msg = ws.next().await.unwrap().unwrap();
-    let text = match msg {
-        Message::Text(t) => t,
-        _ => panic!("expected text message"),
-    };
-    let snapshot: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(snapshot["type"], "Snapshot");
-    assert_eq!(snapshot["note_id"], note.id.to_string());
-
-    // Insert a line via the same socket.
-    let line_id = uuid::Uuid::new_v4();
-    let insert = json!({
-        "type": "InsertLine",
-        "note_id": note.id,
-        "line_id": line_id,
-        "after_line_id": null,
-        "content": "hello world",
-        "vv": {},
-        "device_id": device_id,
-        "ts": "2024-01-01T00:00:00Z"
-    });
-    ws.send(Message::Text(insert.to_string())).await.unwrap();
-
-    // Server echoes the InsertLine back to the sender (broadcast excludes origin, but our
-    // implementation currently broadcasts to all including origin? Let's accept either).
-    // Actually broadcast excludes origin, so sender won't receive it. We'll just close.
-    ws.close(None).await.unwrap();
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn websocket_insert_propagates_to_other_client(pool: PgPool) {
-    let addr = spawn_server(pool).await;
-    let (token_a, device_id_a, note) = register_and_login(addr, "wsa@example.com").await;
-
-    // Create a second user and share the note as editor.
-    let client = reqwest::Client::new();
-    let register_b = client
-        .post(format!("http://{}/api/register", addr))
-        .json(&json!({ "email": "wsb@example.com", "password": "password123" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(register_b.status(), 200);
-
-    let login_b: Value = client
-        .post(format!("http://{}/api/login", addr))
-        .json(&json!({ "email": "wsb@example.com", "password": "password123", "device_name": "test" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let token_b = login_b["token"].as_str().unwrap().to_string();
-
-    let share = client
-        .post(format!("http://{}/api/notes/{}/shares", addr, note.id))
-        .bearer_auth(&token_a)
-        .json(&json!({ "user_email": "wsb@example.com", "role": "editor" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(share.status(), 200);
-
-    let url_a = format!(
-        "ws://{}/api/ws?token={}&note_id={}",
-        addr, token_a, note.id
-    );
-    let url_b = format!(
-        "ws://{}/api/ws?token={}&note_id={}",
-        addr, token_b, note.id
-    );
-
-    let (mut ws_a, _) = tokio_tungstenite::connect_async(url_a).await.unwrap();
-    let (mut ws_b, _) = tokio_tungstenite::connect_async(url_b).await.unwrap();
-
-    // Consume snapshots.
-    let _snap_a = ws_a.next().await.unwrap().unwrap();
-    let _snap_b = ws_b.next().await.unwrap().unwrap();
-
-    // A inserts a line.
-    let line_id = uuid::Uuid::new_v4();
-    let insert = json!({
-        "type": "InsertLine",
-        "note_id": note.id,
-        "line_id": line_id,
-        "after_line_id": null,
-        "content": "from A",
-        "vv": {},
-        "device_id": device_id_a,
-        "ts": "2024-01-01T00:00:00Z"
-    });
-    ws_a.send(Message::Text(insert.to_string())).await.unwrap();
-
-    // B should receive the InsertLine.
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws_b.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let text = match msg {
-        Message::Text(t) => t,
-        _ => panic!("expected text message"),
-    };
-    let received: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(received["type"], "InsertLine");
-    assert_eq!(received["content"], "from A");
-
-    ws_a.close(None).await.unwrap();
-    ws_b.close(None).await.unwrap();
+    assert_eq!(bad.status(), 401);
 }

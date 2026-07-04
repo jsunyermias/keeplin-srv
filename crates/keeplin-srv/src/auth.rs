@@ -54,12 +54,13 @@ pub fn create_token(
     device_id: Uuid,
     email: &str,
     secret: &str,
+    ttl_days: i64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let claims = Claims {
         sub: user_id,
         device_id,
         email: email.to_string(),
-        exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+        exp: (chrono::Utc::now() + chrono::Duration::days(ttl_days)).timestamp() as usize,
     };
 
     encode(

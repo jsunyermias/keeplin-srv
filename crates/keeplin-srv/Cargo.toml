@@ -22,7 +22,6 @@ sqlx = { version = "0.8", features = [
     "uuid",
     "chrono",
 ] }
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git" }
 argon2 = "0.5"
 password-hash = "0.5"
 tracing = "0.1"
@@ -34,6 +33,10 @@ async-trait = "0.1"
 futures-util = "0.3"
 
 [dev-dependencies]
+# The integration tests drive the relay with the real client: keeplin-core's
+# `DbBackend` speaking the genuine wire protocol.
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git" }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"

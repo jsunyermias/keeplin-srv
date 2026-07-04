@@ -1,3 +1,5 @@
+-- Accounts. One row per registered user; the relay partitions all sync
+-- traffic by user, so a user's devices only ever see that user's changes.
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -5,49 +7,46 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One row per device login. Each keeplin-daemon instance must log in once and
+-- use its own token: the device id inside the token is the relay's identity for
+-- the connection (echo suppression + delivery cursor), so sharing a token
+-- between two machines would make them invisible to each other.
 CREATE TABLE IF NOT EXISTS user_devices (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     device_name TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS notes (
-    id UUID PRIMARY KEY,
-    title TEXT NOT NULL,
-    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ
+    last_seen_at TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS lines (
-    id UUID PRIMARY KEY,
-    content TEXT NOT NULL,
-    vv JSONB NOT NULL DEFAULT '{}',
-    last_writer TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ
-);
+CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id);
 
-CREATE TABLE IF NOT EXISTS note_lines (
-    note_id UUID NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-    line_id UUID NOT NULL REFERENCES lines(id) ON DELETE CASCADE,
-    position TEXT NOT NULL,
-    vv JSONB NOT NULL DEFAULT '{}',
-    last_writer TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ,
-    PRIMARY KEY (note_id, line_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_note_lines_position
-    ON note_lines(note_id, position);
-
-CREATE TABLE IF NOT EXISTS note_shares (
-    note_id UUID NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+-- The change journal: every `Change` received from any device, in arrival
+-- order. The payload is stored as opaque JSON — the relay never interprets
+-- keeplin-core's `Change` enum, it only forwards it, so client model changes
+-- never require a server migration.
+--
+-- (batch_id, batch_index) dedupes client retries: `send_changes` may re-send
+-- the same batch after a reconnect, and the second insert becomes a no-op.
+CREATE TABLE IF NOT EXISTS changes (
+    seq BIGSERIAL PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('editor','viewer')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (note_id, user_id)
+    origin_device_id UUID NOT NULL,
+    batch_id UUID NOT NULL,
+    batch_index INTEGER NOT NULL,
+    sync_device_id TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (batch_id, batch_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_changes_user_seq ON changes(user_id, seq);
+
+-- Per-device delivery watermark: every change with seq <= last_seq has either
+-- been delivered to this device or originated from it. Devices with no row
+-- start at 0 and receive the full journal on first connect.
+CREATE TABLE IF NOT EXISTS device_cursors (
+    device_id UUID PRIMARY KEY REFERENCES user_devices(id) ON DELETE CASCADE,
+    last_seq BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
