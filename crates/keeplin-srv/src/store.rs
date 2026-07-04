@@ -21,10 +21,28 @@ pub struct Note {
     pub id: Uuid,
     pub title: String,
     pub owner_id: Uuid,
+    pub notebook_id: Option<Uuid>,
+    pub is_todo: bool,
+    pub todo_due: Option<DateTime<Utc>>,
+    pub todo_completed: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
 }
+
+/// A partial note-metadata update: `None` = leave unchanged, `Some(inner)` =
+/// set (so `Some(None)` clears a nullable field).
+#[derive(Debug, Default)]
+pub struct NotePatch {
+    pub title: Option<String>,
+    pub notebook_id: Option<Option<Uuid>>,
+    pub is_todo: Option<bool>,
+    pub todo_due: Option<Option<DateTime<Utc>>>,
+    pub todo_completed: Option<Option<DateTime<Utc>>>,
+}
+
+const NOTE_COLS: &str = "id, title, owner_id, notebook_id, is_todo, todo_due, todo_completed, \
+                         created_at, updated_at, deleted_at";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct NoteShare {
@@ -314,18 +332,28 @@ impl Store {
     // ── Notes ────────────────────────────────────────────────────────────────
 
     /// Create a note and its (empty) versioned line order in one transaction.
-    pub async fn create_note(&self, title: &str, owner_id: Uuid) -> Result<Note, AppError> {
+    ///
+    /// `id` may be supplied by the client (a keeplin daemon keeps its local
+    /// note id when it uploads a note); a duplicate id maps to `Conflict`.
+    pub async fn create_note(
+        &self,
+        id: Option<Uuid>,
+        title: &str,
+        owner_id: Uuid,
+    ) -> Result<Note, AppError> {
         let mut tx = self.pool.begin().await?;
-        let note = sqlx::query_as::<_, Note>(
-            r#"INSERT INTO notes (id, title, owner_id)
-               VALUES ($1, $2, $3)
-               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
-        )
-        .bind(Uuid::new_v4())
+        let note = sqlx::query_as::<_, Note>(&format!(
+            "INSERT INTO notes (id, title, owner_id) VALUES ($1, $2, $3) RETURNING {NOTE_COLS}"
+        ))
+        .bind(id.unwrap_or_else(Uuid::new_v4))
         .bind(title)
         .bind(owner_id)
         .fetch_one(&mut *tx)
-        .await?;
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict,
+            _ => AppError::from(e),
+        })?;
         sqlx::query(
             r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
                VALUES ($1, '[]', now(), '{}', $2)"#,
@@ -339,10 +367,9 @@ impl Store {
     }
 
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
-        let note = sqlx::query_as::<_, Note>(
-            r#"SELECT id, title, owner_id, created_at, updated_at, deleted_at
-               FROM notes WHERE id = $1 AND deleted_at IS NULL"#,
-        )
+        let note = sqlx::query_as::<_, Note>(&format!(
+            "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -352,7 +379,8 @@ impl Store {
     /// Notes the user owns plus notes shared with them.
     pub async fn list_notes_for_user(&self, user_id: Uuid) -> Result<Vec<Note>, AppError> {
         let notes = sqlx::query_as::<_, Note>(
-            r#"SELECT n.id, n.title, n.owner_id, n.created_at, n.updated_at, n.deleted_at
+            r#"SELECT n.id, n.title, n.owner_id, n.notebook_id, n.is_todo, n.todo_due,
+                      n.todo_completed, n.created_at, n.updated_at, n.deleted_at
                FROM notes n
                LEFT JOIN note_shares s ON s.note_id = n.id AND s.user_id = $1
                WHERE n.deleted_at IS NULL AND (n.owner_id = $1 OR s.user_id IS NOT NULL)
@@ -364,25 +392,43 @@ impl Store {
         Ok(notes)
     }
 
-    pub async fn update_note_title(&self, id: Uuid, title: &str) -> Result<Option<Note>, AppError> {
-        let note = sqlx::query_as::<_, Note>(
-            r#"UPDATE notes SET title = $2, updated_at = now()
+    /// Apply a partial metadata update; absent fields stay untouched.
+    pub async fn update_note_meta(
+        &self,
+        id: Uuid,
+        patch: &NotePatch,
+    ) -> Result<Option<Note>, AppError> {
+        let note = sqlx::query_as::<_, Note>(&format!(
+            r#"UPDATE notes SET
+                   title = COALESCE($2, title),
+                   notebook_id = CASE WHEN $3 THEN $4 ELSE notebook_id END,
+                   is_todo = COALESCE($5, is_todo),
+                   todo_due = CASE WHEN $6 THEN $7 ELSE todo_due END,
+                   todo_completed = CASE WHEN $8 THEN $9 ELSE todo_completed END,
+                   updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
-               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
-        )
+               RETURNING {NOTE_COLS}"#
+        ))
         .bind(id)
-        .bind(title)
+        .bind(patch.title.as_deref())
+        .bind(patch.notebook_id.is_some())
+        .bind(patch.notebook_id.flatten())
+        .bind(patch.is_todo)
+        .bind(patch.todo_due.is_some())
+        .bind(patch.todo_due.flatten())
+        .bind(patch.todo_completed.is_some())
+        .bind(patch.todo_completed.flatten())
         .fetch_optional(&self.pool)
         .await?;
         Ok(note)
     }
 
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
-        let note = sqlx::query_as::<_, Note>(
+        let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
-               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
-        )
+               RETURNING {NOTE_COLS}"#
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;

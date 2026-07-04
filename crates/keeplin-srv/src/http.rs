@@ -215,6 +215,9 @@ struct NoteResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateNoteBody {
+    /// Optional client-supplied id, so a daemon uploading a local note keeps
+    /// the same note id on the server. 409 if it already exists.
+    id: Option<Uuid>,
     #[serde(default = "default_title")]
     title: String,
 }
@@ -228,7 +231,10 @@ async fn create_note(
     user: AuthedUser,
     Json(body): Json<CreateNoteBody>,
 ) -> Result<Json<Note>, AppError> {
-    let note = state.store.create_note(&body.title, user.user_id).await?;
+    let note = state
+        .store
+        .create_note(body.id, &body.title, user.user_id)
+        .await?;
     Ok(Json(note))
 }
 
@@ -251,9 +257,26 @@ async fn get_note(
     Ok(Json(NoteResponse { note, body }))
 }
 
+/// Deserialize a present field (even an explicit `null`) as `Some(value)`,
+/// so `PATCH` can distinguish "leave unchanged" (absent) from "clear" (null).
+fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(de).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 struct UpdateNoteBody {
-    title: String,
+    title: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    notebook_id: Option<Option<Uuid>>,
+    is_todo: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    todo_due: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(default, deserialize_with = "present")]
+    todo_completed: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 async fn update_note(
@@ -267,9 +290,16 @@ async fn update_note(
     if !role.can_write() {
         return Err(AppError::Forbidden);
     }
+    let patch = crate::store::NotePatch {
+        title: body.title,
+        notebook_id: body.notebook_id,
+        is_todo: body.is_todo,
+        todo_due: body.todo_due,
+        todo_completed: body.todo_completed,
+    };
     let note = state
         .store
-        .update_note_title(id, &body.title)
+        .update_note_meta(id, &patch)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(note))
@@ -379,8 +409,12 @@ async fn import_note(
     user: AuthedUser,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, AppError> {
-    let note = state.store.create_note(&body.title, user.user_id).await?;
-    let writer = user.user_id.to_string();
+    let note = state
+        .store
+        .create_note(None, &body.title, user.user_id)
+        .await?;
+    // The vv actor is the device, same as ops on the collaborative channel.
+    let writer = user.device_id.to_string();
     let now = chrono::Utc::now();
     let lines: Vec<&str> = body.body.split('\n').collect();
 

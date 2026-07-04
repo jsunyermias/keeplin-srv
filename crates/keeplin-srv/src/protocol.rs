@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type LineId = Uuid;
-/// The concurrency actor in server mode is the **user** (not the device):
-/// `last_writer` and version-vector components are user ids.
+/// In presence messages this is a user id. In ops (`last_writer` and the
+/// version-vector components) the concurrency actor is the **device** id from
+/// the token, so two devices of the same user never share a vv component.
 pub type UserId = String;
 
 /// A caret position inside a note: which line, and the column within it.
