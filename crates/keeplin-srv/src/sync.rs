@@ -153,7 +153,9 @@ async fn authenticate(
     state: &AppState,
     socket: &mut WebSocket,
 ) -> Option<crate::store::UserDevice> {
-    let frame = tokio::time::timeout(AUTH_TIMEOUT, socket.recv()).await.ok()??;
+    let frame = tokio::time::timeout(AUTH_TIMEOUT, socket.recv())
+        .await
+        .ok()??;
     let text = match frame {
         Ok(Message::Text(text)) => text,
         _ => return None,
@@ -194,7 +196,10 @@ async fn deliver_backlog(
 ) -> anyhow::Result<()> {
     let mut cursor = state.store.get_cursor(device_id).await?;
     loop {
-        let rows = state.store.changes_after(user_id, cursor, CHUNK_SIZE).await?;
+        let rows = state
+            .store
+            .changes_after(user_id, cursor, CHUNK_SIZE)
+            .await?;
         if rows.is_empty() {
             return Ok(());
         }

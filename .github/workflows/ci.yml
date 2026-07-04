@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # The integration tests drive the relay against real Postgres databases:
+  # `sqlx::test` creates one throwaway database per test from this URL.
+  DATABASE_URL: postgres://keeplin:keeplin@localhost:5432/keeplin
+
+jobs:
+  test:
+    name: Check, Test & Lint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: keeplin
+          POSTGRES_PASSWORD: keeplin
+          POSTGRES_DB: keeplin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U keeplin -d keeplin"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt (workspace)
+        run: cargo fmt --check --all
+
+      - name: cargo check (workspace)
+        run: cargo check --workspace
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: cargo clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

@@ -316,7 +316,9 @@ async fn register_login_and_device_listing(pool: PgPool) {
     // Wrong password fails.
     let bad = client
         .post(format!("http://{addr}/api/login"))
-        .json(&json!({ "email": "a@example.com", "password": "wrong-password", "device_name": "x" }))
+        .json(
+            &json!({ "email": "a@example.com", "password": "wrong-password", "device_name": "x" }),
+        )
         .send()
         .await
         .unwrap();

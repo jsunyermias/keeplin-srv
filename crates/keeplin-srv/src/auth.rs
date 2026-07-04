@@ -18,7 +18,7 @@ use crate::{error::AppError, state::AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: Uuid,      // user_id
+    pub sub: Uuid, // user_id
     pub device_id: Uuid,
     pub email: String,
     pub exp: usize,
@@ -44,9 +44,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
     let parsed = PasswordHash::new(hash)
         .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
     let argon2 = Argon2::default();
-    Ok(argon2
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
+    Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
 pub fn create_token(
