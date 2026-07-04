@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     middleware,
     routing::{get, post},
     Json, Router,
@@ -12,13 +12,26 @@ use uuid::Uuid;
 use crate::{
     auth::{self, AuthedUser},
     error::AppError,
+    permissions::resolve_role,
     state::AppState,
-    store::{User, UserDevice},
+    store::{Note, NoteShare, User, UserDevice},
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/api/devices", post(create_device).get(list_devices))
+        .route("/api/notes", post(create_note).get(list_notes))
+        .route(
+            "/api/notes/:id",
+            get(get_note).patch(update_note).delete(delete_note),
+        )
+        .route("/api/notes/:id/share", post(create_share))
+        .route(
+            "/api/notes/:id/share/:user_id",
+            axum::routing::delete(delete_share),
+        )
+        .route("/api/notes/:id/export", get(export_note))
+        .route("/api/import", post(import_note))
         .layer(middleware::from_fn_with_state(state.clone(), auth::auth_mw));
 
     Router::new()
@@ -26,6 +39,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .merge(protected)
+        // Collaborative editing channel (design §7): auth token in the query.
+        .route("/api/ws", get(crate::collab::handler))
+        // Device sync relay for keeplin-core's DbBackend.
         .route("/api/sync", get(crate::sync::handler))
         .with_state(state)
 }
@@ -40,6 +56,9 @@ async fn health() -> &'static str {
 struct RegisterBody {
     email: String,
     password: String,
+    /// Shown to other participants in collaborative sessions. Defaults to the
+    /// part of the email before the '@'.
+    display_name: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -54,8 +73,15 @@ async fn register(
     if body.password.len() < 8 {
         return Err(AppError::BadRequest("password too short".into()));
     }
+    let display_name = body
+        .display_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| body.email.split('@').next().unwrap_or_default().to_string());
     let hash = auth::hash_password(&body.password)?;
-    let user = state.store.create_user(&body.email, &hash).await?;
+    let user = state
+        .store
+        .create_user(&body.email, &hash, &display_name)
+        .await?;
     Ok(Json(RegisterResponse { user }))
 }
 
@@ -89,7 +115,10 @@ async fn login(
         return Err(AppError::InvalidToken);
     }
 
-    let device = state.store.create_device(user.id, &body.device_name).await?;
+    let device = state
+        .store
+        .create_device(user.id, &body.device_name)
+        .await?;
 
     let token = auth::create_token(
         user.id,
@@ -152,4 +181,253 @@ async fn list_devices(
 ) -> Result<Json<Vec<UserDevice>>, AppError> {
     let devices = state.store.list_devices_by_user(user.user_id).await?;
     Ok(Json(devices))
+}
+
+// ── Notes ────────────────────────────────────────────────────────────────────
+
+/// Materialise a note's body for non-collaborative reads (design §3.4): the
+/// live lines, in order, joined with '\n'.
+async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, AppError> {
+    let order = state
+        .store
+        .get_note_order(note_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let lines = state.store.list_lines(note_id).await?;
+    let by_id: std::collections::HashMap<Uuid, _> = lines.into_iter().map(|l| (l.id, l)).collect();
+    let body = order
+        .order
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .filter(|line| line.deleted_at.is_none())
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(body)
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NoteResponse {
+    #[serde(flatten)]
+    note: Note,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateNoteBody {
+    #[serde(default = "default_title")]
+    title: String,
+}
+
+fn default_title() -> String {
+    "Untitled note".into()
+}
+
+async fn create_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<CreateNoteBody>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.create_note(&body.title, user.user_id).await?;
+    Ok(Json(note))
+}
+
+async fn list_notes(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<Vec<Note>>, AppError> {
+    let notes = state.store.list_notes_for_user(user.user_id).await?;
+    Ok(Json(notes))
+}
+
+async fn get_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<NoteResponse>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    resolve_role(&state.store, &note, user.user_id).await?;
+    let body = materialize_body(&state, id).await?;
+    Ok(Json(NoteResponse { note, body }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateNoteBody {
+    title: String,
+}
+
+async fn update_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateNoteBody>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let role = resolve_role(&state.store, &note, user.user_id).await?;
+    if !role.can_write() {
+        return Err(AppError::Forbidden);
+    }
+    let note = state
+        .store
+        .update_note_title(id, &body.title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(note))
+}
+
+async fn delete_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let role = resolve_role(&state.store, &note, user.user_id).await?;
+    // Only the owner may delete the note (design §9.3).
+    if !role.can_share() {
+        return Err(AppError::Forbidden);
+    }
+    let note = state
+        .store
+        .soft_delete_note(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(note))
+}
+
+// ── Shares ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateShareBody {
+    /// Either the target user's id or their email must be provided.
+    user_id: Option<Uuid>,
+    user_email: Option<String>,
+    role: String,
+}
+
+async fn create_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateShareBody>,
+) -> Result<Json<NoteShare>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let role = resolve_role(&state.store, &note, user.user_id).await?;
+    if !role.can_share() {
+        return Err(AppError::Forbidden);
+    }
+    if body.role != "editor" && body.role != "viewer" {
+        return Err(AppError::BadRequest("role must be editor or viewer".into()));
+    }
+    let target = match (body.user_id, &body.user_email) {
+        (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
+        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)?;
+    if target.id == note.owner_id {
+        return Err(AppError::BadRequest("owner already has access".into()));
+    }
+    let share = state
+        .store
+        .create_or_update_share(id, target.id, &body.role)
+        .await?;
+    Ok(Json(share))
+}
+
+async fn delete_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path((note_id, target_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let note = state
+        .store
+        .get_note(note_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let role = resolve_role(&state.store, &note, user.user_id).await?;
+    // The owner can revoke anyone; anyone can remove themselves.
+    if !role.can_share() && target_id != user.user_id {
+        return Err(AppError::Forbidden);
+    }
+    state.store.delete_share(note_id, target_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Import / export (design §10) ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ImportBody {
+    title: String,
+    body: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ImportResponse {
+    note_id: Uuid,
+    line_count: usize,
+}
+
+/// Offline → server migration for one note: split the flat body on '\n' into
+/// one versioned line per row, seeding each line's vector with the importer's
+/// component.
+async fn import_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<ImportBody>,
+) -> Result<Json<ImportResponse>, AppError> {
+    let note = state.store.create_note(&body.title, user.user_id).await?;
+    let writer = user.user_id.to_string();
+    let now = chrono::Utc::now();
+    let lines: Vec<&str> = body.body.split('\n').collect();
+
+    let mut order = Vec::with_capacity(lines.len());
+    let line_vv = keeplin_core::storage::note_log::VersionVector::from([(writer.clone(), 1u64)]);
+    for content in &lines {
+        let line_id = Uuid::new_v4();
+        state
+            .store
+            .insert_line(line_id, note.id, content, &line_vv, &writer, now)
+            .await?;
+        order.push(line_id);
+    }
+    let order_vv = keeplin_core::storage::note_log::VersionVector::from([(
+        writer.clone(),
+        lines.len() as u64,
+    )]);
+    state
+        .store
+        .set_note_order(note.id, &order, &order_vv, &writer, now)
+        .await?;
+
+    Ok(Json(ImportResponse {
+        note_id: note.id,
+        line_count: lines.len(),
+    }))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExportResponse {
+    id: Uuid,
+    title: String,
+    body: String,
+}
+
+/// Server → offline migration for one note: the live lines joined with '\n'.
+async fn export_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ExportResponse>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    resolve_role(&state.store, &note, user.user_id).await?;
+    let body = materialize_body(&state, id).await?;
+    Ok(Json(ExportResponse {
+        id: note.id,
+        title: note.title,
+        body,
+    }))
 }

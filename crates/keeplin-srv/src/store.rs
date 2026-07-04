@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
+use keeplin_core::storage::note_log::VersionVector;
 use serde::Serialize;
-use sqlx::{Pool, Postgres, Row};
+use sqlx::{types::Json, Pool, Postgres, Row};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -11,7 +12,49 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
+    pub display_name: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Note {
+    pub id: Uuid,
+    pub title: String,
+    pub owner_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct NoteShare {
+    pub note_id: Uuid,
+    pub user_id: Uuid,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One collaborative line: an independently versioned entity with soft-delete.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Line {
+    pub id: Uuid,
+    pub note_id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub vv: Json<VersionVector>,
+    pub last_writer: String,
+}
+
+/// The versioned order of a note's lines (`NoteLines` in the design doc).
+#[derive(Debug, Clone)]
+pub struct NoteOrder {
+    pub note_id: Uuid,
+    pub order: Vec<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub vv: VersionVector,
+    pub last_writer: String,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -44,15 +87,21 @@ impl Store {
 
     // ── Users ────────────────────────────────────────────────────────────────
 
-    pub async fn create_user(&self, email: &str, password_hash: &str) -> Result<User, AppError> {
+    pub async fn create_user(
+        &self,
+        email: &str,
+        password_hash: &str,
+        display_name: &str,
+    ) -> Result<User, AppError> {
         let user = sqlx::query_as::<_, User>(
-            r#"INSERT INTO users (id, email, password_hash)
-               VALUES ($1, $2, $3)
-               RETURNING id, email, password_hash, created_at"#,
+            r#"INSERT INTO users (id, email, password_hash, display_name)
+               VALUES ($1, $2, $3, $4)
+               RETURNING id, email, password_hash, display_name, created_at"#,
         )
         .bind(Uuid::new_v4())
         .bind(email)
         .bind(password_hash)
+        .bind(display_name)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| match &e {
@@ -64,9 +113,21 @@ impl Store {
 
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
-            "SELECT id, email, password_hash, created_at FROM users WHERE email = $1",
+            r#"SELECT id, email, password_hash, display_name, created_at
+               FROM users WHERE email = $1"#,
         )
         .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(user)
+    }
+
+    pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>, AppError> {
+        let user = sqlx::query_as::<_, User>(
+            r#"SELECT id, email, password_hash, display_name, created_at
+               FROM users WHERE id = $1"#,
+        )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(user)
@@ -248,5 +309,275 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    // ── Notes ────────────────────────────────────────────────────────────────
+
+    /// Create a note and its (empty) versioned line order in one transaction.
+    pub async fn create_note(&self, title: &str, owner_id: Uuid) -> Result<Note, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let note = sqlx::query_as::<_, Note>(
+            r#"INSERT INTO notes (id, title, owner_id)
+               VALUES ($1, $2, $3)
+               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(title)
+        .bind(owner_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
+               VALUES ($1, '[]', now(), '{}', $2)"#,
+        )
+        .bind(note.id)
+        .bind(owner_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let note = sqlx::query_as::<_, Note>(
+            r#"SELECT id, title, owner_id, created_at, updated_at, deleted_at
+               FROM notes WHERE id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(note)
+    }
+
+    /// Notes the user owns plus notes shared with them.
+    pub async fn list_notes_for_user(&self, user_id: Uuid) -> Result<Vec<Note>, AppError> {
+        let notes = sqlx::query_as::<_, Note>(
+            r#"SELECT n.id, n.title, n.owner_id, n.created_at, n.updated_at, n.deleted_at
+               FROM notes n
+               LEFT JOIN note_shares s ON s.note_id = n.id AND s.user_id = $1
+               WHERE n.deleted_at IS NULL AND (n.owner_id = $1 OR s.user_id IS NOT NULL)
+               ORDER BY n.updated_at DESC"#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(notes)
+    }
+
+    pub async fn update_note_title(&self, id: Uuid, title: &str) -> Result<Option<Note>, AppError> {
+        let note = sqlx::query_as::<_, Note>(
+            r#"UPDATE notes SET title = $2, updated_at = now()
+               WHERE id = $1 AND deleted_at IS NULL
+               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
+        )
+        .bind(id)
+        .bind(title)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(note)
+    }
+
+    pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let note = sqlx::query_as::<_, Note>(
+            r#"UPDATE notes SET deleted_at = now(), updated_at = now()
+               WHERE id = $1 AND deleted_at IS NULL
+               RETURNING id, title, owner_id, created_at, updated_at, deleted_at"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(note)
+    }
+
+    // ── Shares ───────────────────────────────────────────────────────────────
+
+    pub async fn create_or_update_share(
+        &self,
+        note_id: Uuid,
+        user_id: Uuid,
+        role: &str,
+    ) -> Result<NoteShare, AppError> {
+        let share = sqlx::query_as::<_, NoteShare>(
+            r#"INSERT INTO note_shares (note_id, user_id, role)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (note_id, user_id) DO UPDATE SET role = EXCLUDED.role
+               RETURNING note_id, user_id, role, created_at"#,
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .bind(role)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(share)
+    }
+
+    pub async fn get_share(
+        &self,
+        note_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NoteShare>, AppError> {
+        let share = sqlx::query_as::<_, NoteShare>(
+            r#"SELECT note_id, user_id, role, created_at
+               FROM note_shares WHERE note_id = $1 AND user_id = $2"#,
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(share)
+    }
+
+    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
+            .bind(note_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── Lines ────────────────────────────────────────────────────────────────
+
+    pub async fn get_line(&self, id: Uuid) -> Result<Option<Line>, AppError> {
+        let line = sqlx::query_as::<_, Line>(
+            r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
+               FROM lines WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(line)
+    }
+
+    /// Every line of the note, tombstones included (snapshots need them).
+    pub async fn list_lines(&self, note_id: Uuid) -> Result<Vec<Line>, AppError> {
+        let lines = sqlx::query_as::<_, Line>(
+            r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
+               FROM lines WHERE note_id = $1"#,
+        )
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(lines)
+    }
+
+    pub async fn insert_line(
+        &self,
+        id: Uuid,
+        note_id: Uuid,
+        content: &str,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Line, AppError> {
+        let line = sqlx::query_as::<_, Line>(
+            r#"INSERT INTO lines (id, note_id, content, created_at, updated_at, vv, last_writer)
+               VALUES ($1, $2, $3, now(), $4, $5, $6)
+               RETURNING id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer"#,
+        )
+        .bind(id)
+        .bind(note_id)
+        .bind(content)
+        .bind(updated_at)
+        .bind(Json(vv))
+        .bind(last_writer)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(line)
+    }
+
+    /// Overwrite a line's content + version metadata (an applied `Update`).
+    /// Also clears `deleted_at`: a causally newer edit revives a tombstone,
+    /// same as keeplin-core's note semantics.
+    pub async fn update_line(
+        &self,
+        id: Uuid,
+        content: &str,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Option<Line>, AppError> {
+        let line = sqlx::query_as::<_, Line>(
+            r#"UPDATE lines
+               SET content = $2, vv = $3, last_writer = $4, updated_at = $5, deleted_at = NULL
+               WHERE id = $1
+               RETURNING id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer"#,
+        )
+        .bind(id)
+        .bind(content)
+        .bind(Json(vv))
+        .bind(last_writer)
+        .bind(updated_at)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(line)
+    }
+
+    /// Tombstone a line (an applied `Delete`). The row is kept for
+    /// convergence and remains in the note's order until garbage collection.
+    pub async fn soft_delete_line(
+        &self,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Option<Line>, AppError> {
+        let line = sqlx::query_as::<_, Line>(
+            r#"UPDATE lines
+               SET deleted_at = $2, vv = $3, last_writer = $4, updated_at = $5
+               WHERE id = $1
+               RETURNING id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer"#,
+        )
+        .bind(id)
+        .bind(deleted_at)
+        .bind(Json(vv))
+        .bind(last_writer)
+        .bind(updated_at)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(line)
+    }
+
+    // ── Line order (the NoteLines entity) ────────────────────────────────────
+
+    pub async fn get_note_order(&self, note_id: Uuid) -> Result<Option<NoteOrder>, AppError> {
+        let row = sqlx::query(
+            r#"SELECT note_id, order_json, updated_at, vv, last_writer
+               FROM note_line_order WHERE note_id = $1"#,
+        )
+        .bind(note_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| NoteOrder {
+            note_id: r.get("note_id"),
+            order: r.get::<Json<Vec<Uuid>>, _>("order_json").0,
+            updated_at: r.get("updated_at"),
+            vv: r.get::<Json<VersionVector>, _>("vv").0,
+            last_writer: r.get("last_writer"),
+        }))
+    }
+
+    pub async fn set_note_order(
+        &self,
+        note_id: Uuid,
+        order: &[Uuid],
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"UPDATE note_line_order
+               SET order_json = $2, vv = $3, last_writer = $4, updated_at = $5
+               WHERE note_id = $1"#,
+        )
+        .bind(note_id)
+        .bind(Json(order))
+        .bind(Json(vv))
+        .bind(last_writer)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

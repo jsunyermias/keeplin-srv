@@ -1,7 +1,10 @@
 pub mod auth;
+pub mod collab;
 pub mod config;
 pub mod error;
 pub mod http;
+pub mod permissions;
+pub mod protocol;
 pub mod state;
 pub mod store;
 pub mod sync;

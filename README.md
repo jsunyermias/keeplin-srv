@@ -1,57 +1,84 @@
 # Keeplin Server
 
-The sync server for [Keeplin](https://github.com/jsunyermias/keeplin): the
-production relay that `keeplin-daemon`'s server mode (`DbBackend`) needs and
-that the main repo does not ship («*No production sync server ships in this
-repo*»).
+The multi-user server for [Keeplin](https://github.com/jsunyermias/keeplin) with
+**real-time collaborative editing by lines**: several users edit the same note
+simultaneously, Google-Docs style but over Markdown, keeping the same concepts
+as keeplin-core — `VersionVector`, `last_writer`, `updated_at` and soft-delete
+tombstones. No locks anywhere: resolution is always by version vector
+(`note_log::resolve`), never by locking.
 
-Written in Rust (axum + PostgreSQL). Implements exactly the WebSocket protocol
-that `keeplin-core` speaks:
+Written in Rust (axum + PostgreSQL).
 
-1. The daemon connects and sends the handshake `{"type":"auth","token":"<jwt>"}`.
-2. It pushes batches `{"type":"changes","batch_id":…,"device_id":…,"changes":[Change…]}`.
-3. The server delivers batches `{"type":"changes","changes":[Change…]}` — first
-   the *backlog* that device has not seen yet and then, live, the batches from
-   the user's other devices. The sender is never echoed.
+## Model
 
-`Change` values are treated as **opaque JSON**: the relay persists and forwards
-them without interpreting `keeplin-core`'s model, so client model evolution never
-requires server migrations. Conflict resolution (version vectors) happens on the
-clients, which apply every change idempotently; that is why the relay prefers
-duplicate delivery over loss.
+- **The unit of concurrency is the line.** Each line is an independently
+  versioned entity that is created, edited, deleted (tombstone) and resolved on
+  its own.
+- **The order of lines is another versioned entity** with its own `vv`,
+  `updated_at` and `last_writer`. It contains every `line_id`, deleted ones
+  included, until garbage collection.
+- **The server is the broker and the durable source of truth**: it validates
+  each operation, resolves it against current state, persists it and forwards
+  it to the note's other subscribers. Clients are stateful and rebuild from the
+  snapshot on (re)connect — there is no infinite op log.
+- A note's `body` is not stored: it is materialised by joining the live lines
+  with `\n` for non-collaborative REST reads.
 
-## Guarantees
+## Collaborative protocol (`GET /api/ws?token=<jwt>`)
 
-- **Durability**: every accepted batch is saved to the journal (`changes`) before
-  fan-out. A device that was offline receives the full backlog on reconnect.
-- **Per-device cursor**: each device has a durable delivery mark that only
-  advances after a successful send.
-- **Retry deduplication**: `(batch_id, batch_index)` is unique; resending a batch
-  after a reconnect does not duplicate rows.
-- **User isolation**: changes only travel between devices owned by the same
-  account.
+JSON messages with a `type` field:
 
-## Requirements
+- Client → server: `Join { note_id }`, `Leave { note_id }`,
+  `Op { note_id, ops: [LineOp…] }`, `Cursor { note_id, cursor }`, `Ack { server_seq }`.
+- Server → client: `Welcome { note_id, snapshot }` (versioned order + every
+  line), `Op { server_seq, note_id, user_id, ops }`, `Presence { note_id, users }`,
+  `Error { code, message }`.
 
-- Rust >= 1.75
-- PostgreSQL 16 (or use Docker Compose)
+`LineOp` (`op`): `Insert { after_line_id, line_id, content, vv, last_writer, updated_at }`,
+`Update`, `Delete` (tombstone) and `Move { line_ids, after_line_id, … }`. Every
+operation carries its own `vv`; the server requires `last_writer` to be the
+authenticated user and the vector to advance the writer's component.
 
-## Quick start
+**Resolution** (design §5): per line, `resolve(local, incoming)` — a dominated
+operation is ignored; concurrent ones fall to the deterministic
+`(updated_at, last_writer)` tiebreak, identical on every replica. `Insert`/`Move`
+resolve against the order entity.
 
-```bash
-# 1. Start PostgreSQL
-docker compose up -d
+**Limits**: 10,000 characters per line, 100,000 lines per note, 1 MB per message.
 
-# 2. Copy environment variables
-cp .env.example .env   # change JWT_SECRET in production
+## REST API
 
-# 3. Build and run
-cargo run
-```
+- `GET /health`
+- `POST /api/register` — `{ email, password, display_name? }`
+- `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
+- `POST /api/devices` · `GET /api/devices` (Bearer)
+- `POST /api/notes` — `{ title }` · `GET /api/notes` — owned and shared
+- `GET /api/notes/:id` — metadata + materialised `body` · `PATCH` (title) ·
+  `DELETE` (owner only, soft delete)
+- `POST /api/notes/:id/share` — `{ user_id | user_email, role }` (`editor`/`viewer`,
+  owner only) · `DELETE /api/notes/:id/share/:user_id`
+- `POST /api/import` — `{ title, body }` splits the body into lines (offline →
+  server migration) · `GET /api/notes/:id/export` — joins the live lines
+  (server → offline)
 
-The server listens on `http://localhost:3000`.
+### Roles
 
-## Connecting a keeplin-daemon
+| Role | Permissions |
+|------|-------------|
+| `owner` | read, edit, share, delete the note |
+| `editor` | read and edit |
+| `viewer` | join the session and watch; cannot send operations |
+
+## Device sync relay (`GET /api/sync`)
+
+Besides the collaborative channel, the server implements the WebSocket relay
+that keeplin-core's current `DbBackend` speaks (`{"type":"auth","token"}`
+handshake + `{"type":"changes",…}` envelopes), with a persistent journal,
+deferred catch-up via per-device cursors and retry deduplication. It syncs one
+user's devices while collaborative mode lands in the daemon. One login (one
+token) per device.
+
+### Connecting a keeplin-daemon
 
 ```bash
 # 1. Create an account (once)
@@ -74,18 +101,25 @@ server_url = "ws://localhost:3000/api/sync"   # wss:// in production
 auth_token = "<token from step 2>"
 ```
 
-The token identifies both the user **and** the device: the relay uses it to know
-what each device has already received and to avoid echoing its own changes back.
-One login per device.
+## Requirements
 
-## API
+- Rust >= 1.75
+- PostgreSQL 16 (or use Docker Compose)
 
-- `GET /health`
-- `POST /api/register` — `{ email, password }`
-- `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
-- `POST /api/devices` — `{ device_name }` (Bearer token) → token for another device
-- `GET /api/devices` — list the account's devices (Bearer token)
-- `GET /api/sync` — WebSocket sync channel (`auth` handshake as first frame)
+## Quick start
+
+```bash
+# 1. Start PostgreSQL
+docker compose up -d
+
+# 2. Copy environment variables
+cp .env.example .env   # change JWT_SECRET in production
+
+# 3. Build and run
+cargo run
+```
+
+The server listens on `http://localhost:3000`.
 
 ## Environment variables
 
@@ -93,13 +127,13 @@ One login per device.
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP/WS port |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
-| `JWT_SECRET` | development value | Token signing secret; change it |
-| `TOKEN_TTL_DAYS` | `365` | Device token lifetime |
-| `CHANGES_RETENTION_DAYS` | `0` (disabled) | Journal pruning: deletes changes older than N days **already delivered to all of the user's devices** |
+| `JWT_SECRET` | dev value | Token signing secret; change it |
+| `TOKEN_TTL_DAYS` | `365` | Token lifetime |
+| `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
 | `RUST_LOG` | `info` | Log level |
 
-In production terminate TLS in a reverse proxy and use `wss://` — the handshake
-token travels in plaintext inside the WebSocket.
+In production terminate TLS at a reverse proxy (`wss://`) — the token travels in
+the WebSocket query string / first frame.
 
 ## Tests
 
@@ -108,14 +142,11 @@ export DATABASE_URL=postgres://keeplin:keeplin@127.0.0.1:5432/keeplin
 cargo test
 ```
 
-Integration tests use `sqlx::test` (temporary databases) and exercise the server
-with the **real client**: two `DbBackend` instances from `keeplin-core` speaking
-the genuine protocol, including deferred delivery, user isolation and invalid-token
-rejection.
+- `tests/collab.rs` — the collaborative protocol end to end: Join/Welcome, op
+  propagation with `server_seq`, deterministic resolution of concurrent edits,
+  ignored replays, Move, presence with cursors, roles (viewer without write,
+  outsiders without access), forged `last_writer` rejection and import/export.
+- `tests/integration.rs` — the device relay with the real client
+  (keeplin-core's `DbBackend`).
 
-## History
-
-The first iteration of this repo was a line-based collaborative server with its
-own protocol; it was replaced by this relay so the server speaks exactly the
-`keeplin-core` protocol instead of inventing a new one. The earlier TypeScript
-version lives in `legacy/`.
+CI (GitHub Actions) runs fmt, check, the tests against Postgres 16 and clippy.
