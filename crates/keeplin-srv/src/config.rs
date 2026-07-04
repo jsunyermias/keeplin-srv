@@ -21,7 +21,7 @@ impl Config {
                 .unwrap_or(3000),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             jwt_secret: std::env::var("JWT_SECRET")
-                .unwrap_or_else(|_| "dev-secret-cambia-en-produccion".into()),
+                .unwrap_or_else(|_| "dev-secret-change-in-production".into()),
             token_ttl_days: std::env::var("TOKEN_TTL_DAYS")
                 .ok()
                 .and_then(|s| s.parse().ok())

@@ -1,105 +1,105 @@
 # keeplin-srv
 
-El servidor de sincronización para [Keeplin](https://github.com/jsunyermias/keeplin):
-el *relay* de producción que el modo servidor de `keeplin-daemon` (`DbBackend`)
-necesita y que el repo principal no incluye («*No production sync server ships in
-this repo*»).
+The sync server for [Keeplin](https://github.com/jsunyermias/keeplin): the
+production relay that `keeplin-daemon`'s server mode (`DbBackend`) needs and
+that the main repo does not ship («*No production sync server ships in this
+repo*»).
 
-Escrito en Rust (axum + PostgreSQL). Implementa exactamente el protocolo WebSocket
-que habla `keeplin-core`:
+Written in Rust (axum + PostgreSQL). Implements exactly the WebSocket protocol
+that `keeplin-core` speaks:
 
-1. El daemon conecta y envía el handshake `{"type":"auth","token":"<jwt>"}`.
-2. Empuja lotes `{"type":"changes","batch_id":…,"device_id":…,"changes":[Change…]}`.
-3. El servidor le entrega lotes `{"type":"changes","changes":[Change…]}` — primero
-   el *backlog* que ese dispositivo aún no ha visto y después, en vivo, los lotes
-   del resto de dispositivos del mismo usuario. Nunca se hace eco al emisor.
+1. The daemon connects and sends the handshake `{"type":"auth","token":"<jwt>"}`.
+2. It pushes batches `{"type":"changes","batch_id":…,"device_id":…,"changes":[Change…]}`.
+3. The server delivers batches `{"type":"changes","changes":[Change…]}` — first
+   the *backlog* that device has not seen yet and then, live, the batches from
+   the user's other devices. The sender is never echoed.
 
-Los `Change` se tratan como **JSON opaco**: el relay los persiste y los reenvía sin
-interpretar el modelo de `keeplin-core`, así que la evolución del modelo del cliente
-no exige migraciones del servidor. La resolución de conflictos (version vectors)
-ocurre en los clientes, que aplican cada cambio de forma idempotente; por eso el
-relay prefiere la entrega duplicada a la pérdida.
+`Change` values are treated as **opaque JSON**: the relay persists and forwards
+them without interpreting `keeplin-core`'s model, so client model evolution never
+requires server migrations. Conflict resolution (version vectors) happens on the
+clients, which apply every change idempotently; that is why the relay prefers
+duplicate delivery over loss.
 
-## Garantías
+## Guarantees
 
-- **Persistencia**: cada lote aceptado se guarda en el journal (`changes`) antes del
-  fan-out. Un dispositivo que estaba apagado recibe el backlog completo al conectar.
-- **Cursor por dispositivo**: cada dispositivo tiene una marca de entrega durable
-  que solo avanza tras un envío correcto.
-- **Dedupe de reintentos**: `(batch_id, batch_index)` es único; el reenvío de un lote
-  tras una reconexión no duplica filas.
-- **Aislamiento por usuario**: los cambios solo viajan entre dispositivos de la misma
-  cuenta.
+- **Durability**: every accepted batch is saved to the journal (`changes`) before
+  fan-out. A device that was offline receives the full backlog on reconnect.
+- **Per-device cursor**: each device has a durable delivery mark that only
+  advances after a successful send.
+- **Retry deduplication**: `(batch_id, batch_index)` is unique; resending a batch
+  after a reconnect does not duplicate rows.
+- **User isolation**: changes only travel between devices owned by the same
+  account.
 
-## Requisitos
+## Requirements
 
 - Rust >= 1.75
-- PostgreSQL 16 (o usar Docker Compose)
+- PostgreSQL 16 (or use Docker Compose)
 
-## Arranque rápido
+## Quick start
 
 ```bash
-# 1. Levantar PostgreSQL
+# 1. Start PostgreSQL
 docker compose up -d
 
-# 2. Copiar variables de entorno
-cp .env.example .env   # cambia JWT_SECRET en producción
+# 2. Copy environment variables
+cp .env.example .env   # change JWT_SECRET in production
 
-# 3. Compilar y ejecutar
+# 3. Build and run
 cargo run
 ```
 
-El servidor escucha en `http://localhost:3000`.
+The server listens on `http://localhost:3000`.
 
-## Conectar un keeplin-daemon
+## Connecting a keeplin-daemon
 
 ```bash
-# 1. Crear cuenta (una vez)
+# 1. Create an account (once)
 curl -X POST http://localhost:3000/api/register \
   -H 'content-type: application/json' \
-  -d '{"email":"yo@example.com","password":"secreto-largo"}'
+  -d '{"email":"me@example.com","password":"long-secret"}'
 
-# 2. Obtener un token PARA CADA dispositivo (¡no compartas el token entre máquinas!)
+# 2. Get a token FOR EACH device (do not share the token across machines!)
 curl -X POST http://localhost:3000/api/login \
   -H 'content-type: application/json' \
-  -d '{"email":"yo@example.com","password":"secreto-largo","device_name":"portatil"}'
+  -d '{"email":"me@example.com","password":"long-secret","device_name":"laptop"}'
 # → { "token": "…", "device_id": "…" }
 ```
 
-En el `config.toml` del daemon:
+In the daemon's `config.toml`:
 
 ```toml
 mode = "server"
-server_url = "ws://localhost:3000/api/sync"   # wss:// en producción
-auth_token = "<token del paso 2>"
+server_url = "ws://localhost:3000/api/sync"   # wss:// in production
+auth_token = "<token from step 2>"
 ```
 
-El token identifica usuario **y** dispositivo: el relay lo usa para saber qué ha
-recibido ya cada dispositivo y para no reenviarle sus propios cambios. Un login por
-dispositivo.
+The token identifies both the user **and** the device: the relay uses it to know
+what each device has already received and to avoid echoing its own changes back.
+One login per device.
 
 ## API
 
 - `GET /health`
 - `POST /api/register` — `{ email, password }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
-- `POST /api/devices` — `{ device_name }` (Bearer token) → token para otro dispositivo
-- `GET /api/devices` — lista los dispositivos de la cuenta (Bearer token)
-- `GET /api/sync` — WebSocket de sincronización (handshake `auth` como primer frame)
+- `POST /api/devices` — `{ device_name }` (Bearer token) → token for another device
+- `GET /api/devices` — list the account's devices (Bearer token)
+- `GET /api/sync` — WebSocket sync channel (`auth` handshake as first frame)
 
-## Variables de entorno
+## Environment variables
 
-| Variable | Por defecto | Descripción |
-|----------|-------------|-------------|
-| `PORT` | `3000` | Puerto HTTP/WS |
-| `DATABASE_URL` | — (obligatoria) | Conexión a PostgreSQL |
-| `JWT_SECRET` | valor de desarrollo | Secreto de firma de tokens; cámbialo |
-| `TOKEN_TTL_DAYS` | `365` | Vida de los tokens de dispositivo |
-| `CHANGES_RETENTION_DAYS` | `0` (desactivado) | Poda del journal: borra cambios más antiguos que N días **ya entregados a todos los dispositivos** del usuario |
-| `RUST_LOG` | `info` | Nivel de log |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | HTTP/WS port |
+| `DATABASE_URL` | — (required) | PostgreSQL connection string |
+| `JWT_SECRET` | development value | Token signing secret; change it |
+| `TOKEN_TTL_DAYS` | `365` | Device token lifetime |
+| `CHANGES_RETENTION_DAYS` | `0` (disabled) | Journal pruning: deletes changes older than N days **already delivered to all of the user's devices** |
+| `RUST_LOG` | `info` | Log level |
 
-En producción termina TLS en un reverse proxy y usa `wss://` — el token del
-handshake viaja en claro dentro del WebSocket.
+In production terminate TLS in a reverse proxy and use `wss://` — the handshake
+token travels in plaintext inside the WebSocket.
 
 ## Tests
 
@@ -108,14 +108,14 @@ export DATABASE_URL=postgres://keeplin:keeplin@127.0.0.1:5432/keeplin
 cargo test
 ```
 
-Los tests de integración usan `sqlx::test` (bases de datos temporales) y ejercitan
-el servidor con el **cliente real**: dos instancias de `DbBackend` de `keeplin-core`
-hablando el protocolo auténtico, incluida la entrega en diferido, el aislamiento
-entre usuarios y el rechazo de tokens inválidos.
+Integration tests use `sqlx::test` (temporary databases) and exercise the server
+with the **real client**: two `DbBackend` instances from `keeplin-core` speaking
+the genuine protocol, including deferred delivery, user isolation and invalid-token
+rejection.
 
-## Historial
+## History
 
-La primera iteración de este repo era un servidor colaborativo por líneas con su
-propio protocolo; se reemplazó por este relay para que el servidor hable exactamente
-el protocolo de `keeplin-core` en vez de inventar otro. La versión TypeScript
-anterior sigue en `legacy/`.
+The first iteration of this repo was a line-based collaborative server with its
+own protocol; it was replaced by this relay so the server speaks exactly the
+`keeplin-core` protocol instead of inventing a new one. The earlier TypeScript
+version lives in `legacy/`.
