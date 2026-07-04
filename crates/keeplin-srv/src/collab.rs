@@ -175,7 +175,7 @@ pub async fn handler(
     Ok(ws
         .max_message_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| async move {
-            run_connection(state, socket, user.id, user.display_name).await;
+            run_connection(state, socket, user.id, authed.device_id, user.display_name).await;
         }))
 }
 
@@ -183,6 +183,7 @@ async fn run_connection(
     state: Arc<AppState>,
     socket: WebSocket,
     user_id: Uuid,
+    device_id: Uuid,
     display_name: String,
 ) {
     let conn_id = state.collab.next_conn_id.fetch_add(1, Ordering::Relaxed);
@@ -220,6 +221,7 @@ async fn run_connection(
             &tx,
             conn_id,
             user_id,
+            device_id,
             &display_name,
             &mut joined,
             client_msg,
@@ -254,6 +256,7 @@ async fn handle_msg(
     tx: &mpsc::UnboundedSender<String>,
     conn_id: u64,
     user_id: Uuid,
+    device_id: Uuid,
     display_name: &str,
     joined: &mut HashMap<Uuid, (Arc<CollabSession>, Role)>,
     msg: CollabClientMsg,
@@ -327,7 +330,7 @@ async fn handle_msg(
             {
                 let _guard = session.apply_lock.lock().await;
                 for op in ops {
-                    match apply_op(state, note_id, user_id, op).await? {
+                    match apply_op(state, note_id, device_id, op).await? {
                         OpOutcome::Applied(op) => applied.push(op),
                         OpOutcome::Ignored => {}
                         OpOutcome::Invalid { code, message } => {
@@ -439,13 +442,16 @@ fn advances_writer(current: &VersionVector, op_vv: &VersionVector, writer: &str)
 async fn apply_op(
     state: &AppState,
     note_id: Uuid,
-    user_id: Uuid,
+    device_id: Uuid,
     op: LineOp,
 ) -> Result<OpOutcome, AppError> {
-    // The op's writer must be the authenticated user — clients cannot forge
-    // edits in someone else's name.
-    if op.last_writer() != user_id.to_string() {
-        return Ok(invalid("bad_writer", "last_writer must be your user id"));
+    // The op's writer must be the authenticated *device* (from the token) —
+    // clients cannot forge edits in someone else's name, and two devices of
+    // the same user never share a version-vector component (sharing one would
+    // make the server treat concurrent edits from the second device as
+    // replays). Presence stays user-based; only the vv actor is the device.
+    if op.last_writer() != device_id.to_string() {
+        return Ok(invalid("bad_writer", "last_writer must be your device id"));
     }
 
     match &op {

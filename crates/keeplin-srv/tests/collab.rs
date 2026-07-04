@@ -37,8 +37,9 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
-/// Register a user; returns (user_id, token) for a fresh device login.
-async fn user(addr: SocketAddr, email: &str) -> (String, String) {
+/// Register a user; returns (user_id, device_id, token) for a fresh device
+/// login. Ops must be signed with the *device* id — the vv actor.
+async fn user(addr: SocketAddr, email: &str) -> (String, String, String) {
     let client = reqwest::Client::new();
     let reg: Value = client
         .post(format!("http://{addr}/api/register"))
@@ -59,7 +60,11 @@ async fn user(addr: SocketAddr, email: &str) -> (String, String) {
         .json()
         .await
         .unwrap();
-    (user_id, login["token"].as_str().unwrap().to_string())
+    (
+        user_id,
+        login["device_id"].as_str().unwrap().to_string(),
+        login["token"].as_str().unwrap().to_string(),
+    )
 }
 
 async fn create_note(addr: SocketAddr, token: &str, title: &str) -> String {
@@ -208,7 +213,7 @@ const T3: &str = "2026-01-01T10:00:02Z";
 #[sqlx::test(migrations = "../../migrations")]
 async fn join_receives_welcome_snapshot(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (_uid, token) = user(addr, "a@example.com").await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
     let note_id = create_note(addr, &token, "Nota").await;
 
     let mut ws = ws_connect(addr, &token).await;
@@ -227,8 +232,8 @@ async fn join_receives_welcome_snapshot(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn ops_propagate_between_participants(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (uid_a, token_a) = user(addr, "a@example.com").await;
-    let (uid_b, token_b) = user(addr, "b@example.com").await;
+    let (uid_a, did_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, did_b, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "Compartida").await;
     share(addr, &token_a, &note_id, "b@example.com", "editor").await;
 
@@ -243,7 +248,7 @@ async fn ops_propagate_between_participants(pool: PgPool) {
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_a,
-        insert_op(&note_id, &line_id, None, "hola desde A", &uid_a, 1, T1),
+        insert_op(&note_id, &line_id, None, "hola desde A", &did_a, 1, T1),
     )
     .await;
     let op_at_b = recv_until(&mut ws_b, "Op at B", |v| v["type"] == "Op").await;
@@ -260,8 +265,8 @@ async fn ops_propagate_between_participants(pool: PgPool) {
             &note_id,
             &line_id,
             "editada por B",
-            json!({ uid_a.clone(): 1, uid_b.clone(): 1 }),
-            &uid_b,
+            json!({ did_a.clone(): 1, did_b.clone(): 1 }),
+            &did_b,
             T2,
         ),
     )
@@ -277,8 +282,8 @@ async fn ops_propagate_between_participants(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (uid_a, token_a) = user(addr, "a@example.com").await;
-    let (uid_b, token_b) = user(addr, "b@example.com").await;
+    let (_uid_a, did_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, did_b, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "Conflicto").await;
     share(addr, &token_a, &note_id, "b@example.com", "editor").await;
 
@@ -293,7 +298,7 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_a,
-        insert_op(&note_id, &line_id, None, "base", &uid_a, 1, T1),
+        insert_op(&note_id, &line_id, None, "base", &did_a, 1, T1),
     )
     .await;
     recv_until(&mut ws_b, "insert at B", |v| v["type"] == "Op").await;
@@ -307,8 +312,8 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
             &note_id,
             &line_id,
             "versión de A",
-            json!({ uid_a.clone(): 2 }),
-            &uid_a,
+            json!({ did_a.clone(): 2 }),
+            &did_a,
             T2,
         ),
     )
@@ -319,8 +324,8 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
             &note_id,
             &line_id,
             "versión de B",
-            json!({ uid_a.clone(): 1, uid_b.clone(): 1 }),
-            &uid_b,
+            json!({ did_a.clone(): 1, did_b.clone(): 1 }),
+            &did_b,
             T3,
         ),
     )
@@ -334,7 +339,7 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn stale_op_is_ignored(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (uid_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_a, did_a, token_a) = user(addr, "a@example.com").await;
     let note_id = create_note(addr, &token_a, "Stale").await;
 
     let mut ws = ws_connect(addr, &token_a).await;
@@ -344,7 +349,7 @@ async fn stale_op_is_ignored(pool: PgPool) {
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws,
-        insert_op(&note_id, &line_id, None, "v1", &uid_a, 1, T1),
+        insert_op(&note_id, &line_id, None, "v1", &did_a, 1, T1),
     )
     .await;
     send(
@@ -353,8 +358,8 @@ async fn stale_op_is_ignored(pool: PgPool) {
             &note_id,
             &line_id,
             "v2",
-            json!({ uid_a.clone(): 2 }),
-            &uid_a,
+            json!({ did_a.clone(): 2 }),
+            &did_a,
             T2,
         ),
     )
@@ -366,8 +371,8 @@ async fn stale_op_is_ignored(pool: PgPool) {
             &note_id,
             &line_id,
             "v1-replay",
-            json!({ uid_a.clone(): 2 }),
-            &uid_a,
+            json!({ did_a.clone(): 2 }),
+            &did_a,
             T2,
         ),
     )
@@ -382,7 +387,7 @@ async fn stale_op_is_ignored(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn move_reorders_lines(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (uid, token) = user(addr, "a@example.com").await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
     let note_id = create_note(addr, &token, "Orden").await;
 
     let mut ws = ws_connect(addr, &token).await;
@@ -392,15 +397,15 @@ async fn move_reorders_lines(pool: PgPool) {
     let l1 = uuid::Uuid::new_v4().to_string();
     let l2 = uuid::Uuid::new_v4().to_string();
     let l3 = uuid::Uuid::new_v4().to_string();
-    send(&mut ws, insert_op(&note_id, &l1, None, "uno", &uid, 1, T1)).await;
+    send(&mut ws, insert_op(&note_id, &l1, None, "uno", &did, 1, T1)).await;
     send(
         &mut ws,
-        insert_op(&note_id, &l2, Some(&l1), "dos", &uid, 2, T1),
+        insert_op(&note_id, &l2, Some(&l1), "dos", &did, 2, T1),
     )
     .await;
     send(
         &mut ws,
-        insert_op(&note_id, &l3, Some(&l2), "tres", &uid, 3, T1),
+        insert_op(&note_id, &l3, Some(&l2), "tres", &did, 3, T1),
     )
     .await;
 
@@ -414,8 +419,8 @@ async fn move_reorders_lines(pool: PgPool) {
                 "op": "Move",
                 "line_ids": [l3],
                 "after_line_id": null,
-                "vv": { uid.clone(): 4 },
-                "last_writer": uid,
+                "vv": { did.clone(): 4 },
+                "last_writer": did,
                 "updated_at": T2,
             }],
         }),
@@ -428,8 +433,8 @@ async fn move_reorders_lines(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (_uid_a, token_a) = user(addr, "a@example.com").await;
-    let (uid_b, token_b) = user(addr, "b@example.com").await;
+    let (_uid_a, _did_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, did_b, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "Solo lectura").await;
     share(addr, &token_a, &note_id, "b@example.com", "viewer").await;
 
@@ -440,7 +445,7 @@ async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
-        insert_op(&note_id, &line_id, None, "no debería", &uid_b, 1, T1),
+        insert_op(&note_id, &line_id, None, "no debería", &did_b, 1, T1),
     )
     .await;
     let err = recv_until(&mut ws_b, "Error", |v| v["type"] == "Error").await;
@@ -451,8 +456,8 @@ async fn viewer_can_watch_but_not_edit(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn outsider_cannot_join(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (_uid_a, token_a) = user(addr, "a@example.com").await;
-    let (_uid_b, token_b) = user(addr, "b@example.com").await;
+    let (_uid_a, _did_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, _did_b, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "Privada").await;
 
     let mut ws_b = ws_connect(addr, &token_b).await;
@@ -464,8 +469,8 @@ async fn outsider_cannot_join(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn presence_shows_other_participants(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (_uid_a, token_a) = user(addr, "ana@example.com").await;
-    let (_uid_b, token_b) = user(addr, "bob@example.com").await;
+    let (_uid_a, _did_a, token_a) = user(addr, "ana@example.com").await;
+    let (_uid_b, _did_b, token_b) = user(addr, "bob@example.com").await;
     let note_id = create_note(addr, &token_a, "Presencia").await;
     share(addr, &token_a, &note_id, "bob@example.com", "editor").await;
 
@@ -517,7 +522,7 @@ async fn presence_shows_other_participants(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn import_then_export_roundtrip(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (_uid, token) = user(addr, "a@example.com").await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
 
     let body = "# Título\n\nprimera línea\nsegunda línea";
     let imported: Value = reqwest::Client::new()
@@ -558,8 +563,8 @@ async fn import_then_export_roundtrip(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn forged_writer_is_rejected(pool: PgPool) {
     let addr = spawn_server(pool).await;
-    let (uid_a, token_a) = user(addr, "a@example.com").await;
-    let (uid_b, token_b) = user(addr, "b@example.com").await;
+    let (_uid_a, did_a, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, _did_b, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "Firma").await;
     share(addr, &token_a, &note_id, "b@example.com", "editor").await;
 
@@ -567,14 +572,13 @@ async fn forged_writer_is_rejected(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome", |v| v["type"] == "Welcome").await;
 
-    // B tries to write in A's name — the last_writer does not match B's id.
+    // B tries to sign with A's device id — last_writer must be B's device.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
-        insert_op(&note_id, &line_id, None, "suplantación", &uid_a, 1, T1),
+        insert_op(&note_id, &line_id, None, "suplantación", &did_a, 1, T1),
     )
     .await;
     let err = recv_until(&mut ws_b, "Error", |v| v["type"] == "Error").await;
     assert_eq!(err["code"], "bad_writer");
-    let _ = uid_b;
 }
