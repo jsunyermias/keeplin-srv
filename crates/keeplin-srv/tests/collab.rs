@@ -182,6 +182,23 @@ async fn export_body(addr: SocketAddr, token: &str, note_id: &str) -> String {
     v["body"].as_str().unwrap().to_string()
 }
 
+/// Poll the export endpoint until the materialised body equals `expected`.
+/// Ops are applied asynchronously to the HTTP surface, so tests must wait for
+/// the converged state instead of sleeping a fixed amount (a fixed sleep is
+/// exactly what flakes on slow CI runners). Panics with the last seen body if
+/// convergence does not happen within ~5s.
+async fn wait_export(addr: SocketAddr, token: &str, note_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..50 {
+        last = export_body(addr, token, note_id).await;
+        if last == expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("body never converged to {expected:?}; last seen: {last:?}");
+}
+
 const T1: &str = "2026-01-01T10:00:00Z";
 const T2: &str = "2026-01-01T10:00:01Z";
 const T3: &str = "2026-01-01T10:00:02Z";
@@ -309,9 +326,9 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     )
     .await;
 
-    // Give the server a moment to apply both, then check convergence.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(export_body(addr, &token_a, &note_id).await, "versión de B");
+    // Whichever order the server processed them in, the converged state is
+    // the same: B's edit wins the deterministic tiebreak.
+    wait_export(addr, &token_a, &note_id, "versión de B").await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -356,8 +373,10 @@ async fn stale_op_is_ignored(pool: PgPool) {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(export_body(addr, &token_a, &note_id).await, "v2");
+    // Ops on one connection apply in order, and the replay can never win its
+    // vv check (its writer component does not advance), so converging to "v2"
+    // proves the update applied and the replay was dropped.
+    wait_export(addr, &token_a, &note_id, "v2").await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -403,8 +422,7 @@ async fn move_reorders_lines(pool: PgPool) {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(export_body(addr, &token, &note_id).await, "tres\nuno\ndos");
+    wait_export(addr, &token, &note_id, "tres\nuno\ndos").await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]
