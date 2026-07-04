@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: keeplin-srv-postgres
+    environment:
+      POSTGRES_USER: keeplin
+      POSTGRES_PASSWORD: keeplin
+      POSTGRES_DB: keeplin
+    ports:
+      - "5432:5432"
+    volumes:
+      - keeplin-srv-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keeplin -d keeplin"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  keeplin-srv-pgdata:

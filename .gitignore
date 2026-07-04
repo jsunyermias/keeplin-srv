@@ -1,0 +1,29 @@
+# Rust
+/target
+
+# SQLx offline query cache (uncomment if using `cargo sqlx prepare`)
+# .sqlx
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy Node.js implementation
+legacy/node_modules/
+legacy/dist/
+legacy/data/
+legacy/*.tsbuildinfo
+legacy/*.log
+
+# Local clone of the Keeplin client (used for reference)
+keeplin/

@@ -1,0 +1,39 @@
+[package]
+name = "keeplin-srv"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+jsonwebtoken = "9"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "migrate",
+    "uuid",
+    "chrono",
+] }
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git" }
+argon2 = "0.5"
+password-hash = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+dotenvy = "0.15"
+async-trait = "0.1"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
