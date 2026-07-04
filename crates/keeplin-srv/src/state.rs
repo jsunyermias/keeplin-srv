@@ -1,18 +1,11 @@
-use std::sync::Arc;
-
 use sqlx::{Pool, Postgres};
-use tokio::sync::RwLock;
-use uuid::Uuid;
 
-use crate::{config::Config, store::Store, websocket::Room};
+use crate::{config::Config, store::Store, sync::SyncHub};
 
-pub type Rooms = RwLock<std::collections::HashMap<Uuid, Arc<Room>>>;
-
-#[derive(Clone)]
 pub struct AppState {
     pub config: Config,
     pub store: Store,
-    pub rooms: Arc<Rooms>,
+    pub hub: SyncHub,
 }
 
 impl AppState {
@@ -20,7 +13,7 @@ impl AppState {
         Self {
             config,
             store: Store::new(pool),
-            rooms: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            hub: SyncHub::default(),
         }
     }
 }
