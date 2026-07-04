@@ -1,110 +1,139 @@
-# keeplin-srv
+# Keeplin Server
 
-El servidor multiusuario de [Keeplin](https://github.com/jsunyermias/keeplin) con
-**edición colaborativa en tiempo real por líneas**: varios usuarios editan la misma
-nota simultáneamente, estilo Google Docs pero sobre Markdown, manteniendo los mismos
-conceptos que keeplin-core — `VersionVector`, `last_writer`, `updated_at` y
-tombstones con soft-delete. Sin bloqueos: la resolución es siempre por version
-vector (`note_log::resolve`), nunca por lock.
+The multi-user server for [Keeplin](https://github.com/jsunyermias/keeplin) with
+**real-time collaborative editing by lines**: several users edit the same note
+simultaneously, Google-Docs style but over Markdown, keeping the same concepts
+as keeplin-core — `VersionVector`, `last_writer`, `updated_at` and soft-delete
+tombstones. No locks anywhere: resolution is always by version vector
+(`note_log::resolve`), never by locking.
 
-Escrito en Rust (axum + PostgreSQL).
+Written in Rust (axum + PostgreSQL).
 
-## Modelo
+## Model
 
-- **La unidad de concurrencia es la línea.** Cada línea es una entidad versionada
-  independiente que se crea, edita, borra (tombstone) y resuelve por sí sola.
-- **El orden de líneas es otra entidad versionada** con su propio `vv`,
-  `updated_at` y `last_writer`. Contiene todos los `line_id`, incluidos los
-  borrados, hasta garbage collection.
-- **El servidor es broker y fuente de verdad duradera**: valida cada operación,
-  la resuelve contra el estado actual, la persiste y la reenvía a los demás
-  suscriptores de la nota. Los clientes son stateful y reconstruyen desde el
-  snapshot al (re)conectar — no hay log de operaciones infinito.
-- El `body` de una nota no se almacena: se materializa concatenando las líneas
-  vivas con `\n` para las lecturas REST no colaborativas.
+- **The unit of concurrency is the line.** Each line is an independently
+  versioned entity that is created, edited, deleted (tombstone) and resolved on
+  its own.
+- **The order of lines is another versioned entity** with its own `vv`,
+  `updated_at` and `last_writer`. It contains every `line_id`, deleted ones
+  included, until garbage collection.
+- **The server is the broker and the durable source of truth**: it validates
+  each operation, resolves it against current state, persists it and forwards
+  it to the note's other subscribers. Clients are stateful and rebuild from the
+  snapshot on (re)connect — there is no infinite op log.
+- A note's `body` is not stored: it is materialised by joining the live lines
+  with `\n` for non-collaborative REST reads.
 
-## Protocolo colaborativo (`GET /api/ws?token=<jwt>`)
+## Collaborative protocol (`GET /api/ws?token=<jwt>`)
 
-Mensajes JSON con campo `type`:
+JSON messages with a `type` field:
 
-- Cliente → servidor: `Join { note_id }`, `Leave { note_id }`,
+- Client → server: `Join { note_id }`, `Leave { note_id }`,
   `Op { note_id, ops: [LineOp…] }`, `Cursor { note_id, cursor }`, `Ack { server_seq }`.
-- Servidor → cliente: `Welcome { note_id, snapshot }` (orden versionado + todas las
-  líneas), `Op { server_seq, note_id, user_id, ops }`, `Presence { note_id, users }`,
+- Server → client: `Welcome { note_id, snapshot }` (versioned order + every
+  line), `Op { server_seq, note_id, user_id, ops }`, `Presence { note_id, users }`,
   `Error { code, message }`.
 
 `LineOp` (`op`): `Insert { after_line_id, line_id, content, vv, last_writer, updated_at }`,
-`Update`, `Delete` (tombstone) y `Move { line_ids, after_line_id, … }`. Cada operación
-lleva su propio `vv`; el servidor exige que el `last_writer` sea el usuario
-autenticado y que el vector avance el componente del escritor.
+`Update`, `Delete` (tombstone) and `Move { line_ids, after_line_id, … }`. Every
+operation carries its own `vv`; the server requires `last_writer` to be the
+authenticated user and the vector to advance the writer's component.
 
-**Resolución** (§5 del diseño): por línea, `resolve(local, incoming)` — la operación
-dominada se ignora; las concurrentes se deciden por el tiebreak determinista
-`(updated_at, last_writer)`, idéntico en todas las réplicas. `Insert`/`Move` se
-resuelven contra la entidad de orden.
+**Resolution** (design §5): per line, `resolve(local, incoming)` — a dominated
+operation is ignored; concurrent ones fall to the deterministic
+`(updated_at, last_writer)` tiebreak, identical on every replica. `Insert`/`Move`
+resolve against the order entity.
 
-**Límites**: 10 000 caracteres por línea, 100 000 líneas por nota, 1 MB por mensaje.
+**Limits**: 10,000 characters per line, 100,000 lines per note, 1 MB per message.
 
-## API REST
+## REST API
 
 - `GET /health`
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
 - `POST /api/devices` · `GET /api/devices` (Bearer)
-- `POST /api/notes` — `{ title }` · `GET /api/notes` — propias y compartidas
-- `GET /api/notes/:id` — metadatos + `body` materializado · `PATCH` (título) ·
-  `DELETE` (solo owner, borrado lógico)
+- `POST /api/notes` — `{ title }` · `GET /api/notes` — owned and shared
+- `GET /api/notes/:id` — metadata + materialised `body` · `PATCH` (title) ·
+  `DELETE` (owner only, soft delete)
 - `POST /api/notes/:id/share` — `{ user_id | user_email, role }` (`editor`/`viewer`,
-  solo owner) · `DELETE /api/notes/:id/share/:user_id`
-- `POST /api/import` — `{ title, body }` divide el body en líneas (migración
-  offline → server) · `GET /api/notes/:id/export` — concatena líneas vivas
+  owner only) · `DELETE /api/notes/:id/share/:user_id`
+- `POST /api/import` — `{ title, body }` splits the body into lines (offline →
+  server migration) · `GET /api/notes/:id/export` — joins the live lines
   (server → offline)
 
 ### Roles
 
-| Rol | Permisos |
-|-----|----------|
-| `owner` | leer, editar, compartir, borrar la nota |
-| `editor` | leer y editar |
-| `viewer` | unirse a la sesión y mirar; no puede enviar operaciones |
+| Role | Permissions |
+|------|-------------|
+| `owner` | read, edit, share, delete the note |
+| `editor` | read and edit |
+| `viewer` | join the session and watch; cannot send operations |
 
-## Relay de sincronización de dispositivos (`GET /api/sync`)
+## Device sync relay (`GET /api/sync`)
 
-Además del canal colaborativo, el servidor implementa el relay WebSocket que habla
-el `DbBackend` actual de keeplin-core (handshake `{"type":"auth","token"}` + sobres
-`{"type":"changes",…}`), con journal persistente, catch-up en diferido por cursor de
-dispositivo y dedupe de reintentos. Sirve para sincronizar los dispositivos de un
-mismo usuario mientras el modo colaborativo llega al daemon. Un login (un token) por
-dispositivo.
+Besides the collaborative channel, the server implements the WebSocket relay
+that keeplin-core's current `DbBackend` speaks (`{"type":"auth","token"}`
+handshake + `{"type":"changes",…}` envelopes), with a persistent journal,
+deferred catch-up via per-device cursors and retry deduplication. It syncs one
+user's devices while collaborative mode lands in the daemon. One login (one
+token) per device.
 
-## Requisitos
-
-- Rust >= 1.75
-- PostgreSQL 16 (o usar Docker Compose)
-
-## Arranque rápido
+### Connecting a keeplin-daemon
 
 ```bash
-docker compose up -d        # PostgreSQL
-cp .env.example .env        # cambia JWT_SECRET en producción
+# 1. Create an account (once)
+curl -X POST http://localhost:3000/api/register \
+  -H 'content-type: application/json' \
+  -d '{"email":"me@example.com","password":"long-secret"}'
+
+# 2. Get a token FOR EACH device (do not share the token across machines!)
+curl -X POST http://localhost:3000/api/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"me@example.com","password":"long-secret","device_name":"laptop"}'
+# → { "token": "…", "device_id": "…" }
+```
+
+In the daemon's `config.toml`:
+
+```toml
+mode = "server"
+server_url = "ws://localhost:3000/api/sync"   # wss:// in production
+auth_token = "<token from step 2>"
+```
+
+## Requirements
+
+- Rust >= 1.75
+- PostgreSQL 16 (or use Docker Compose)
+
+## Quick start
+
+```bash
+# 1. Start PostgreSQL
+docker compose up -d
+
+# 2. Copy environment variables
+cp .env.example .env   # change JWT_SECRET in production
+
+# 3. Build and run
 cargo run
 ```
 
-El servidor escucha en `http://localhost:3000`.
+The server listens on `http://localhost:3000`.
 
-## Variables de entorno
+## Environment variables
 
-| Variable | Por defecto | Descripción |
-|----------|-------------|-------------|
-| `PORT` | `3000` | Puerto HTTP/WS |
-| `DATABASE_URL` | — (obligatoria) | Conexión a PostgreSQL |
-| `JWT_SECRET` | valor de desarrollo | Secreto de firma de tokens; cámbialo |
-| `TOKEN_TTL_DAYS` | `365` | Vida de los tokens |
-| `CHANGES_RETENTION_DAYS` | `0` (desactivado) | Poda del journal del relay |
-| `RUST_LOG` | `info` | Nivel de log |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | HTTP/WS port |
+| `DATABASE_URL` | — (required) | PostgreSQL connection string |
+| `JWT_SECRET` | dev value | Token signing secret; change it |
+| `TOKEN_TTL_DAYS` | `365` | Token lifetime |
+| `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
+| `RUST_LOG` | `info` | Log level |
 
-En producción termina TLS en un reverse proxy (`wss://`) — el token viaja en la
-query / primer frame del WebSocket.
+In production terminate TLS at a reverse proxy (`wss://`) — the token travels in
+the WebSocket query string / first frame.
 
 ## Tests
 
@@ -113,12 +142,11 @@ export DATABASE_URL=postgres://keeplin:keeplin@127.0.0.1:5432/keeplin
 cargo test
 ```
 
-- `tests/collab.rs` — el protocolo colaborativo de extremo a extremo: Join/Welcome,
-  propagación de ops con `server_seq`, resolución determinista de ediciones
-  concurrentes, replays ignorados, Move, presencia con cursores, roles (viewer sin
-  escritura, extraños sin acceso), suplantación de `last_writer` rechazada e
-  import/export.
-- `tests/integration.rs` — el relay de dispositivos con el cliente real
-  (`DbBackend` de keeplin-core).
+- `tests/collab.rs` — the collaborative protocol end to end: Join/Welcome, op
+  propagation with `server_seq`, deterministic resolution of concurrent edits,
+  ignored replays, Move, presence with cursors, roles (viewer without write,
+  outsiders without access), forged `last_writer` rejection and import/export.
+- `tests/integration.rs` — the device relay with the real client
+  (keeplin-core's `DbBackend`).
 
-La CI (GitHub Actions) ejecuta fmt, check, tests contra Postgres 16 y clippy.
+CI (GitHub Actions) runs fmt, check, the tests against Postgres 16 and clippy.
