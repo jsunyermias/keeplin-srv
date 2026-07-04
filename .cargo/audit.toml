@@ -1,0 +1,10 @@
+# cargo-audit configuration.
+
+[advisories]
+# RUSTSEC-2023-0071 (Marvin timing side-channel in the `rsa` crate): `rsa`
+# appears in Cargo.lock only through sqlx-mysql, which sqlx's workspace pins
+# into the lockfile even though this crate enables only the `postgres`
+# feature — `cargo tree -i rsa` confirms it is absent from the compiled
+# dependency graph. No fixed `rsa` release exists yet; drop this ignore if
+# sqlx unpins it or a patched version ships.
+ignore = ["RUSTSEC-2023-0071"]
