@@ -5,6 +5,7 @@ pub mod error;
 pub mod http;
 pub mod permissions;
 pub mod protocol;
+pub mod ratelimit;
 pub mod state;
 pub mod store;
 pub mod sync;

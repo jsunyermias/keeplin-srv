@@ -35,16 +35,26 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/import", post(import_note))
         .layer(middleware::from_fn_with_state(state.clone(), auth::auth_mw));
 
-    Router::new()
-        .route("/health", get(health))
+    // Everything except `/health` sits behind the per-IP rate limiter, so
+    // orchestrator liveness probes are never throttled.
+    let limited = Router::new()
         .route("/api/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .merge(protected)
-        // Collaborative editing channel (design §7): auth token in the query.
+        // Collaborative editing channel (design §7): token in the
+        // Authorization header (preferred) or `?token=` (fallback).
         .route("/api/ws", get(crate::collab::handler))
         // Device sync relay for keeplin-core's DbBackend.
         .route("/api/sync", get(crate::sync::handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::rate_limit_mw,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(limited)
         .with_state(state)
 }
 

@@ -24,6 +24,13 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        db_max_connections: 5,
+        db_acquire_timeout_secs: 10,
+        db_idle_timeout_secs: 600,
+        db_max_lifetime_secs: 1800,
+        rate_limit_per_min: 0,
+        shutdown_grace_secs: 5,
+        log_json: false,
     }
 }
 
@@ -39,7 +46,12 @@ async fn spawn_server_with_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (addr, state)
 }
@@ -694,7 +706,23 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
         }),
     )
     .await;
-    wait_export(addr, &token, &note_id, "viva").await;
+    // Wait for the fully-settled state — 2 lines, exactly 1 tombstoned —
+    // before running GC. Polling the exported body is ambiguous here: it reads
+    // "viva" both after the first insert (before line 2 exists) and after the
+    // delete, so a fast poll could catch the intermediate state and GC before
+    // the tombstone exists. Polling the store's line set is unambiguous.
+    let note_uuid = note_id.parse().unwrap();
+    let mut settled = false;
+    for _ in 0..50 {
+        let lines = state.store.list_lines(note_uuid).await.unwrap();
+        let tombstones = lines.iter().filter(|l| l.deleted_at.is_some()).count();
+        if lines.len() == 2 && tombstones == 1 {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(settled, "delete never landed as a tombstone");
 
     // GC anything tombstoned more than 30 days ago: exactly one line.
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
@@ -735,4 +763,58 @@ async fn metrics_reports_counts(pool: PgPool) {
     assert_eq!(m["users"].as_i64().unwrap(), 1);
     assert_eq!(m["notes"].as_i64().unwrap(), 1);
     assert!(m["collab_sessions"].as_i64().is_some());
+}
+
+/// Spawn a server whose per-IP rate limit is `per_min` requests/minute.
+async fn spawn_rate_limited(pool: PgPool, per_min: u32) -> SocketAddr {
+    let mut cfg = test_config();
+    cfg.rate_limit_per_min = per_min;
+    let state = Arc::new(AppState::new(cfg, pool));
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
+    // Budget of 3 requests/minute from this IP.
+    let addr = spawn_rate_limited(pool, 3).await;
+    let client = reqwest::Client::new();
+
+    // The 4th rapid request to a limited route is throttled.
+    let mut statuses = Vec::new();
+    for _ in 0..5 {
+        let code = client
+            .get(format!("http://{addr}/api/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        statuses.push(code);
+    }
+    assert_eq!(statuses[0], 200);
+    assert_eq!(
+        statuses[4], 429,
+        "burst past the budget must be throttled: {statuses:?}"
+    );
+
+    // /health is never rate-limited — orchestrator probes must always pass.
+    for _ in 0..10 {
+        let code = client
+            .get(format!("http://{addr}/health"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(code, 200);
+    }
 }
