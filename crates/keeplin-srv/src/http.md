@@ -51,7 +51,19 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `import_note` / `export_note` | `/api/import`, `…/export` | split a flat body into versioned lines / join live lines |
 | `list_notebooks` / `list_tags` / `list_resources` | `GET /api/{notebooks,tags,resources}` | live entities the server materialised from the relay (for cold rehydration) |
 | `list_note_tags` | `GET /api/notes/:id/tags` | live tag ids attached to a note |
-| `get_resource_data` / `put_resource_data` | `GET`/`PUT /api/resources/:id/data` | download / upload the binary; `PUT` capped by `MAX_UPLOAD_BYTES` (413 over it), `404` if metadata is unknown |
+| `get_resource_data` / `put_resource_data` | `GET`/`PUT /api/resources/:id/data` | download / upload the binary; `PUT` capped by `MAX_UPLOAD_BYTES` (413 over it), `404` if metadata is unknown, `507` if it would exceed the user's storage quota |
+
+## Per-user quotas
+
+Two optional quotas (both `0` = off) are enforced at their REST write point, returning `507
+Insufficient Storage` (`AppError::QuotaExceeded`):
+
+- **`MAX_NOTES_PER_USER`** — `create_note` counts the user's live notes first and refuses past the
+  limit.
+- **`MAX_USER_STORAGE_BYTES`** — `put_resource_data` sums the user's other resource blobs and refuses
+  if adding the incoming body would exceed the limit (an overwrite is measured by its new size, not
+  double-counted). Blob byte totals and note counts come from `store` (`user_blob_bytes_excluding`,
+  `count_live_notes_for_user`).
 
 ## Body materialisation
 

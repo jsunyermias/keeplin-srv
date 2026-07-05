@@ -1215,4 +1215,38 @@ impl Store {
             .map(|r| r.get::<Uuid, _>("tag_id"))
             .collect())
     }
+
+    // ── Per-user quotas ──────────────────────────────────────────────────────
+
+    /// Total bytes of the user's resource binaries, excluding one resource id.
+    /// Excluding the resource being written means an overwrite is measured by
+    /// its new size, not double-counted.
+    pub async fn user_blob_bytes_excluding(
+        &self,
+        user_id: Uuid,
+        exclude: Uuid,
+    ) -> Result<i64, AppError> {
+        let bytes: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(SUM(octet_length(rb.data)), 0)::bigint
+               FROM resource_blobs rb
+               JOIN resources r ON r.id = rb.resource_id
+               WHERE r.user_id = $1 AND rb.resource_id <> $2"#,
+        )
+        .bind(user_id)
+        .bind(exclude)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(bytes)
+    }
+
+    /// Number of the user's live (non-deleted) owned notes.
+    pub async fn count_live_notes_for_user(&self, user_id: Uuid) -> Result<i64, AppError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE owner_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
 }

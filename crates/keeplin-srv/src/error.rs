@@ -25,6 +25,9 @@ pub enum AppError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -40,6 +43,7 @@ impl AppError {
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Conflict => StatusCode::CONFLICT,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
