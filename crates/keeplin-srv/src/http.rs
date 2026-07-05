@@ -20,6 +20,7 @@ use crate::{
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/api/devices", post(create_device).get(list_devices))
+        .route("/api/devices/:id", axum::routing::delete(delete_device))
         .route("/api/notes", post(create_note).get(list_notes))
         .route(
             "/api/notes/:id",
@@ -36,6 +37,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/api/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .merge(protected)
@@ -48,6 +50,23 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Aggregate operational counters: row counts plus live session/connection
+/// numbers. No per-user data.
+async fn metrics(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, AppError> {
+    let (users, notes, lines, tombstones) = state.store.counts().await?;
+    let (collab_sessions, collab_connections) = state.collab.stats().await;
+    let relay_users = state.hub.live_users().await;
+    Ok(Json(serde_json::json!({
+        "users": users,
+        "notes": notes,
+        "lines": lines,
+        "line_tombstones": tombstones,
+        "collab_sessions": collab_sessions,
+        "collab_connections": collab_connections,
+        "relay_live_users": relay_users,
+    })))
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -173,6 +192,19 @@ async fn create_device(
         device_id: device.id,
         device_name: device.device_name,
     }))
+}
+
+/// Revoke one of the caller's devices. Its token stops working immediately
+/// on REST and on both WebSocket channels.
+async fn delete_device(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.store.delete_device(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn list_devices(

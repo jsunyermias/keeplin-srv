@@ -71,6 +71,11 @@ pub struct SyncHub {
 }
 
 impl SyncHub {
+    /// Number of users with at least one live relay connection.
+    pub async fn live_users(&self) -> usize {
+        self.channels.read().await.len()
+    }
+
     /// Subscribe to a user's fan-out channel, creating it if needed. Returns
     /// the sender (to publish) and a fresh receiver (to consume).
     async fn join(

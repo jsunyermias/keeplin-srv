@@ -23,18 +23,25 @@ fn test_config() -> Config {
         jwt_secret: "test-secret".into(),
         token_ttl_days: 1,
         retention_days: 0,
+        lines_gc_days: 0,
     }
 }
 
 async fn spawn_server(pool: PgPool) -> SocketAddr {
+    spawn_server_with_state(pool).await.0
+}
+
+/// Like `spawn_server` but also hands back the state, for tests that poke the
+/// store directly (e.g. the tombstone GC).
+async fn spawn_server_with_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
     let state = Arc::new(AppState::new(test_config(), pool));
-    let app: Router = router(state);
+    let app: Router = router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    addr
+    (addr, state)
 }
 
 /// Register a user; returns (user_id, device_id, token) for a fresh device
@@ -581,4 +588,151 @@ async fn forged_writer_is_rejected(pool: PgPool) {
     .await;
     let err = recv_until(&mut ws_b, "Error", |v| v["type"] == "Error").await;
     assert_eq!(err["code"], "bad_writer");
+}
+
+// ── Production hardening ─────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn ws_accepts_authorization_header(pool: PgPool) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let addr = spawn_server(pool).await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "Header").await;
+
+    // No token in the query string: only the Authorization header.
+    let mut req = format!("ws://{addr}/api/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome via header auth", |v| {
+        v["type"] == "Welcome"
+    })
+    .await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleting_a_device_revokes_its_token(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
+    let client = reqwest::Client::new();
+
+    // Register a second device with its own token.
+    let second: Value = client
+        .post(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token)
+        .json(&json!({ "device_name": "stolen-phone" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_token = second["token"].as_str().unwrap();
+    let second_id = second["device_id"].as_str().unwrap();
+
+    // The second token works…
+    let ok = client
+        .get(format!("http://{addr}/api/devices"))
+        .bearer_auth(second_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // …until its device is revoked from the first device.
+    let del = client
+        .delete(format!("http://{addr}/api/devices/{second_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 200);
+
+    let denied = client
+        .get(format!("http://{addr}/api/devices"))
+        .bearer_auth(second_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn gc_compacts_old_tombstones(pool: PgPool) {
+    let (addr, state) = spawn_server_with_state(pool).await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "GC").await;
+
+    let mut ws = ws_connect(addr, &token).await;
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
+
+    // Two lines; the second is deleted with an old tombstone (T1 is months
+    // in the past, well beyond any GC window).
+    let l1 = uuid::Uuid::new_v4().to_string();
+    let l2 = uuid::Uuid::new_v4().to_string();
+    send(&mut ws, insert_op(&note_id, &l1, None, "viva", &did, 1, T1)).await;
+    send(
+        &mut ws,
+        insert_op(&note_id, &l2, Some(&l1), "muerta", &did, 2, T1),
+    )
+    .await;
+    send(
+        &mut ws,
+        json!({
+            "type": "Op",
+            "note_id": note_id,
+            "ops": [{
+                "op": "Delete",
+                "line_id": l2,
+                "deleted_at": T1,
+                "vv": { did.clone(): 3 },
+                "last_writer": did,
+                "updated_at": T2,
+            }],
+        }),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "viva").await;
+
+    // GC anything tombstoned more than 30 days ago: exactly one line.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let reclaimed = state.store.gc_line_tombstones(cutoff).await.unwrap();
+    assert_eq!(reclaimed, 1);
+
+    // The body is unchanged, the tombstone is gone from lines and order.
+    assert_eq!(export_body(addr, &token, &note_id).await, "viva");
+    let lines = state
+        .store
+        .list_lines(note_id.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(lines.len(), 1);
+    let order = state
+        .store
+        .get_note_order(note_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(order.order.len(), 1);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn metrics_reports_counts(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
+    create_note(addr, &token, "Contada").await;
+
+    let m: Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(m["users"].as_i64().unwrap(), 1);
+    assert_eq!(m["notes"].as_i64().unwrap(), 1);
+    assert!(m["collab_sessions"].as_i64().is_some());
 }

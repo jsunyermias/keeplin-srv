@@ -100,6 +100,13 @@ pub async fn auth_mw(
         .and_then(|h| h.strip_prefix("Bearer "))
         .ok_or(AppError::MissingToken)?;
     let user = verify_token(token, &state.config.jwt_secret)?;
+    // Deleting a device revokes its token immediately: the claim must still
+    // reference a live device of the same user, not just carry a valid
+    // signature.
+    match state.store.get_device(user.device_id).await? {
+        Some(device) if device.user_id == user.user_id => {}
+        _ => return Err(AppError::InvalidToken),
+    }
     req.extensions_mut().insert(user);
     Ok(next.run(req).await)
 }

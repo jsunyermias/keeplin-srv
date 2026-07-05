@@ -10,6 +10,9 @@ pub struct Config {
     /// Prune journal rows older than this many days once every device of the
     /// owning user has received them. `0` disables pruning.
     pub retention_days: u64,
+    /// Compact line tombstones soft-deleted more than this many days ago
+    /// (design §6.4). `0` disables the garbage collection.
+    pub lines_gc_days: u64,
 }
 
 impl Config {
@@ -30,6 +33,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
+            lines_gc_days: std::env::var("LINES_GC_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
         }
     }
 }
