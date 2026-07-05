@@ -34,6 +34,9 @@ pub struct Config {
     /// Emit logs as JSON (one object per line) instead of the human-readable
     /// pretty format. Turn on in production for log aggregation.
     pub log_json: bool,
+    /// Maximum size in bytes of a resource binary upload
+    /// (`PUT /api/resources/:id/data`). Larger bodies are rejected with `413`.
+    pub max_upload_bytes: usize,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -72,6 +75,7 @@ impl Config {
             rate_limit_per_min: env_parse("RATE_LIMIT_PER_MIN", 0),
             shutdown_grace_secs: env_parse("SHUTDOWN_GRACE_SECS", 20),
             log_json: env_parse("LOG_JSON", false),
+            max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 100 * 1024 * 1024),
         }
     }
 }

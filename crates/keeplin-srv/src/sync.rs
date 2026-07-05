@@ -311,6 +311,12 @@ async fn handle_incoming(
     }
     tracing::info!(%user_id, %device_id, %batch_id, count = inserted.len(), "batch persisted");
 
+    // Materialise the domain entities carried in this batch so the server is
+    // their source of truth (the client DB is a cache). Idempotent: resolution
+    // makes a re-applied change a no-op. Failures are logged, not fatal — the
+    // journal still holds the batch for relay, and a later change re-converges.
+    materialize(state, user_id, &changes).await;
+
     let frame = changes_frame(changes.iter());
     // Ignore the error: no other device is connected right now; they will get
     // the batch from the journal when they connect.
@@ -319,6 +325,118 @@ async fn handle_incoming(
         frame,
     }));
     Ok(())
+}
+
+/// Parse each relayed payload as a keeplin-core `Change` and materialise the
+/// domain entities the server owns (notebooks, tags, note↔tag associations,
+/// resource metadata). Note changes are handled by the collaborative channel
+/// (`/api/ws`), not here; anything that does not parse is ignored (opaque relay
+/// behaviour preserved for entities the server does not model).
+async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Value]) {
+    use keeplin_core::models::Change;
+    for payload in changes {
+        let change: Change = match serde_json::from_value(payload.clone()) {
+            Ok(change) => change,
+            Err(_) => continue,
+        };
+        let result = match change {
+            Change::NotebookCreate { notebook } | Change::NotebookUpdate { notebook } => state
+                .store
+                .upsert_notebook(user_id, &notebook)
+                .await
+                .map(drop),
+            Change::NotebookDelete {
+                id,
+                deleted_at,
+                vv,
+                last_writer,
+            } => state
+                .store
+                .delete_notebook(user_id, id, deleted_at, &vv, &last_writer)
+                .await
+                .map(drop),
+            Change::TagCreate { tag } | Change::TagUpdate { tag } => {
+                state.store.upsert_tag(user_id, &tag).await.map(drop)
+            }
+            Change::TagDelete {
+                id,
+                deleted_at,
+                vv,
+                last_writer,
+            } => state
+                .store
+                .delete_tag(user_id, id, deleted_at, &vv, &last_writer)
+                .await
+                .map(drop),
+            Change::NoteTagAdd {
+                note_id,
+                tag_id,
+                updated_at,
+                vv,
+                last_writer,
+            } => state
+                .store
+                .upsert_note_tag(
+                    user_id,
+                    note_id,
+                    tag_id,
+                    updated_at,
+                    None,
+                    &vv,
+                    &last_writer,
+                )
+                .await
+                .map(drop),
+            Change::NoteTagRemove {
+                note_id,
+                tag_id,
+                updated_at,
+                vv,
+                last_writer,
+            } => state
+                .store
+                .upsert_note_tag(
+                    user_id,
+                    note_id,
+                    tag_id,
+                    updated_at,
+                    Some(updated_at),
+                    &vv,
+                    &last_writer,
+                )
+                .await
+                .map(drop),
+            Change::ResourceCreate { resource, data } => {
+                match state.store.upsert_resource_meta(user_id, &resource).await {
+                    // Backward compatibility: an older client that still ships
+                    // the binary inside the change gets it stored here. New
+                    // clients upload via `PUT /api/resources/:id/data` and send
+                    // `data: None`.
+                    Ok(true) => match data {
+                        Some(bytes) => state.store.put_resource_blob(resource.id, &bytes).await,
+                        None => Ok(()),
+                    },
+                    Ok(false) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+            Change::ResourceDelete {
+                id,
+                deleted_at,
+                vv,
+                last_writer,
+            } => state
+                .store
+                .delete_resource(id, deleted_at, &vv, &last_writer)
+                .await
+                .map(drop),
+            // Note* changes are materialised by the collaborative channel.
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = %e, %user_id, "materialize: failed to apply change");
+        }
+    }
 }
 
 /// Serialise payloads into the `{"type":"changes","changes":[…]}` frame the

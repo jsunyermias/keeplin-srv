@@ -24,6 +24,7 @@ helper.
 | `RATE_LIMIT_PER_MIN` | `rate_limit_per_min` | `0` (off) | Per-client-IP request budget/minute |
 | `SHUTDOWN_GRACE_SECS` | `shutdown_grace_secs` | `20` | Drain window before force-exit |
 | `LOG_JSON` | `log_json` | `false` | Emit JSON logs (one object/line) |
+| `MAX_UPLOAD_BYTES` | `max_upload_bytes` | `104857600` (100 MiB) | Max size of a resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
 
 ## Notes & gotchas
 

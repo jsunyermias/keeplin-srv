@@ -16,6 +16,8 @@ and the two WebSocket engines call `Store`; nothing else touches the database.
 | `Line`, `NoteOrder` | struct | a collaborative line and a note's versioned line order |
 | `NotePatch` | struct | partial note-metadata update (absent = unchanged, `Some(None)` = clear) |
 | `ChangeRow` | struct | one relay-journal row fetched for delivery |
+| `Notebook`, `Tag`, `ResourceMeta` | struct (`FromRow`) | REST row mappings for the materialised domain entities |
+| `incoming_wins` (fn) | free fn | wraps keeplin-core's `note_log::resolve` so materialisation picks the same winner as clients |
 
 ## Public API (by area)
 
@@ -29,6 +31,11 @@ token), `touch_device` (last-seen).
 **Shares**: `create_or_update_share`, `get_share`, `delete_share`.
 **Lines**: `get_line`, `list_lines`, `insert_line`, `update_line`, `soft_delete_line`.
 **Line order**: `get_note_order`, `set_note_order`.
+**Domain entities** (materialised from the relay, server = truth): `upsert_notebook` / `delete_notebook`,
+`upsert_tag` / `delete_tag`, `upsert_note_tag` (add/remove), `upsert_resource_meta` / `delete_resource`,
+`put_resource_blob` / `get_resource_blob` / `resource_owned_by`, and the reads `list_notebooks`,
+`list_tags`, `list_resources`, `list_note_tag_ids`. Each write resolves via `incoming_wins` under a
+`SELECT … FOR UPDATE` lock.
 **Maintenance / metrics**: `gc_line_tombstones`, `counts`.
 
 ## Database schema
@@ -39,12 +46,17 @@ Owned by the SQL migrations, documented in `migrations/*.md`:
 - `changes`, `device_cursors` (0001) — the relay journal and per-device watermarks.
 - `notes`, `lines`, `note_line_order`, `note_shares` (0002) — the collaborative note model.
 - `notes.notebook_id` + to-do columns (0003) — full note metadata the server stores.
+- `notebooks`, `tags`, `note_tags`, `resources`, `resource_blobs` (0004) — the domain entities the
+  server materialises from the relay so it is their source of truth.
 
 ## Design notes
 
-- **Version metadata is opaque here**: `vv` columns are `JSONB` mapping device-id → counter;
-  `Store` reads/writes them but the *resolution* rule (`note_log::resolve`) lives in `collab.rs`.
-  The store is deliberately mechanism-free — it persists, it does not decide who wins.
+- **Resolution**: for the collaborative line/order rows the store is mechanism-free — `vv` columns
+  are `JSONB` it reads/writes, and `collab.rs` decides who wins. For the domain entities materialised
+  from the relay (notebooks/tags/associations/resources) the store *does* resolve, via `incoming_wins`
+  (a thin wrapper over keeplin-core's `note_log::resolve`), under a `SELECT … FOR UPDATE` lock so
+  concurrent updates to one entity serialise. Each such id is created on a single device, so the
+  not-yet-present branch cannot race another creator.
 - `create_note` accepts a client-supplied id so a daemon uploading a local note keeps the same
   id; a duplicate maps to `AppError::Conflict` via the unique-violation branch.
 - `update_note_meta` uses `COALESCE`/`CASE` so an absent field is untouched while an explicit

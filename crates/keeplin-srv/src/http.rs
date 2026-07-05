@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, State},
+    http::header,
     middleware,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -14,10 +17,19 @@ use crate::{
     error::AppError,
     permissions::resolve_role,
     state::AppState,
-    store::{Note, NoteShare, User, UserDevice},
+    store::{Note, NoteShare, Notebook, ResourceMeta, Tag, User, UserDevice},
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // Resource binary upload/download carries a raised body limit (metadata and
+    // JSON routes keep axum's small default).
+    let resource_data = Router::new()
+        .route(
+            "/api/resources/:id/data",
+            get(get_resource_data).put(put_resource_data),
+        )
+        .layer(DefaultBodyLimit::max(state.config.max_upload_bytes));
+
     let protected = Router::new()
         .route("/api/devices", post(create_device).get(list_devices))
         .route("/api/devices/:id", axum::routing::delete(delete_device))
@@ -33,6 +45,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/notes/:id/export", get(export_note))
         .route("/api/import", post(import_note))
+        // Domain entities the server materialises from the relay (read side for
+        // cold rehydration / queries; writes still arrive over `/api/sync`).
+        .route("/api/notebooks", get(list_notebooks))
+        .route("/api/tags", get(list_tags))
+        .route("/api/resources", get(list_resources))
+        .route("/api/notes/:id/tags", get(list_note_tags))
+        .merge(resource_data)
         .layer(middleware::from_fn_with_state(state.clone(), auth::auth_mw));
 
     // Everything except `/health` sits behind the per-IP rate limiter, so
@@ -223,6 +242,79 @@ async fn list_devices(
 ) -> Result<Json<Vec<UserDevice>>, AppError> {
     let devices = state.store.list_devices_by_user(user.user_id).await?;
     Ok(Json(devices))
+}
+
+// ── Domain entities (server = source of truth; client DB is a cache) ─────────
+
+/// Live notebooks of the authenticated user, for cold rehydration.
+async fn list_notebooks(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<Vec<Notebook>>, AppError> {
+    Ok(Json(state.store.list_notebooks(user.user_id).await?))
+}
+
+/// Live tags of the authenticated user.
+async fn list_tags(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<Vec<Tag>>, AppError> {
+    Ok(Json(state.store.list_tags(user.user_id).await?))
+}
+
+/// Live resource metadata of the authenticated user. Binaries are fetched
+/// separately via `GET /api/resources/:id/data`.
+async fn list_resources(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<Vec<ResourceMeta>>, AppError> {
+    Ok(Json(state.store.list_resources(user.user_id).await?))
+}
+
+/// Live tag ids attached to a note.
+async fn list_note_tags(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(note_id): Path<Uuid>,
+) -> Result<Json<Vec<Uuid>>, AppError> {
+    Ok(Json(
+        state.store.list_note_tag_ids(user.user_id, note_id).await?,
+    ))
+}
+
+/// Download a resource's binary payload. The bytes are opaque (encrypted by the
+/// client), so the content type is generic; the client already has the real
+/// MIME type from the resource metadata.
+async fn get_resource_data(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    if !state.store.resource_owned_by(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    let data = state
+        .store
+        .get_resource_blob(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], data))
+}
+
+/// Upload (or replace) a resource's binary payload out-of-band. The resource
+/// metadata must already exist for this user (it arrives over `/api/sync`); the
+/// body is the raw bytes, capped by `MAX_UPLOAD_BYTES`.
+async fn put_resource_data(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.store.resource_owned_by(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    state.store.put_resource_blob(id, &body).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────────

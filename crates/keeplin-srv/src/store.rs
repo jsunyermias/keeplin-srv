@@ -93,6 +93,65 @@ pub struct ChangeRow {
     pub payload: serde_json::Value,
 }
 
+/// A notebook as served over REST (metadata only; `vv`/`last_writer` are
+/// internal to resolution and not exposed).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Notebook {
+    pub id: Uuid,
+    pub title: String,
+    pub alias: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Tag {
+    pub id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Resource metadata as served over REST. The binary payload is fetched
+/// separately from `resource_blobs` via `GET /api/resources/:id/data`.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ResourceMeta {
+    pub id: Uuid,
+    pub title: String,
+    pub mime_type: String,
+    pub file_name: String,
+    pub size: i64,
+    pub created_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Decide whether an `incoming` versioned write should replace the stored one,
+/// reusing keeplin-core's exact resolution (dominates + `(timestamp, device)`
+/// tiebreak) so the server converges to the same winner as every client.
+fn incoming_wins(
+    local_vv: &VersionVector,
+    local_ts: DateTime<Utc>,
+    local_writer: &str,
+    incoming_vv: &VersionVector,
+    incoming_ts: DateTime<Utc>,
+    incoming_writer: &str,
+) -> bool {
+    use keeplin_core::storage::note_log::{resolve, Winner};
+    matches!(
+        resolve(
+            local_vv,
+            local_ts,
+            local_writer,
+            incoming_vv,
+            incoming_ts,
+            incoming_writer,
+        ),
+        Winner::Incoming
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: Pool<Postgres>,
@@ -700,5 +759,460 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // ── Domain entities materialised from the relay ──────────────────────────
+    //
+    // notebooks, tags, note↔tag associations and resource metadata arrive as
+    // `Change`s over `/api/sync`; the relay materialises them here so the server
+    // is their durable source of truth (the client DB is a cache). Every write
+    // resolves against the stored row with the exact keeplin-core rule, under a
+    // `SELECT … FOR UPDATE` lock so concurrent updates to the same entity are
+    // serialised. Each entity id is created on a single device, so the
+    // not-yet-present branch cannot race another creator.
+
+    /// Apply a notebook create/update if it wins resolution. Returns whether it
+    /// was written.
+    pub async fn upsert_notebook(
+        &self,
+        user_id: Uuid,
+        nb: &keeplin_core::models::Notebook,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(row) = sqlx::query(
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(nb.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("updated_at"),
+                &row.get::<String, _>("last_writer"),
+                &nb.vv,
+                nb.updated_at,
+                &nb.last_writer,
+            ) {
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            r#"INSERT INTO notebooks
+                   (id, user_id, title, alias, created_at, updated_at, deleted_at, vv, last_writer)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (id) DO UPDATE SET
+                   title = EXCLUDED.title, alias = EXCLUDED.alias,
+                   updated_at = EXCLUDED.updated_at, deleted_at = EXCLUDED.deleted_at,
+                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer"#,
+        )
+        .bind(nb.id)
+        .bind(user_id)
+        .bind(&nb.title)
+        .bind(&nb.alias)
+        .bind(nb.created_at)
+        .bind(nb.updated_at)
+        .bind(nb.deleted_at)
+        .bind(Json(&nb.vv))
+        .bind(&nb.last_writer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Apply a notebook tombstone if it wins. An unknown notebook gets a minimal
+    /// tombstone so a later stale create/update cannot resurrect it.
+    pub async fn delete_notebook(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let existed = if let Some(row) = sqlx::query(
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("updated_at"),
+                &row.get::<String, _>("last_writer"),
+                vv,
+                deleted_at,
+                last_writer,
+            ) {
+                return Ok(false);
+            }
+            true
+        } else {
+            false
+        };
+        if existed {
+            sqlx::query(
+                "UPDATE notebooks SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+            )
+            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .execute(&mut *tx).await?;
+        } else {
+            sqlx::query(
+                r#"INSERT INTO notebooks (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer)
+                   VALUES ($1, $2, '', $3, $3, $3, $4, $5)
+                   ON CONFLICT (id) DO NOTHING"#,
+            )
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn upsert_tag(
+        &self,
+        user_id: Uuid,
+        tag: &keeplin_core::models::Tag,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(row) =
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+                .bind(tag.id)
+                .fetch_optional(&mut *tx)
+                .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("updated_at"),
+                &row.get::<String, _>("last_writer"),
+                &tag.vv,
+                tag.updated_at,
+                &tag.last_writer,
+            ) {
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (id) DO UPDATE SET
+                   title = EXCLUDED.title, updated_at = EXCLUDED.updated_at,
+                   deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
+                   last_writer = EXCLUDED.last_writer"#,
+        )
+        .bind(tag.id)
+        .bind(user_id)
+        .bind(&tag.title)
+        .bind(tag.created_at)
+        .bind(tag.updated_at)
+        .bind(tag.deleted_at)
+        .bind(Json(&tag.vv))
+        .bind(&tag.last_writer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn delete_tag(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let existed = if let Some(row) =
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("updated_at"),
+                &row.get::<String, _>("last_writer"),
+                vv,
+                deleted_at,
+                last_writer,
+            ) {
+                return Ok(false);
+            }
+            true
+        } else {
+            false
+        };
+        if existed {
+            sqlx::query(
+                "UPDATE tags SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+            )
+            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .execute(&mut *tx).await?;
+        } else {
+            sqlx::query(
+                r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer)
+                   VALUES ($1, $2, '', $3, $3, $3, $4, $5)
+                   ON CONFLICT (id) DO NOTHING"#,
+            )
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Apply a note↔tag add (`deleted_at = None`) or remove (`Some`) if it wins.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_note_tag(
+        &self,
+        user_id: Uuid,
+        note_id: Uuid,
+        tag_id: Uuid,
+        updated_at: DateTime<Utc>,
+        deleted_at: Option<DateTime<Utc>>,
+        vv: &VersionVector,
+        last_writer: &str,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(row) = sqlx::query(
+            "SELECT vv, updated_at, last_writer FROM note_tags
+             WHERE user_id = $1 AND note_id = $2 AND tag_id = $3 FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .bind(tag_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("updated_at"),
+                &row.get::<String, _>("last_writer"),
+                vv,
+                updated_at,
+                last_writer,
+            ) {
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            r#"INSERT INTO note_tags (user_id, note_id, tag_id, updated_at, deleted_at, vv, last_writer)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (user_id, note_id, tag_id) DO UPDATE SET
+                   updated_at = EXCLUDED.updated_at, deleted_at = EXCLUDED.deleted_at,
+                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer"#,
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .bind(tag_id)
+        .bind(updated_at)
+        .bind(deleted_at)
+        .bind(Json(vv))
+        .bind(last_writer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Apply resource metadata (create) if it wins. The binary payload is
+    /// uploaded separately; resolution uses `deleted_at ?? created_at` as the
+    /// timestamp, matching keeplin-core (resources carry no `updated_at`).
+    pub async fn upsert_resource_meta(
+        &self,
+        user_id: Uuid,
+        r: &keeplin_core::models::Resource,
+    ) -> Result<bool, AppError> {
+        let incoming_ts = r.deleted_at.unwrap_or(r.created_at);
+        let mut tx = self.pool.begin().await?;
+        if let Some(row) = sqlx::query(
+            "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
+             FROM resources WHERE id = $1 FOR UPDATE",
+        )
+        .bind(r.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &lvv,
+                row.get("ts"),
+                &row.get::<String, _>("last_writer"),
+                &r.vv,
+                incoming_ts,
+                &r.last_writer,
+            ) {
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            r#"INSERT INTO resources
+                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               ON CONFLICT (id) DO UPDATE SET
+                   title = EXCLUDED.title, mime_type = EXCLUDED.mime_type,
+                   file_name = EXCLUDED.file_name, size = EXCLUDED.size,
+                   deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
+                   last_writer = EXCLUDED.last_writer"#,
+        )
+        .bind(r.id)
+        .bind(user_id)
+        .bind(&r.title)
+        .bind(&r.mime_type)
+        .bind(&r.file_name)
+        .bind(r.size as i64)
+        .bind(r.created_at)
+        .bind(r.deleted_at)
+        .bind(Json(&r.vv))
+        .bind(&r.last_writer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn delete_resource(
+        &self,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+    ) -> Result<bool, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let Some(row) = sqlx::query(
+            "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
+             FROM resources WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            // Unknown resource: nothing to tombstone here. A later create will
+            // arrive with its own vv and resolve normally.
+            return Ok(false);
+        };
+        let lvv = row.get::<Json<VersionVector>, _>("vv").0;
+        if !incoming_wins(
+            &lvv,
+            row.get("ts"),
+            &row.get::<String, _>("last_writer"),
+            vv,
+            deleted_at,
+            last_writer,
+        ) {
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE resources SET deleted_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(deleted_at)
+        .bind(Json(vv))
+        .bind(last_writer)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Store (or replace) a resource's binary payload. The resource metadata
+    /// must already exist (enforced by the FK).
+    pub async fn put_resource_blob(&self, resource_id: Uuid, data: &[u8]) -> Result<(), AppError> {
+        sqlx::query(
+            r#"INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2)
+               ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
+        )
+        .bind(resource_id)
+        .bind(data)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_resource_blob(&self, resource_id: Uuid) -> Result<Option<Vec<u8>>, AppError> {
+        let row = sqlx::query("SELECT data FROM resource_blobs WHERE resource_id = $1")
+            .bind(resource_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<Vec<u8>, _>("data")))
+    }
+
+    /// Does a resource metadata row exist for this user (used to authorise a
+    /// blob upload/download)?
+    pub async fn resource_owned_by(
+        &self,
+        resource_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
+        let row = sqlx::query("SELECT 1 FROM resources WHERE id = $1 AND user_id = $2")
+            .bind(resource_id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    // ── Domain entity reads (cold rehydration / queries) ─────────────────────
+
+    pub async fn list_notebooks(&self, user_id: Uuid) -> Result<Vec<Notebook>, AppError> {
+        Ok(sqlx::query_as::<_, Notebook>(
+            "SELECT id, title, alias, created_at, updated_at, deleted_at
+             FROM notebooks WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn list_tags(&self, user_id: Uuid) -> Result<Vec<Tag>, AppError> {
+        Ok(sqlx::query_as::<_, Tag>(
+            "SELECT id, title, created_at, updated_at, deleted_at
+             FROM tags WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn list_resources(&self, user_id: Uuid) -> Result<Vec<ResourceMeta>, AppError> {
+        Ok(sqlx::query_as::<_, ResourceMeta>(
+            "SELECT id, title, mime_type, file_name, size, created_at, deleted_at
+             FROM resources WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Live tag ids attached to a note (association present and both ends live).
+    pub async fn list_note_tag_ids(
+        &self,
+        user_id: Uuid,
+        note_id: Uuid,
+    ) -> Result<Vec<Uuid>, AppError> {
+        let rows = sqlx::query(
+            r#"SELECT nt.tag_id FROM note_tags nt
+               JOIN tags t ON t.id = nt.tag_id
+               WHERE nt.user_id = $1 AND nt.note_id = $2
+                 AND nt.deleted_at IS NULL AND t.deleted_at IS NULL
+               ORDER BY nt.updated_at"#,
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<Uuid, _>("tag_id"))
+            .collect())
     }
 }
