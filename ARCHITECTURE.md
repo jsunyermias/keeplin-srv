@@ -17,7 +17,7 @@ port:
 |---------|------|---------|
 | **REST/JSON** | `/api/*` | accounts, devices, notes CRUD, sharing, import/export, metrics |
 | **Collaborative channel** | `GET /api/ws` | real-time line editing (design §7): `Join`/`Op`/`Cursor` ↔ `Welcome`/`Op`/`Presence` |
-| **Device sync relay** | `GET /api/sync` | keeplin-core's `DbBackend` wire protocol for notebooks/tags/resources |
+| **Device sync relay** | `GET /api/sync` | keeplin-core's `DbBackend` wire protocol; also **materialises** notebooks/tags/resources into server tables (server = truth, client DB = cache) |
 
 ---
 
@@ -36,6 +36,9 @@ Everything lives in PostgreSQL; the schema is versioned SQL migrations (`migrati
 - **`note_shares`** — who may enter a note, with role `editor`/`viewer` (owner is implicit).
 - **`changes`** + **`device_cursors`** — the relay's durable journal and per-device delivery
   watermarks for `/api/sync`.
+- **`notebooks`**, **`tags`**, **`note_tags`**, **`resources`** (+ **`resource_blobs`**) — the
+  domain entities the relay materialises from `Change`s, so the server (not the client) is their
+  source of truth. Resolved by version vector on write; served over REST for cold rehydration.
 
 **Conflict resolution** is by **version vectors** with a deterministic `(timestamp,
 device_id)` tiebreak, reusing keeplin-core's `note_log::resolve`. No locks; every replica

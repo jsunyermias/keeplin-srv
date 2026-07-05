@@ -37,6 +37,7 @@ fn test_config() -> Config {
         rate_limit_per_min: 0,
         shutdown_grace_secs: 5,
         log_json: false,
+        max_upload_bytes: 100 * 1024 * 1024,
     }
 }
 

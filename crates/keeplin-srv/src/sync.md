@@ -24,8 +24,19 @@ Exactly what `DbBackend::connect_ws` / `send_changes` / `receive_changes` speak:
 3. Server delivers `{"type":"changes","changes":[Change…]}` — first the **backlog** the device
    has not seen, then live batches from the user's other devices. The sender is never echoed.
 
-`Change` payloads are treated as **opaque JSON**: the relay stores and forwards them without
-interpreting keeplin-core's model, so client model evolution never needs a server change.
+`Change` payloads are stored and forwarded without the relay needing to understand them, so client
+model evolution never needs a server change. On top of that pass-through the relay also
+**materialises** the entities the server owns (see below); anything it does not model stays opaque.
+
+## Materialisation (`materialize`)
+
+After a batch is journaled and before fan-out, `materialize` parses each `Change` and, for the
+entities the server is the source of truth for — notebooks, tags, note↔tag associations and resource
+metadata — resolves it by version vector against the stored row and upserts it (via `store`). It
+reuses keeplin-core's `note_log::resolve`, so the server converges to the **same winner** every
+client does. This is what lets a wiped device rehydrate from REST and lets the journal be pruned
+safely. Notes are excluded (they are materialised by `/api/ws`); a `ResourceCreate` still carrying a
+binary has it stored to `resource_blobs` (backward compatibility). Failures are logged, not fatal.
 
 ## Delivery mechanism
 
@@ -49,6 +60,7 @@ interpreting keeplin-core's model, so client model evolution never needs a serve
 
 ## Related files
 
-- `store.md` — `append_changes`, `changes_after`, `get_cursor`, `advance_cursor`, `prune_delivered_changes`.
+- `store.md` — `append_changes`, cursors, pruning, and the `upsert_*`/`delete_*` materialisation methods.
+- `../../../migrations/0004_domain_entities.md` — the tables `materialize` writes into.
 - `collab.md` — the sibling WebSocket surface for notes.
 - `keeplin/keeplin-core/src/storage/db.md` — the client end of this protocol.
