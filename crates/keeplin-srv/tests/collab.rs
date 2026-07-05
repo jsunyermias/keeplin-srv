@@ -706,7 +706,23 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
         }),
     )
     .await;
-    wait_export(addr, &token, &note_id, "viva").await;
+    // Wait for the fully-settled state — 2 lines, exactly 1 tombstoned —
+    // before running GC. Polling the exported body is ambiguous here: it reads
+    // "viva" both after the first insert (before line 2 exists) and after the
+    // delete, so a fast poll could catch the intermediate state and GC before
+    // the tombstone exists. Polling the store's line set is unambiguous.
+    let note_uuid = note_id.parse().unwrap();
+    let mut settled = false;
+    for _ in 0..50 {
+        let lines = state.store.list_lines(note_uuid).await.unwrap();
+        let tombstones = lines.iter().filter(|l| l.deleted_at.is_some()).count();
+        if lines.len() == 2 && tombstones == 1 {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(settled, "delete never landed as a tombstone");
 
     // GC anything tombstoned more than 30 days ago: exactly one line.
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
