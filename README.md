@@ -133,7 +133,19 @@ The server listens on `http://localhost:3000`.
 | `TOKEN_TTL_DAYS` | `365` | Token lifetime |
 | `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
 | `LINES_GC_DAYS` | `30` | Compact line tombstones older than N days (`0` disables) |
+| `DB_MAX_CONNECTIONS` | `10` | PostgreSQL pool size |
+| `DB_ACQUIRE_TIMEOUT_SECS` | `10` | Fail a request instead of blocking forever when the pool is exhausted |
+| `DB_IDLE_TIMEOUT_SECS` | `600` | Reap idle pooled connections |
+| `DB_MAX_LIFETIME_SECS` | `1800` | Recycle pooled connections after this age |
+| `RATE_LIMIT_PER_MIN` | `0` (disabled) | Per-client-IP request budget/minute; leave `0` behind a proxy and limit there |
+| `SHUTDOWN_GRACE_SECS` | `20` | Drain window on SIGTERM/Ctrl-C before force-exit |
+| `LOG_JSON` | `false` | Emit JSON logs (one object/line) for aggregation |
 | `RUST_LOG` | `info` | Log level |
+
+The server drains in-flight requests on `SIGTERM`/`Ctrl-C` (bounded by
+`SHUTDOWN_GRACE_SECS`, since collaborative WebSockets are long-lived), so it is
+safe under systemd/Kubernetes rolling restarts. `/health` is never rate-limited
+so liveness probes always pass.
 
 In production terminate TLS at a reverse proxy (`wss://`). The collaborative
 channel accepts the token in the `Authorization: Bearer` header (preferred —

@@ -30,6 +30,13 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        db_max_connections: 5,
+        db_acquire_timeout_secs: 10,
+        db_idle_timeout_secs: 600,
+        db_max_lifetime_secs: 1800,
+        rate_limit_per_min: 0,
+        shutdown_grace_secs: 5,
+        log_json: false,
     }
 }
 
@@ -39,7 +46,12 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     addr
 }

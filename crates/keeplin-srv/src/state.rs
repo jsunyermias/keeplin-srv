@@ -1,6 +1,8 @@
 use sqlx::{Pool, Postgres};
 
-use crate::{collab::CollabRegistry, config::Config, store::Store, sync::SyncHub};
+use crate::{
+    collab::CollabRegistry, config::Config, ratelimit::RateLimiter, store::Store, sync::SyncHub,
+};
 
 pub struct AppState {
     pub config: Config,
@@ -9,15 +11,19 @@ pub struct AppState {
     pub hub: SyncHub,
     /// Per-note collaborative sessions (`/api/ws`).
     pub collab: CollabRegistry,
+    /// Per-IP request rate limiter (a no-op when disabled).
+    pub rate_limiter: RateLimiter,
 }
 
 impl AppState {
     pub fn new(config: Config, pool: Pool<Postgres>) -> Self {
+        let rate_limiter = RateLimiter::new(config.rate_limit_per_min);
         Self {
             config,
             store: Store::new(pool),
             hub: SyncHub::default(),
             collab: CollabRegistry::default(),
+            rate_limiter,
         }
     }
 }

@@ -28,7 +28,7 @@ keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git" }
 argon2 = "0.5"
 password-hash = "0.5"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "1"
 dotenvy = "0.15"
