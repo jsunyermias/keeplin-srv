@@ -24,7 +24,10 @@ sqlx = { version = "0.8", features = [
 ] }
 # Reuses the version-vector conflict resolution (`note_log::resolve`) so the
 # collaborative line editing converges exactly like keeplin-core entities.
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git" }
+# Pinned to a specific commit for reproducible builds: an unpinned git dep would
+# silently follow keeplin's default branch and could break the wire protocol
+# without a code change here. Bump this `rev` deliberately to adopt newer keeplin.
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "9c884e7f15851409740307ff624799156f2f64ab" }
 argon2 = "0.5"
 password-hash = "0.5"
 tracing = "0.1"

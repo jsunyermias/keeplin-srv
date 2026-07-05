@@ -16,5 +16,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Builds the server image (Dockerfile) and runs it against the Postgres above.
+  # Dev/demo defaults — override JWT_SECRET (and put TLS in front) for real use.
+  server:
+    build: .
+    container_name: keeplin-srv
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://keeplin:keeplin@postgres:5432/keeplin
+      JWT_SECRET: change_this_to_a_long_random_secret
+      LOG_JSON: "true"
+      RUST_LOG: info
+    ports:
+      - "3000:3000"
+
 volumes:
   keeplin-srv-pgdata:

@@ -111,8 +111,8 @@ auth_token = "<token from step 2>"
 ## Quick start
 
 ```bash
-# 1. Start PostgreSQL
-docker compose up -d
+# 1. Start PostgreSQL only
+docker compose up -d postgres
 
 # 2. Copy environment variables
 cp .env.example .env   # change JWT_SECRET in production
@@ -122,6 +122,28 @@ cargo run
 ```
 
 The server listens on `http://localhost:3000`.
+
+## Docker
+
+A multi-stage `Dockerfile` produces a small, self-contained image (migrations are
+embedded into the binary, so nothing else is copied; runs as a non-root user).
+The `keeplin-core` git dependency is **pinned by commit** in `Cargo.toml` for
+reproducible builds — bump that `rev` to adopt newer keeplin.
+
+```bash
+# Whole stack (Postgres + server) for a local/demo run:
+docker compose up --build
+
+# Or just the image:
+docker build -t keeplin-srv .
+docker run --rm -p 3000:3000 \
+  -e DATABASE_URL=postgres://user:pass@host:5432/keeplin \
+  -e JWT_SECRET=$(openssl rand -hex 32) \
+  keeplin-srv
+```
+
+The Compose defaults are dev/demo only — override `JWT_SECRET`, use real Postgres
+credentials, and put a TLS reverse proxy in front for production.
 
 ## Environment variables
 
@@ -140,6 +162,7 @@ The server listens on `http://localhost:3000`.
 | `RATE_LIMIT_PER_MIN` | `0` (disabled) | Per-client-IP request budget/minute; leave `0` behind a proxy and limit there |
 | `SHUTDOWN_GRACE_SECS` | `20` | Drain window on SIGTERM/Ctrl-C before force-exit |
 | `LOG_JSON` | `false` | Emit JSON logs (one object/line) for aggregation |
+| `MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Max size of a resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
 | `RUST_LOG` | `info` | Log level |
 
 The server drains in-flight requests on `SIGTERM`/`Ctrl-C` (bounded by
