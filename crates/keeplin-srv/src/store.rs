@@ -193,6 +193,18 @@ impl Store {
         Ok(devices)
     }
 
+    /// Delete one of `user_id`'s devices, revoking its token immediately
+    /// (the auth middleware and both WebSocket handshakes re-check device
+    /// existence). Returns whether a row was deleted.
+    pub async fn delete_device(&self, id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM user_devices WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn touch_device(&self, device_id: Uuid) -> Result<(), AppError> {
         sqlx::query("UPDATE user_devices SET last_seen_at = now() WHERE id = $1")
             .bind(device_id)
@@ -327,6 +339,69 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    /// Compact old line tombstones (design §6.4): delete lines soft-deleted
+    /// before `older_than` and drop their ids from each note's order. By then
+    /// every device has long converged past the delete (snapshots rebuild all
+    /// client state), so the tombstone no longer needs to compete in
+    /// resolution. Returns the number of lines reclaimed.
+    pub async fn gc_line_tombstones(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
+        let rows = sqlx::query(
+            r#"DELETE FROM lines
+               WHERE deleted_at IS NOT NULL AND deleted_at < $1
+               RETURNING id, note_id"#,
+        )
+        .bind(older_than)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut by_note: std::collections::HashMap<Uuid, Vec<Uuid>> =
+            std::collections::HashMap::new();
+        for row in &rows {
+            by_note
+                .entry(row.get("note_id"))
+                .or_default()
+                .push(row.get("id"));
+        }
+        for (note_id, dead) in by_note {
+            if let Some(order) = self.get_note_order(note_id).await? {
+                let kept: Vec<Uuid> = order
+                    .order
+                    .into_iter()
+                    .filter(|id| !dead.contains(id))
+                    .collect();
+                // Only the membership changes; the order's version metadata is
+                // untouched (compaction is not an edit).
+                sqlx::query("UPDATE note_line_order SET order_json = $2 WHERE note_id = $1")
+                    .bind(note_id)
+                    .bind(Json(kept))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(rows.len() as u64)
+    }
+
+    /// Aggregate row counts for `/api/metrics`.
+    pub async fn counts(&self) -> Result<(i64, i64, i64, i64), AppError> {
+        let row = sqlx::query(
+            r#"SELECT
+                 (SELECT count(*) FROM users) AS users,
+                 (SELECT count(*) FROM notes WHERE deleted_at IS NULL) AS notes,
+                 (SELECT count(*) FROM lines) AS lines,
+                 (SELECT count(*) FROM lines WHERE deleted_at IS NOT NULL) AS tombstones"#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((
+            row.get("users"),
+            row.get("notes"),
+            row.get("lines"),
+            row.get("tombstones"),
+        ))
     }
 
     // ── Notes ────────────────────────────────────────────────────────────────

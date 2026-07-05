@@ -48,10 +48,12 @@ resolve against the order entity.
 
 ## REST API
 
-- `GET /health`
+- `GET /health` · `GET /api/metrics` (aggregate counters: users, notes, lines,
+  tombstones, live sessions/connections)
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
-- `POST /api/devices` · `GET /api/devices` (Bearer)
+- `POST /api/devices` · `GET /api/devices` · `DELETE /api/devices/:id` (revokes
+  that device's token immediately) (Bearer)
 - `POST /api/notes` — `{ title }` · `GET /api/notes` — owned and shared
 - `GET /api/notes/:id` — metadata + materialised `body` · `PATCH` (title) ·
   `DELETE` (owner only, soft delete)
@@ -130,10 +132,12 @@ The server listens on `http://localhost:3000`.
 | `JWT_SECRET` | dev value | Token signing secret; change it |
 | `TOKEN_TTL_DAYS` | `365` | Token lifetime |
 | `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
+| `LINES_GC_DAYS` | `30` | Compact line tombstones older than N days (`0` disables) |
 | `RUST_LOG` | `info` | Log level |
 
-In production terminate TLS at a reverse proxy (`wss://`) — the token travels in
-the WebSocket query string / first frame.
+In production terminate TLS at a reverse proxy (`wss://`). The collaborative
+channel accepts the token in the `Authorization: Bearer` header (preferred —
+query strings end up in proxy logs) with `?token=` kept as a fallback.
 
 ## Tests
 

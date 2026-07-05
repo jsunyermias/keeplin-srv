@@ -25,6 +25,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
+    http::HeaderMap,
     response::Response,
 };
 use chrono::{DateTime, Utc};
@@ -81,6 +82,16 @@ pub struct CollabRegistry {
 }
 
 impl CollabRegistry {
+    /// (live note sessions, live subscriber connections) for `/api/metrics`.
+    pub async fn stats(&self) -> (usize, usize) {
+        let sessions = self.sessions.read().await;
+        let mut connections = 0;
+        for session in sessions.values() {
+            connections += session.subscribers.read().await.len();
+        }
+        (sessions.len(), connections)
+    }
+
     async fn get_or_create(&self, note_id: Uuid) -> Arc<CollabSession> {
         let mut sessions = self.sessions.write().await;
         sessions
@@ -163,9 +174,18 @@ impl CollabSession {
 pub async fn handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let token = params.get("token").ok_or(AppError::MissingToken)?;
+    // Prefer the Authorization header — a token in the query string ends up
+    // in proxy/access logs. The `?token=` form stays as a fallback.
+    let header_token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let token = header_token
+        .or(params.get("token").map(String::as_str))
+        .ok_or(AppError::MissingToken)?;
     let authed = auth::verify_token(token, &state.config.jwt_secret)?;
     let user = state
         .store

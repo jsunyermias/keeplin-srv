@@ -29,6 +29,7 @@ fn test_config() -> Config {
         jwt_secret: "test-secret".into(),
         token_ttl_days: 1,
         retention_days: 0,
+        lines_gc_days: 0,
     }
 }
 
