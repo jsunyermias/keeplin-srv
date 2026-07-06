@@ -24,6 +24,7 @@ JSON body `{"error": "..."}`.
 | `Forbidden` | 403 | role check failed |
 | `Conflict` | 409 | unique-constraint violation (e.g. duplicate email or note id) |
 | `BadRequest(String)` | 400 | malformed input |
+| `QuotaExceeded(String)` | 507 | a per-user quota (storage bytes / note count) would be exceeded |
 | `Internal(String)` | 500 | unexpected internal failure |
 
 `#[from] sqlx::Error` lets store methods use `?` and surface DB errors as `AppError::Database`.

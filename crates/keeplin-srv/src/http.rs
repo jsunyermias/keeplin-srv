@@ -313,6 +313,20 @@ async fn put_resource_data(
     if !state.store.resource_owned_by(id, user.user_id).await? {
         return Err(AppError::NotFound);
     }
+    let limit = state.config.max_user_storage_bytes;
+    if limit > 0 {
+        // Count every other blob of this user plus the incoming one; replacing
+        // a resource's blob is measured by its new size, not double-counted.
+        let others = state
+            .store
+            .user_blob_bytes_excluding(user.user_id, id)
+            .await?;
+        if others + body.len() as i64 > limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "storage limit reached ({limit} bytes)"
+            )));
+        }
+    }
     state.store.put_resource_blob(id, &body).await?;
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
@@ -365,6 +379,15 @@ async fn create_note(
     user: AuthedUser,
     Json(body): Json<CreateNoteBody>,
 ) -> Result<Json<Note>, AppError> {
+    let limit = state.config.max_notes_per_user;
+    if limit > 0 {
+        let count = state.store.count_live_notes_for_user(user.user_id).await?;
+        if count >= limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "note limit reached ({limit})"
+            )));
+        }
+    }
     let note = state
         .store
         .create_note(body.id, &body.title, user.user_id)

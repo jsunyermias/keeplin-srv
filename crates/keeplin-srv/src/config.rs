@@ -37,6 +37,14 @@ pub struct Config {
     /// Maximum size in bytes of a resource binary upload
     /// (`PUT /api/resources/:id/data`). Larger bodies are rejected with `413`.
     pub max_upload_bytes: usize,
+
+    // ── Per-user quotas (`0` disables each) ──────────────────────────────────
+    /// Total bytes of resource binaries a single user may store. A blob upload
+    /// that would push the user over this is rejected with `507`.
+    pub max_user_storage_bytes: i64,
+    /// Maximum number of live notes a single user may own. Creating one past
+    /// this is rejected with `507`.
+    pub max_notes_per_user: i64,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -76,6 +84,8 @@ impl Config {
             shutdown_grace_secs: env_parse("SHUTDOWN_GRACE_SECS", 20),
             log_json: env_parse("LOG_JSON", false),
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 100 * 1024 * 1024),
+            max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
+            max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
         }
     }
 }

@@ -36,6 +36,7 @@ token), `touch_device` (last-seen).
 `put_resource_blob` / `get_resource_blob` / `resource_owned_by`, and the reads `list_notebooks`,
 `list_tags`, `list_resources`, `list_note_tag_ids`. Each write resolves via `incoming_wins` under a
 `SELECT … FOR UPDATE` lock.
+**Quotas**: `user_blob_bytes_excluding` (total blob bytes minus one resource), `count_live_notes_for_user`.
 **Maintenance / metrics**: `gc_line_tombstones`, `counts`.
 
 ## Database schema
