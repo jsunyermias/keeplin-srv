@@ -176,6 +176,12 @@ In production terminate TLS at a reverse proxy (`wss://`). The collaborative
 channel accepts the token in the `Authorization: Bearer` header (preferred —
 query strings end up in proxy logs) with `?token=` kept as a fallback.
 
+## Operating in production
+
+keeplin-srv is stateless — all durable state lives in PostgreSQL — so operating it is mostly
+operating its database. See **[`RUNBOOK.md`](RUNBOOK.md)** for backup/restore (pg_dump and PITR),
+upgrades, routine maintenance, capacity/quotas, and an incident quick reference.
+
 ## Tests
 
 ```bash
