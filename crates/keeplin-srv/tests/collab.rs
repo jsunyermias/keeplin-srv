@@ -921,3 +921,63 @@ async fn ownership_transfer_moves_delete_rights(pool: PgPool) {
     assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
     assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
 }
+
+async fn move_note(addr: SocketAddr, token: &str, note_id: &str, notebook_id: &str) {
+    let code = reqwest::Client::new()
+        .patch(format!("http://{addr}/api/notes/{note_id}"))
+        .bearer_auth(token)
+        .json(&json!({ "notebook_id": notebook_id }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
+    let (addr, state) = spawn_server_with_state(pool).await;
+    let (uid_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (uid_b, _db, token_b) = user(addr, "b@example.com").await;
+    let owner_a = uuid::Uuid::parse_str(&uid_a).unwrap();
+
+    // A owns a notebook (materialised as if it had synced from A's device).
+    let nb = keeplin_core::models::Notebook::new("NB");
+    let nb_id = nb.id.to_string();
+    state.store.upsert_notebook(owner_a, &nb).await.unwrap();
+
+    // A creates a note and moves it into the notebook (the move adopts the notebook's
+    // grants — currently none, so the note has no shares yet).
+    let note_id = create_note(addr, &token_a, "N").await;
+    move_note(addr, &token_a, &note_id, &nb_id).await;
+    assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 403);
+
+    // Sharing the *notebook* with B cascades read onto the child note.
+    let code = reqwest::Client::new()
+        .post(format!("http://{addr}/api/notebooks/{nb_id}/share"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "user_email": "b@example.com", "capabilities": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+    assert_eq!(
+        note_status(addr, &token_b, &note_id, "GET").await,
+        200,
+        "notebook share cascaded read onto the note"
+    );
+    // Read-only: B still cannot edit.
+    assert_eq!(note_status(addr, &token_b, &note_id, "PATCH").await, 403);
+
+    // Revoking the notebook share re-cascades: B loses access to the note.
+    let code = reqwest::Client::new()
+        .delete(format!("http://{addr}/api/notebooks/{nb_id}/share/{uid_b}"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+    assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 403);
+}

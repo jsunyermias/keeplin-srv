@@ -36,6 +36,21 @@ removing a share.
 | Function | Description |
 |----------|-------------|
 | `resolve_note_access(store, note, user_id) -> Access` | owner → full `Access`; else the grantee's `note_shares` capabilities; else `Forbidden` |
+| `resolve_notebook_access(store, notebook_id, user_id) -> Access` | owner (`notebooks.user_id`) → full; else `notebook_shares` capabilities; else `Forbidden` (missing notebook → `NotFound`) |
+
+## Notebook permissions & the destructive cascade
+
+Notebooks have the same owner + capability-share model as notes. A notebook's grants
+**cascade destructively** onto the notes it contains — a child note's `note_shares` are
+*replaced* with a copy of the notebook's `notebook_shares` (see `store.rs`) when:
+
+- the notebook's shares change (grant / revoke), or its ownership is transferred; **and**
+- a note is **moved into** the notebook (a move to the Inbox — a null notebook — leaves the
+  note's own shares untouched).
+
+Because the cascade materialises the notebook's grants onto each note, `resolve_note_access`
+needs no notebook fallback at read time. The cascade governs the collaborator **grants** only;
+it never changes a note's `owner_id` (ownership stays independent and transferable).
 
 ## Enforcement rules
 
@@ -48,8 +63,7 @@ removing a share.
 - **delete / transfer**: owner only.
 
 The grant is resolved solely from `note_shares` (no notebook fallback at read time) because
-the destructive notebook→note cascade materialises notebook grants onto each note. (That
-cascade + notebook permissions land in a follow-up; this file covers notes.)
+the destructive notebook→note cascade materialises notebook grants onto each note.
 
 ## Design notes
 
@@ -62,5 +76,7 @@ cascade + notebook permissions land in a follow-up; this file covers notes.)
 - `http.md` — REST handlers gate on `resolve_note_access` + the capability checks; the share
   and `transfer` endpoints.
 - `collab.md` — the `/api/ws` `Join`/`Op` paths use the same resolution.
-- `store.md` — `get_share`/`list_shares`/`create_or_update_share`/`set_note_owner` back it.
-- `../../migrations/0005_permissions.sql` — the `note_shares.capabilities` column.
+- `store.md` — note shares (`get_share`/`list_shares`/`create_or_update_share`/`set_note_owner`),
+  notebook shares + the cascade (`create_or_update_notebook_share`, `delete_notebook_share`,
+  `apply_notebook_shares_to_note`, `cascade_notebook_to_notes`).
+- `../../migrations/0005_permissions.sql`, `0006_notebook_permissions.sql` — the capability columns.

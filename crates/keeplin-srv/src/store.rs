@@ -53,6 +53,15 @@ pub struct NoteShare {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct NotebookShare {
+    pub notebook_id: Uuid,
+    pub user_id: Uuid,
+    /// The grantee's capability bitmask (see `permissions::Capabilities`), already normalised.
+    pub capabilities: i32,
+    pub created_at: DateTime<Utc>,
+}
+
 /// One collaborative line: an independently versioned entity with soft-delete.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Line {
@@ -645,6 +654,130 @@ impl Store {
             .bind(user_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    // ── Notebook ownership & shares (Front B stage 1b) ─────────────────────────
+
+    /// The notebook's owner (`notebooks.user_id`), or `None` if it does not exist.
+    pub async fn notebook_owner(&self, notebook_id: Uuid) -> Result<Option<Uuid>, AppError> {
+        let owner: Option<(Uuid,)> =
+            sqlx::query_as("SELECT user_id FROM notebooks WHERE id = $1 AND deleted_at IS NULL")
+                .bind(notebook_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(owner.map(|r| r.0))
+    }
+
+    /// Transfer a notebook's ownership. The cascade to child notes is triggered separately by
+    /// the caller (so the new owner's grants propagate).
+    pub async fn set_notebook_owner(
+        &self,
+        notebook_id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            "UPDATE notebooks SET user_id = $2, updated_at = now()
+             WHERE id = $1 AND deleted_at IS NULL RETURNING id",
+        )
+        .bind(notebook_id)
+        .bind(new_owner)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    pub async fn get_notebook_share(
+        &self,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NotebookShare>, AppError> {
+        let share = sqlx::query_as::<_, NotebookShare>(
+            r#"SELECT notebook_id, user_id, capabilities, created_at
+               FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2"#,
+        )
+        .bind(notebook_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(share)
+    }
+
+    pub async fn list_notebook_shares(
+        &self,
+        notebook_id: Uuid,
+    ) -> Result<Vec<NotebookShare>, AppError> {
+        let shares = sqlx::query_as::<_, NotebookShare>(
+            r#"SELECT notebook_id, user_id, capabilities, created_at
+               FROM notebook_shares WHERE notebook_id = $1 ORDER BY created_at"#,
+        )
+        .bind(notebook_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(shares)
+    }
+
+    /// Grant/update a notebook share **and** cascade the notebook's grants onto every note it
+    /// contains (destructive: a note's own `note_shares` are replaced), all in one transaction.
+    pub async fn create_or_update_notebook_share(
+        &self,
+        notebook_id: Uuid,
+        user_id: Uuid,
+        capabilities: i32,
+    ) -> Result<NotebookShare, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let share = sqlx::query_as::<_, NotebookShare>(
+            r#"INSERT INTO notebook_shares (notebook_id, user_id, capabilities)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (notebook_id, user_id) DO UPDATE SET capabilities = EXCLUDED.capabilities
+               RETURNING notebook_id, user_id, capabilities, created_at"#,
+        )
+        .bind(notebook_id)
+        .bind(user_id)
+        .bind(capabilities)
+        .fetch_one(&mut *tx)
+        .await?;
+        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
+        tx.commit().await?;
+        Ok(share)
+    }
+
+    /// Revoke a notebook share and re-cascade so the removal propagates to child notes.
+    pub async fn delete_notebook_share(
+        &self,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2")
+            .bind(notebook_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Re-cascade a notebook's grants onto its notes without changing the grants themselves
+    /// (used after an ownership transfer).
+    pub async fn cascade_notebook_to_notes(&self, notebook_id: Uuid) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Adopt a notebook's grants onto **one** note — the move case. Destructive: the note's
+    /// existing `note_shares` are replaced with the notebook's.
+    pub async fn apply_notebook_shares_to_note(
+        &self,
+        note_id: Uuid,
+        notebook_id: Uuid,
+    ) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        replace_note_shares_from_notebook_tx(&mut tx, note_id, notebook_id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1281,4 +1414,57 @@ impl Store {
         .await?;
         Ok(count)
     }
+}
+
+// ── Notebook→note cascade helpers (Front B stage 1b) ───────────────────────────
+//
+// The destructive cascade **replaces** the target notes' `note_shares` with a copy of the
+// notebook's `notebook_shares`. It never touches note ownership (that stays with each note's
+// `owner_id`, independent and transferable): the cascade governs the collaborator grants only.
+
+/// Replace one note's shares with the notebook's grants (the move case).
+async fn replace_note_shares_from_notebook_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    note_id: Uuid,
+    notebook_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM note_shares WHERE note_id = $1")
+        .bind(note_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        r#"INSERT INTO note_shares (note_id, user_id, capabilities)
+           SELECT $1, user_id, capabilities FROM notebook_shares WHERE notebook_id = $2"#,
+    )
+    .bind(note_id)
+    .bind(notebook_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Replace the shares of **every live note** in a notebook with the notebook's grants (the
+/// notebook-permission-change case).
+async fn cascade_notebook_to_notes_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    notebook_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "DELETE FROM note_shares WHERE note_id IN
+         (SELECT id FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(notebook_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO note_shares (note_id, user_id, capabilities)
+           SELECT n.id, ns.user_id, ns.capabilities
+           FROM notes n
+           JOIN notebook_shares ns ON ns.notebook_id = n.notebook_id
+           WHERE n.notebook_id = $1 AND n.deleted_at IS NULL"#,
+    )
+    .bind(notebook_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
