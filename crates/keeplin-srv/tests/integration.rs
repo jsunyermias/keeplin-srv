@@ -14,7 +14,7 @@ use std::sync::Arc;
 use axum::Router;
 use keeplin_core::{
     models::Note,
-    storage::{db::DbBackend, NoteRepository, SyncBackend},
+    storage::{db::DbBackend, NoteRepository, NotebookRepository, SyncBackend},
 };
 use keeplin_srv::{config::Config, http::router, state::AppState};
 use serde_json::{json, Value};
@@ -339,4 +339,99 @@ async fn register_login_and_device_listing(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(bad.status(), 401);
+}
+
+// ── Server-side history (Front D stage 2) ────────────────────────────────────
+
+/// The server journal holds every device's changes, so `GET /api/…/history` serves the
+/// full cross-device version history — including to a fresh device whose local journal is
+/// empty. Newest first; a delete is a tombstone (`entity: null`); scoped per account.
+#[sqlx::test(migrations = "../../migrations")]
+async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+    let a = device(addr, &token).await;
+    let device_id = a.get_device_id().await.unwrap();
+
+    // Device A authors three note versions (create, edit, delete) and a notebook rename,
+    // then pushes the lot in one batch.
+    let note = a.create_note(Note::new("T", "v1")).await.unwrap();
+    let mut edited = note.clone();
+    edited.body = "v2".into();
+    a.update_note(edited).await.unwrap();
+    a.delete_note(note.id).await.unwrap();
+    let nb = a
+        .create_notebook(keeplin_core::models::Notebook::new("old"))
+        .await
+        .unwrap();
+    let mut renamed = nb.clone();
+    renamed.title = "new".into();
+    a.update_notebook(renamed).await.unwrap();
+    push(&a).await;
+
+    let client = reqwest::Client::new();
+    let get = |path: String| {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .get(format!("http://{addr}{path}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // `send_changes` returns once the frame is on the wire; the server journals it
+    // asynchronously, so poll until the batch has landed.
+    let mut versions = Value::Null;
+    for _ in 0..50 {
+        versions = get(format!("/api/notes/{}/history", note.id)).await;
+        if versions.as_array().is_some_and(|v| v.len() >= 3) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Note history: newest first — tombstone, v2, v1 — each stamped with the sync device.
+    let versions = versions.as_array().unwrap();
+    assert_eq!(
+        versions.len(),
+        3,
+        "create + update + delete = three versions"
+    );
+    assert!(versions[0]["entity"].is_null(), "a delete is a tombstone");
+    assert_eq!(versions[1]["entity"]["body"], "v2");
+    assert_eq!(versions[2]["entity"]["body"], "v1");
+    assert_eq!(versions[0]["device_id"], device_id.as_str());
+
+    // The count cap bounds the reply.
+    let capped = get(format!("/api/notes/{}/history?limit=1", note.id)).await;
+    assert_eq!(capped.as_array().unwrap().len(), 1);
+
+    // Notebook history mirrors the note shape.
+    let versions = get(format!("/api/notebooks/{}/history", nb.id)).await;
+    let versions = versions.as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["entity"]["title"], "new");
+    assert_eq!(versions[1]["entity"]["title"], "old");
+
+    // Another account sees nothing: history reads only the caller's own journal.
+    register(addr, "b@example.com").await;
+    let token_b = login(addr, "b@example.com", "phone").await;
+    let other: Value = client
+        .get(format!("http://{addr}/api/notes/{}/history", note.id))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(other.as_array().unwrap().is_empty());
 }

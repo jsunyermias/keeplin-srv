@@ -103,6 +103,50 @@ pub struct ChangeRow {
     pub payload: serde_json::Value,
 }
 
+/// Which journaled entity kind a history query targets (see [`Store::entity_history`]).
+#[derive(Debug, Clone, Copy)]
+pub enum HistoryKind {
+    Note,
+    Notebook,
+}
+
+impl HistoryKind {
+    /// The JSON key carrying the snapshot in create/update payloads.
+    fn snapshot_key(self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Notebook => "notebook",
+        }
+    }
+
+    /// The `op` tags of create/update payloads (note ops include the v1 short aliases the
+    /// client still accepts on read).
+    fn upsert_ops(self) -> &'static [&'static str] {
+        match self {
+            Self::Note => &["note_create", "note_update", "create", "update"],
+            Self::Notebook => &["notebook_create", "notebook_update"],
+        }
+    }
+
+    /// The `op` tags of delete payloads.
+    fn delete_ops(self) -> &'static [&'static str] {
+        match self {
+            Self::Note => &["note_delete", "delete"],
+            Self::Notebook => &["notebook_delete"],
+        }
+    }
+}
+
+/// One reconstructed version for the history endpoints: when it was written, by which sync
+/// device, and the snapshot exactly as the device pushed it (opaque — client-encrypted fields
+/// stay ciphertext; the client decrypts). `entity` is `None` for a tombstone (a delete).
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityVersionRow {
+    pub timestamp: DateTime<Utc>,
+    pub device_id: String,
+    pub entity: Option<serde_json::Value>,
+}
+
 /// A notebook as served over REST (metadata only; `vv`/`last_writer` are
 /// internal to resolution and not exposed).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -356,6 +400,71 @@ impl Store {
             .collect())
     }
 
+    /// An entity's past versions from the caller's journal, newest first — the server-side
+    /// counterpart of the client's `HistoryRepository` (the client's local `entity_changes`
+    /// holds only changes that originated on that device; the server journal holds every
+    /// device's).
+    ///
+    /// Scoped to `user_id`'s own journal rows, so no cross-user access is possible by
+    /// construction. `not_before` applies the retention age bound (`None` = no age bound);
+    /// what is available is in any case limited by journal pruning. The payloads stay
+    /// opaque: only the envelope (`op`, snapshot key, `deleted_at`) is inspected, and the
+    /// snapshot is returned verbatim (client-encrypted fields remain ciphertext).
+    pub async fn entity_history(
+        &self,
+        user_id: Uuid,
+        kind: HistoryKind,
+        entity_id: Uuid,
+        limit: i64,
+        not_before: Option<DateTime<Utc>>,
+    ) -> Result<Vec<EntityVersionRow>, AppError> {
+        let upsert_ops: Vec<String> = kind.upsert_ops().iter().map(|s| s.to_string()).collect();
+        let delete_ops: Vec<String> = kind.delete_ops().iter().map(|s| s.to_string()).collect();
+        let rows = sqlx::query(&format!(
+            r#"SELECT payload, sync_device_id, received_at
+               FROM changes
+               WHERE user_id = $1
+                 AND ((payload->>'op' = ANY($3) AND payload->'{key}'->>'id' = $2)
+                   OR (payload->>'op' = ANY($4) AND payload->>'id' = $2))
+                 AND ($5::timestamptz IS NULL OR received_at >= $5)
+               ORDER BY seq DESC
+               LIMIT $6"#,
+            key = kind.snapshot_key(),
+        ))
+        .bind(user_id)
+        .bind(entity_id.to_string())
+        .bind(&upsert_ops)
+        .bind(&delete_ops)
+        .bind(not_before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let parse_ts =
+            |v: &serde_json::Value| -> Option<DateTime<Utc>> { v.as_str()?.parse().ok() };
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let payload: serde_json::Value = row.get("payload");
+                let received_at: DateTime<Utc> = row.get("received_at");
+                let op = payload["op"].as_str().unwrap_or_default();
+                let (timestamp, entity) = if kind.delete_ops().contains(&op) {
+                    (parse_ts(&payload["deleted_at"]), None)
+                } else {
+                    let snapshot = payload[kind.snapshot_key()].clone();
+                    (parse_ts(&snapshot["updated_at"]), Some(snapshot))
+                };
+                EntityVersionRow {
+                    // The edit's own instant when the payload carries one; the arrival
+                    // time otherwise (old records) — same ordering either way.
+                    timestamp: timestamp.unwrap_or(received_at),
+                    device_id: row.get("sync_device_id"),
+                    entity,
+                }
+            })
+            .collect())
+    }
+
     // ── Delivery cursors ─────────────────────────────────────────────────────
 
     pub async fn get_cursor(&self, device_id: Uuid) -> Result<i64, AppError> {
@@ -520,14 +629,18 @@ impl Store {
         Ok(note)
     }
 
-    /// Notes the user owns plus notes shared with them.
+    /// Notes the user owns, notes shared with them, plus notes filed in notebooks they own
+    /// (the notebook owner's implicit `manage` — see `permissions::resolve_note_access`).
     pub async fn list_notes_for_user(&self, user_id: Uuid) -> Result<Vec<Note>, AppError> {
         let notes = sqlx::query_as::<_, Note>(
             r#"SELECT n.id, n.title, n.owner_id, n.notebook_id, n.is_todo, n.todo_due,
                       n.todo_completed, n.created_at, n.updated_at, n.deleted_at
                FROM notes n
                LEFT JOIN note_shares s ON s.note_id = n.id AND s.user_id = $1
-               WHERE n.deleted_at IS NULL AND (n.owner_id = $1 OR s.user_id IS NOT NULL)
+               LEFT JOIN notebooks nb
+                      ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
+               WHERE n.deleted_at IS NULL
+                 AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL)
                ORDER BY n.updated_at DESC"#,
         )
         .bind(user_id)
@@ -1421,6 +1534,9 @@ impl Store {
 // The destructive cascade **replaces** the target notes' `note_shares` with a copy of the
 // notebook's `notebook_shares`. It never touches note ownership (that stays with each note's
 // `owner_id`, independent and transferable): the cascade governs the collaborator grants only.
+// The notebook owner's implicit `manage` over child notes is NOT materialised here — it is
+// resolved at access time by `permissions::resolve_note_access`, so an ownership transfer
+// needs no share rewrite.
 
 /// Replace one note's shares with the notebook's grants (the move case).
 async fn replace_note_shares_from_notebook_tx(

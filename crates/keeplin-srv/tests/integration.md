@@ -33,6 +33,7 @@ authentication, persistence, and offline catch-up. Also covers the REST auth sur
 | Test function | Scenario | Expected outcome |
 |---------------|----------|------------------|
 | `register_login_and_device_listing` | register/login/add device/list | 409 on dup email, 401 on bad password, 2 devices listed |
+| `history_endpoints_serve_versions_from_the_server_journal` | A pushes note create/edit/delete + a notebook rename, then queries `GET /api/{notes,notebooks}/:id/history` | versions newest-first with tombstone `entity: null`, `?limit=` caps the reply, another account sees an empty list |
 
 ## Fixtures and helpers
 

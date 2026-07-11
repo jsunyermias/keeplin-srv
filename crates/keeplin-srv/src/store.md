@@ -27,8 +27,15 @@ token), `touch_device` (last-seen).
 **Relay journal**: `append_changes` (dedupes by `(batch_id, batch_index)`), `changes_after`,
 `get_cursor`, `advance_cursor`, `prune_delivered_changes`.
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
-`list_notes_for_user` (owned + shared), `update_note_meta`, `soft_delete_note`.
+`list_notes_for_user` (owned + shared + filed in a notebook the user owns), `update_note_meta`, `soft_delete_note`.
 **Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, `set_note_owner`.
+**History** (Front D stage 2): `entity_history(user_id, HistoryKind, id, limit, not_before)`
+reads an entity's past versions from the caller's own journal rows, newest first (`seq DESC`),
+matching note/notebook `Change` payloads by their `op` tag and snapshot id; only the envelope
+is inspected — snapshots stay opaque. Returns `EntityVersionRow { timestamp, device_id,
+entity? }` (`entity` `None` = tombstone; `timestamp` from the payload, falling back to
+`received_at`).
+
 **Notebook permissions**: `notebook_owner`, `set_notebook_owner`, `create_or_update_notebook_share`/`get_notebook_share`/`list_notebook_shares`/`delete_notebook_share`, and the destructive cascade (`cascade_notebook_to_notes`, `apply_notebook_shares_to_note`) that replaces child notes' `note_shares` with the notebook's grants on a notebook-perm change or a note move.
 **Lines**: `get_line`, `list_lines`, `insert_line`, `update_line`, `soft_delete_line`.
 **Line order**: `get_note_order`, `set_note_order`.

@@ -35,7 +35,7 @@ removing a share.
 
 | Function | Description |
 |----------|-------------|
-| `resolve_note_access(store, note, user_id) -> Access` | owner → full `Access`; else the grantee's `note_shares` capabilities; else `Forbidden` |
+| `resolve_note_access(store, note, user_id) -> Access` | owner → full `Access`; else the **notebook owner** of the note's notebook → `manage` capabilities (not ownership); else the grantee's `note_shares` capabilities; else `Forbidden` |
 | `resolve_notebook_access(store, notebook_id, user_id) -> Access` | owner (`notebooks.user_id`) → full; else `notebook_shares` capabilities; else `Forbidden` (missing notebook → `NotFound`) |
 
 ## Notebook permissions & the destructive cascade
@@ -49,8 +49,19 @@ Notebooks have the same owner + capability-share model as notes. A notebook's gr
   note's own shares untouched).
 
 Because the cascade materialises the notebook's grants onto each note, `resolve_note_access`
-needs no notebook fallback at read time. The cascade governs the collaborator **grants** only;
+needs no share fallback at read time. The cascade governs the collaborator **grants** only;
 it never changes a note's `owner_id` (ownership stays independent and transferable).
+
+**The notebook owner holds implicit `manage` over every child note** (the folder-owner model):
+full capabilities on notes filed in their notebook — even notes they do not own — but not the
+owner-only powers (delete/transfer stay with `note.owner_id`). This is resolved at access time
+in `resolve_note_access` (and mirrored in `list_notes_for_user`), **not** materialised by the
+cascade, so a notebook ownership transfer needs no share rewrite.
+
+**Moving a note into a notebook requires `write` on the destination notebook** as well as
+`write` on the note: the move adopts the destination's grants (disclosure) and replaces the
+note's own shares (possible self-lockout), so it needs consent on both sides. Moving to the
+Inbox (null) needs no destination check.
 
 ## Enforcement rules
 
@@ -62,8 +73,9 @@ it never changes a note's `owner_id` (ownership stays independent and transferab
 - **revoke** (`DELETE /share/:user`): `can_share_write`, or removing *yourself*.
 - **delete / transfer**: owner only.
 
-The grant is resolved solely from `note_shares` (no notebook fallback at read time) because
-the destructive notebook→note cascade materialises notebook grants onto each note.
+Apart from the notebook owner's implicit `manage`, a grant is resolved solely from
+`note_shares` because the destructive notebook→note cascade materialises notebook grants onto
+each note.
 
 ## Design notes
 
