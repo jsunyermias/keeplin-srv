@@ -39,6 +39,8 @@ with the login's `device_id` (the vv actor).
 | `gc_compacts_old_tombstones` | delete a line, run GC past the window | reclaims exactly 1; body and order intact |
 | `metrics_reports_counts` | hit `/api/metrics` | user/note counts correct |
 | `rate_limit_throttles_and_spares_health` | burst past the budget | 4th request `429`; `/health` always `200` |
+| `note_move_requires_write_on_destination_notebook` | B moves a note into A's notebook with no / read-only / write access | 403 / 403 / 200; unknown destination `404` |
+| `notebook_owner_can_manage_child_notes_they_do_not_own` | B files their note in A's notebook | A (notebook owner) can GET/PATCH and lists the note, but cannot DELETE it (ownership stays with B) |
 
 ## Fixtures and helpers
 

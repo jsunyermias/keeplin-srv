@@ -44,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(delete_share),
         )
         .route("/api/notes/:id/transfer", post(transfer_ownership))
+        .route("/api/notes/:id/history", get(note_history))
         .route("/api/notes/:id/export", get(export_note))
         .route("/api/import", post(import_note))
         // Domain entities the server materialises from the relay (read side for
@@ -58,6 +59,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(delete_notebook_share),
         )
         .route("/api/notebooks/:id/transfer", post(transfer_notebook))
+        .route("/api/notebooks/:id/history", get(notebook_history))
         .route("/api/tags", get(list_tags))
         .route("/api/resources", get(list_resources))
         .route("/api/notes/:id/tags", get(list_note_tags))
@@ -473,6 +475,17 @@ async fn update_note(
         Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
         _ => None,
     };
+    // A move adopts the destination notebook's grants (destructive cascade), which both
+    // discloses the note to that notebook's members and replaces the note's own shares.
+    // So the mover needs `write` on the destination notebook too, not just on the note;
+    // an unknown destination is `NotFound`. Moving *out* (to the Inbox) needs no
+    // destination check.
+    if let Some(nb) = moved_into {
+        let nb_access = resolve_notebook_access(&state.store, nb, user.user_id).await?;
+        if !nb_access.can_write() {
+            return Err(AppError::Forbidden);
+        }
+    }
     let note = state
         .store
         .update_note_meta(id, &patch)
@@ -735,6 +748,86 @@ async fn transfer_notebook(
     state.store.delete_notebook_share(id, target.id).await?;
     Ok(Json(
         serde_json::json!({ "ok": true, "owner_id": target.id }),
+    ))
+}
+
+// ── History (Front D stage 2) ────────────────────────────────────────────────
+//
+// The server journal is the durable, cross-device change record; these endpoints expose it
+// as version history so a fresh device (whose local journal is empty) can still show and
+// revert through past versions. Scoped to the **caller's own journal** — that is where every
+// change of their devices lands, and it makes the endpoints safe by construction (no
+// cross-user reads). Snapshots are returned exactly as pushed: client-encrypted fields stay
+// ciphertext and are decrypted client-side.
+
+/// `?limit=` — version-count cap. Defaults to 100, hard-capped at 10 000 (the client's
+/// revert scan bound).
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    limit: Option<u32>,
+}
+
+const HISTORY_DEFAULT_LIMIT: u32 = 100;
+const HISTORY_MAX_LIMIT: u32 = 10_000;
+
+async fn entity_history(
+    state: &AppState,
+    user_id: Uuid,
+    kind: crate::store::HistoryKind,
+    id: Uuid,
+    q: &HistoryQuery,
+) -> Result<Vec<crate::store::EntityVersionRow>, AppError> {
+    let limit = q
+        .limit
+        .filter(|l| *l > 0)
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .min(HISTORY_MAX_LIMIT);
+    // The age dimension of retention: even where pruning has not caught up yet, do not
+    // serve history older than the configured journal retention window.
+    let not_before = (state.config.retention_days > 0)
+        .then(|| chrono::Utc::now() - chrono::Duration::days(state.config.retention_days as i64));
+    state
+        .store
+        .entity_history(user_id, kind, id, limit as i64, not_before)
+        .await
+}
+
+/// `GET /api/notes/:id/history` — past versions of a note from the caller's journal,
+/// newest first. `entity` is the opaque snapshot the device pushed; `null` for a tombstone.
+async fn note_history(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
+    Ok(Json(
+        entity_history(
+            &state,
+            user.user_id,
+            crate::store::HistoryKind::Note,
+            id,
+            &q,
+        )
+        .await?,
+    ))
+}
+
+/// `GET /api/notebooks/:id/history` — past versions of a notebook. See [`note_history`].
+async fn notebook_history(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
+    Ok(Json(
+        entity_history(
+            &state,
+            user.user_id,
+            crate::store::HistoryKind::Notebook,
+            id,
+            &q,
+        )
+        .await?,
     ))
 }
 

@@ -22,6 +22,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/notes/:id/share            (post|get)        — grant / list shares
 /api/notes/:id/share/:user_id   (delete)
 /api/notes/:id/transfer         (post)            — hand ownership to another user
+/api/notes/:id/history          (get)             — past versions from the caller's journal
 /api/notes/:id/export           (get)
 /api/import                     (post)
 ── domain entities the server materialises from the relay (read side) ──
@@ -29,6 +30,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/notebooks/:id/share        (post|get)   — grant / list; grant cascades onto child notes
 /api/notebooks/:id/share/:user  (delete)     — revoke; re-cascades onto child notes
 /api/notebooks/:id/transfer     (post)       — hand notebook ownership to another user
+/api/notebooks/:id/history      (get)        — past versions from the caller's journal
 /api/tags                       (get)   — live tags
 /api/resources                  (get)   — live resource metadata
 /api/notes/:id/tags             (get)   — live tag ids on a note
@@ -50,9 +52,10 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
 | `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared |
 | `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
-| `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`) / owner-only soft delete |
+| `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`; a move into a notebook additionally needs `write` on the **destination** notebook, since the note adopts its grants) / owner-only soft delete |
 | `create_share` / `list_shares` / `delete_share` | `/api/notes/:id/share…` | grant `{user_id\|user_email, capabilities}` (needs `share_write`, capped to the granter's own caps); list (needs `share_read`); revoke (needs `share_write`, or self) |
 | `transfer_ownership` | `/api/notes/:id/transfer` | owner-only; `{user_id\|user_email}` — moves `owner_id`, drops any share row for the new owner |
+| `note_history` / `notebook_history` | `GET /api/{notes,notebooks}/:id/history?limit=` | past versions from the **caller's own journal**, newest first (Front D stage 2): `[{ timestamp, device_id, entity? }]`, `entity` null = tombstone and otherwise the opaque snapshot the device pushed (client-encrypted fields stay ciphertext). `limit` defaults to 100, capped at 10 000; bounded by `CHANGES_RETENTION_DAYS` when set |
 | `import_note` / `export_note` | `/api/import`, `…/export` | split a flat body into versioned lines / join live lines |
 | `list_notebooks` / `list_tags` / `list_resources` | `GET /api/{notebooks,tags,resources}` | live entities the server materialised from the relay (for cold rehydration) |
 | `list_note_tags` | `GET /api/notes/:id/tags` | live tag ids attached to a note |

@@ -981,3 +981,131 @@ async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
     assert_eq!(code, 200);
     assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 403);
 }
+
+async fn notebook_share_caps(
+    addr: SocketAddr,
+    token: &str,
+    notebook_id: &str,
+    email: &str,
+    caps: i32,
+) -> u16 {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/api/notebooks/{notebook_id}/share"))
+        .bearer_auth(token)
+        .json(&json!({ "user_email": email, "capabilities": caps }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn move_note_status(addr: SocketAddr, token: &str, note_id: &str, notebook_id: &str) -> u16 {
+    reqwest::Client::new()
+        .patch(format!("http://{addr}/api/notes/{note_id}"))
+        .bearer_auth(token)
+        .json(&json!({ "notebook_id": notebook_id }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// Moving a note into a notebook makes it adopt that notebook's grants, so the mover must
+/// hold `write` on the **destination** notebook too — otherwise a note could be disclosed to
+/// (or captured by) a notebook the mover cannot even see (issue #13).
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_move_requires_write_on_destination_notebook(pool: PgPool) {
+    let (addr, state) = spawn_server_with_state(pool).await;
+    let (uid_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, _db, token_b) = user(addr, "b@example.com").await;
+    let owner_a = uuid::Uuid::parse_str(&uid_a).unwrap();
+
+    // A owns a notebook; B owns a note.
+    let nb = keeplin_core::models::Notebook::new("NB");
+    let nb_id = nb.id.to_string();
+    state.store.upsert_notebook(owner_a, &nb).await.unwrap();
+    let note_id = create_note(addr, &token_b, "N").await;
+
+    // No access to the destination: the move is forbidden.
+    assert_eq!(
+        move_note_status(addr, &token_b, &note_id, &nb_id).await,
+        403
+    );
+    // Read on the destination is not enough — the bar is write.
+    assert_eq!(
+        notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 1).await,
+        200
+    );
+    assert_eq!(
+        move_note_status(addr, &token_b, &note_id, &nb_id).await,
+        403
+    );
+    // With write on the destination the move goes through.
+    assert_eq!(
+        notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 2).await,
+        200
+    );
+    assert_eq!(
+        move_note_status(addr, &token_b, &note_id, &nb_id).await,
+        200
+    );
+    // An unknown destination notebook is NotFound, not a silent move.
+    assert_eq!(
+        move_note_status(addr, &token_b, &note_id, &uuid::Uuid::new_v4().to_string()).await,
+        404
+    );
+}
+
+/// The notebook owner holds implicit `manage` over every note filed in their notebook (the
+/// folder-owner model, issue #15): read/write/share administration — but not delete or
+/// transfer, which stay with the note's own owner.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
+    let (addr, state) = spawn_server_with_state(pool).await;
+    let (uid_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (_uid_b, _db, token_b) = user(addr, "b@example.com").await;
+    let owner_a = uuid::Uuid::parse_str(&uid_a).unwrap();
+
+    let nb = keeplin_core::models::Notebook::new("NB");
+    let nb_id = nb.id.to_string();
+    state.store.upsert_notebook(owner_a, &nb).await.unwrap();
+
+    // B owns a note and files it in A's notebook (B holds write on the notebook).
+    let note_id = create_note(addr, &token_b, "N").await;
+    assert_eq!(
+        notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 2).await,
+        200
+    );
+    assert_eq!(
+        move_note_status(addr, &token_b, &note_id, &nb_id).await,
+        200
+    );
+
+    // A holds no note share (the cascade copies only `notebook_shares`, which names B), yet
+    // as the notebook owner A can read and edit the child note…
+    assert_eq!(note_status(addr, &token_a, &note_id, "GET").await, 200);
+    assert_eq!(note_status(addr, &token_a, &note_id, "PATCH").await, 200);
+    // …and sees it in their note listing…
+    let notes: Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        notes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == note_id.as_str()),
+        "notebook owner sees child notes in their listing"
+    );
+    // …but cannot delete it: ownership stays with B.
+    assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
+    assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
+}

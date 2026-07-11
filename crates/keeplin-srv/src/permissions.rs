@@ -122,7 +122,11 @@ impl Access {
 
 /// Resolve `user_id`'s [`Access`] to `note`, or `Forbidden` if they have none.
 ///
-/// The owner is read from `note.owner_id`; everyone else's capabilities come from their
+/// The owner is read from `note.owner_id`. The **notebook owner** holds implicit `manage`
+/// over every note filed in their notebook (the folder-owner model): full capabilities, but
+/// not ownership — deleting the note or transferring it stays with `note.owner_id`. This is
+/// resolved here rather than materialised by the cascade, so it survives notebook ownership
+/// transfers with no share rows to maintain. Everyone else's capabilities come from their
 /// `note_shares` row (already the destructive-cascade result, so no notebook fallback is
 /// needed at read time).
 pub async fn resolve_note_access(
@@ -132,6 +136,11 @@ pub async fn resolve_note_access(
 ) -> Result<Access, AppError> {
     if note.owner_id == user_id {
         return Ok(Access::owner());
+    }
+    if let Some(nb) = note.notebook_id {
+        if store.notebook_owner(nb).await? == Some(user_id) {
+            return Ok(Access::granted(Capabilities::all()));
+        }
     }
     match store.get_share(note.id, user_id).await? {
         Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
