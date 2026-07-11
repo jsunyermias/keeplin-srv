@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::{
     auth::{self, AuthedUser},
     error::AppError,
-    permissions::resolve_role,
+    permissions::{resolve_note_access, Capabilities},
     state::AppState,
     store::{Note, NoteShare, Notebook, ResourceMeta, Tag, User, UserDevice},
 };
@@ -38,11 +38,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/notes/:id",
             get(get_note).patch(update_note).delete(delete_note),
         )
-        .route("/api/notes/:id/share", post(create_share))
+        .route("/api/notes/:id/share", post(create_share).get(list_shares))
         .route(
             "/api/notes/:id/share/:user_id",
             axum::routing::delete(delete_share),
         )
+        .route("/api/notes/:id/transfer", post(transfer_ownership))
         .route("/api/notes/:id/export", get(export_note))
         .route("/api/import", post(import_note))
         // Domain entities the server materialises from the relay (read side for
@@ -409,7 +410,10 @@ async fn get_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<NoteResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    resolve_role(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::Forbidden);
+    }
     let body = materialize_body(&state, id).await?;
     Ok(Json(NoteResponse { note, body }))
 }
@@ -443,8 +447,8 @@ async fn update_note(
     Json(body): Json<UpdateNoteBody>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let role = resolve_role(&state.store, &note, user.user_id).await?;
-    if !role.can_write() {
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_write() {
         return Err(AppError::Forbidden);
     }
     let patch = crate::store::NotePatch {
@@ -468,9 +472,9 @@ async fn delete_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let role = resolve_role(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
     // Only the owner may delete the note (design §9.3).
-    if !role.can_share() {
+    if !access.can_delete() {
         return Err(AppError::Forbidden);
     }
     let note = state
@@ -488,7 +492,9 @@ struct CreateShareBody {
     /// Either the target user's id or their email must be provided.
     user_id: Option<Uuid>,
     user_email: Option<String>,
-    role: String,
+    /// The capability bitmask to grant (see `permissions::Capabilities`). Implied bits are
+    /// expanded server-side, and the grant is capped to the granter's own capabilities.
+    capabilities: i32,
 }
 
 async fn create_share(
@@ -498,12 +504,19 @@ async fn create_share(
     Json(body): Json<CreateShareBody>,
 ) -> Result<Json<NoteShare>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let role = resolve_role(&state.store, &note, user.user_id).await?;
-    if !role.can_share() {
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_share_write() {
         return Err(AppError::Forbidden);
     }
-    if body.role != "editor" && body.role != "viewer" {
-        return Err(AppError::BadRequest("role must be editor or viewer".into()));
+    let requested = Capabilities::from_bits(body.capabilities);
+    if requested.bits() == 0 {
+        return Err(AppError::BadRequest(
+            "capabilities must be non-empty".into(),
+        ));
+    }
+    // No privilege escalation: you cannot grant a capability you do not hold yourself.
+    if requested.bits() & access.caps.bits() != requested.bits() {
+        return Err(AppError::Forbidden);
     }
     let target = match (body.user_id, &body.user_email) {
         (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
@@ -520,9 +533,22 @@ async fn create_share(
     }
     let share = state
         .store
-        .create_or_update_share(id, target.id, &body.role)
+        .create_or_update_share(id, target.id, requested.bits())
         .await?;
     Ok(Json(share))
+}
+
+async fn list_shares(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NoteShare>>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.caps.can_share_read() {
+        return Err(AppError::Forbidden);
+    }
+    Ok(Json(state.store.list_shares(id).await?))
 }
 
 async fn delete_share(
@@ -535,13 +561,54 @@ async fn delete_share(
         .get_note(note_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let role = resolve_role(&state.store, &note, user.user_id).await?;
-    // The owner can revoke anyone; anyone can remove themselves.
-    if !role.can_share() && target_id != user.user_id {
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    // A `share_write` grantee can revoke anyone; anyone can remove themselves.
+    if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
     state.store.delete_share(note_id, target_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferBody {
+    /// The new owner, by id or email.
+    user_id: Option<Uuid>,
+    user_email: Option<String>,
+}
+
+/// `POST /api/notes/:id/transfer` — hand ownership to another user. Owner-only; ownership is
+/// separate from the capability grants and survives the transfer (the old owner keeps no
+/// implicit access unless separately shared).
+async fn transfer_ownership(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferBody>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_transfer_ownership() {
+        return Err(AppError::Forbidden);
+    }
+    let target = match (body.user_id, &body.user_email) {
+        (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
+        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)?;
+    // The new owner no longer needs a share row; drop any so their access is unambiguous.
+    state.store.delete_share(id, target.id).await?;
+    let note = state
+        .store
+        .set_note_owner(id, target.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(note))
 }
 
 // ── Import / export (design §10) ─────────────────────────────────────────────
@@ -614,7 +681,10 @@ async fn export_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExportResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    resolve_role(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::Forbidden);
+    }
     let body = materialize_body(&state, id).await?;
     Ok(Json(ExportResponse {
         id: note.id,

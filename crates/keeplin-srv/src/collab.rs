@@ -37,7 +37,7 @@ use uuid::Uuid;
 use crate::{
     auth,
     error::AppError,
-    permissions::{resolve_role, Role},
+    permissions::{resolve_note_access, Access},
     protocol::{
         CollabClientMsg, CollabServerMsg, Cursor, LineOp, LineSnapshot, NoteLinesSnapshot,
         PresenceInfo,
@@ -221,7 +221,7 @@ async fn run_connection(
     });
 
     // Notes this connection has joined: session + the user's role in it.
-    let mut joined: HashMap<Uuid, (Arc<CollabSession>, Role)> = HashMap::new();
+    let mut joined: HashMap<Uuid, (Arc<CollabSession>, Access)> = HashMap::new();
 
     while let Some(Ok(msg)) = stream.next().await {
         let text = match msg {
@@ -278,7 +278,7 @@ async fn handle_msg(
     user_id: Uuid,
     device_id: Uuid,
     display_name: &str,
-    joined: &mut HashMap<Uuid, (Arc<CollabSession>, Role)>,
+    joined: &mut HashMap<Uuid, (Arc<CollabSession>, Access)>,
     msg: CollabClientMsg,
 ) -> Result<(), AppError> {
     match msg {
@@ -290,9 +290,9 @@ async fn handle_msg(
                     return Ok(());
                 }
             };
-            let role = match resolve_role(&state.store, &note, user_id).await {
-                Ok(role) => role,
-                Err(AppError::Forbidden) => {
+            let access = match resolve_note_access(&state.store, &note, user_id).await {
+                Ok(access) if access.can_read() => access,
+                Ok(_) | Err(AppError::Forbidden) => {
                     send_error(tx, "forbidden", "no access to this note");
                     return Ok(());
                 }
@@ -316,7 +316,7 @@ async fn handle_msg(
                 );
                 snapshot
             };
-            joined.insert(note_id, (session.clone(), role));
+            joined.insert(note_id, (session.clone(), access));
 
             let welcome = CollabServerMsg::Welcome { note_id, snapshot };
             let _ = tx.send(serde_json::to_string(&welcome).expect("serializable welcome"));
@@ -332,15 +332,15 @@ async fn handle_msg(
         }
 
         CollabClientMsg::Op { note_id, ops } => {
-            let (session, role) = match joined.get(&note_id) {
+            let (session, access) = match joined.get(&note_id) {
                 Some(entry) => entry,
                 None => {
                     send_error(tx, "not_joined", "join the note before sending ops");
                     return Ok(());
                 }
             };
-            if !role.can_write() {
-                send_error(tx, "forbidden", "viewers cannot edit");
+            if !access.can_write() {
+                send_error(tx, "forbidden", "no write access to this note");
                 return Ok(());
             }
 

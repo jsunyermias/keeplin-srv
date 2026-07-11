@@ -104,10 +104,16 @@ async fn create_note(addr: SocketAddr, token: &str, title: &str) -> String {
 }
 
 async fn share(addr: SocketAddr, token: &str, note_id: &str, email: &str, role: &str) {
+    // Capability bits: READ=1, WRITE=2. editor = READ|WRITE, viewer = READ.
+    let capabilities = match role {
+        "editor" => 3,
+        "viewer" => 1,
+        other => panic!("unknown test role {other}"),
+    };
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/api/notes/{note_id}/share"))
         .bearer_auth(token)
-        .json(&json!({ "user_email": email, "role": role }))
+        .json(&json!({ "user_email": email, "capabilities": capabilities }))
         .send()
         .await
         .unwrap();
@@ -820,4 +826,98 @@ async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
             .status();
         assert_eq!(code, 200);
     }
+}
+
+// ── Capability model (Front B) ─────────────────────────────────────────────────
+
+async fn share_caps(addr: SocketAddr, token: &str, note_id: &str, email: &str, caps: i32) -> u16 {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/api/notes/{note_id}/share"))
+        .bearer_auth(token)
+        .json(&json!({ "user_email": email, "capabilities": caps }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn note_status(addr: SocketAddr, token: &str, note_id: &str, method: &str) -> u16 {
+    let http = reqwest::Client::new();
+    let url = format!("http://{addr}/api/notes/{note_id}");
+    let req = match method {
+        "GET" => http.get(url),
+        "PATCH" => http.patch(url).json(&json!({ "title": "x" })),
+        "DELETE" => http.delete(url),
+        _ => unreachable!(),
+    };
+    req.bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn capability_grants_enforce_hierarchy_and_escalation(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (_b, _db, token_b) = user(addr, "b@example.com").await;
+    let (_c, _dc, _token_c) = user(addr, "c@example.com").await;
+    let note_id = create_note(addr, &token_a, "N").await;
+
+    // A grants B read-only (READ = 1). B can read but not write, and cannot share at all.
+    assert_eq!(
+        share_caps(addr, &token_a, &note_id, "b@example.com", 1).await,
+        200
+    );
+    assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 200);
+    assert_eq!(note_status(addr, &token_b, &note_id, "PATCH").await, 403);
+    assert_eq!(
+        share_caps(addr, &token_b, &note_id, "c@example.com", 1).await,
+        403,
+        "read-only grantee has no share_write"
+    );
+
+    // A upgrades B to SHARE_WRITE (8 → normalises to read|write|share_read|share_write = 15),
+    // but not MANAGE. B may now grant C up to its own caps, but not manage (escalation).
+    assert_eq!(
+        share_caps(addr, &token_a, &note_id, "b@example.com", 8).await,
+        200
+    );
+    assert_eq!(
+        share_caps(addr, &token_b, &note_id, "c@example.com", 3).await,
+        200,
+        "B holds write, so it may grant read+write"
+    );
+    assert_eq!(
+        share_caps(addr, &token_b, &note_id, "c@example.com", 16).await,
+        403,
+        "B lacks manage, so it cannot grant manage"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn ownership_transfer_moves_delete_rights(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (_b, _db, token_b) = user(addr, "b@example.com").await;
+    let note_id = create_note(addr, &token_a, "N").await;
+
+    // Only the owner can transfer; hand ownership to B.
+    let code = reqwest::Client::new()
+        .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "user_email": "b@example.com" }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(code, 200);
+
+    // A kept no implicit access; B is the owner now.
+    assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
+    assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
 }

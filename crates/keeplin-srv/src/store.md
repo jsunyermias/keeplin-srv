@@ -28,7 +28,7 @@ token), `touch_device` (last-seen).
 `get_cursor`, `advance_cursor`, `prune_delivered_changes`.
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
 `list_notes_for_user` (owned + shared), `update_note_meta`, `soft_delete_note`.
-**Shares**: `create_or_update_share`, `get_share`, `delete_share`.
+**Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, plus `set_note_owner` for ownership transfer.
 **Lines**: `get_line`, `list_lines`, `insert_line`, `update_line`, `soft_delete_line`.
 **Line order**: `get_note_order`, `set_note_order`.
 **Domain entities** (materialised from the relay, server = truth): `upsert_notebook` / `delete_notebook`,

@@ -19,8 +19,9 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/devices/:id                (delete)          — revoke a device
 /api/notes                      (post|get)
 /api/notes/:id                  (get|patch|delete)
-/api/notes/:id/share            (post)
+/api/notes/:id/share            (post|get)        — grant / list shares
 /api/notes/:id/share/:user_id   (delete)
+/api/notes/:id/transfer         (post)            — hand ownership to another user
 /api/notes/:id/export           (get)
 /api/import                     (post)
 ── domain entities the server materialises from the relay (read side) ──
@@ -46,8 +47,9 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
 | `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared |
 | `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
-| `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch / owner-only soft delete |
-| `create_share` / `delete_share` | `/api/notes/:id/share…` | owner-only; `{user_id\|user_email, role}` |
+| `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`) / owner-only soft delete |
+| `create_share` / `list_shares` / `delete_share` | `/api/notes/:id/share…` | grant `{user_id\|user_email, capabilities}` (needs `share_write`, capped to the granter's own caps); list (needs `share_read`); revoke (needs `share_write`, or self) |
+| `transfer_ownership` | `/api/notes/:id/transfer` | owner-only; `{user_id\|user_email}` — moves `owner_id`, drops any share row for the new owner |
 | `import_note` / `export_note` | `/api/import`, `…/export` | split a flat body into versioned lines / join live lines |
 | `list_notebooks` / `list_tags` / `list_resources` | `GET /api/{notebooks,tags,resources}` | live entities the server materialised from the relay (for cold rehydration) |
 | `list_note_tags` | `GET /api/notes/:id/tags` | live tag ids attached to a note |
@@ -84,6 +86,6 @@ the server keeps the collaborative line model underneath.
 ## Related files
 
 - `auth.md` — the middleware and token issuance.
-- `permissions.md` — role checks used by note/share handlers.
+- `permissions.md` — the capability model + `resolve_note_access` used by note/share handlers.
 - `store.md` — every query these handlers run.
 - `ratelimit.md` — the layer applied to all routes but `/health`.
