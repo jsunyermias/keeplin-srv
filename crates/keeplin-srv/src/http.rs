@@ -15,9 +15,9 @@ use uuid::Uuid;
 use crate::{
     auth::{self, AuthedUser},
     error::AppError,
-    permissions::{resolve_note_access, Capabilities},
+    permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
     state::AppState,
-    store::{Note, NoteShare, Notebook, ResourceMeta, Tag, User, UserDevice},
+    store::{Note, NoteShare, Notebook, NotebookShare, ResourceMeta, Tag, User, UserDevice},
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -49,6 +49,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Domain entities the server materialises from the relay (read side for
         // cold rehydration / queries; writes still arrive over `/api/sync`).
         .route("/api/notebooks", get(list_notebooks))
+        .route(
+            "/api/notebooks/:id/share",
+            post(create_notebook_share).get(list_notebook_shares),
+        )
+        .route(
+            "/api/notebooks/:id/share/:user_id",
+            axum::routing::delete(delete_notebook_share),
+        )
+        .route("/api/notebooks/:id/transfer", post(transfer_notebook))
         .route("/api/tags", get(list_tags))
         .route("/api/resources", get(list_resources))
         .route("/api/notes/:id/tags", get(list_note_tags))
@@ -458,11 +467,20 @@ async fn update_note(
         todo_due: body.todo_due,
         todo_completed: body.todo_completed,
     };
+    let moved_into = match &patch.notebook_id {
+        // A move into a real notebook adopts that notebook's grants (destructive cascade).
+        // A move to the Inbox (null) leaves the note's own shares untouched.
+        Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
+        _ => None,
+    };
     let note = state
         .store
         .update_note_meta(id, &patch)
         .await?
         .ok_or(AppError::NotFound)?;
+    if let Some(nb) = moved_into {
+        state.store.apply_notebook_shares_to_note(id, nb).await?;
+    }
     Ok(Json(note))
 }
 
@@ -609,6 +627,115 @@ async fn transfer_ownership(
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(note))
+}
+
+// ── Notebook permissions (Front B stage 1b) ─────────────────────────────────────
+
+/// Resolve a share/transfer target from `{user_id | user_email}` to a `User`.
+async fn resolve_target(
+    state: &AppState,
+    user_id: Option<Uuid>,
+    user_email: &Option<String>,
+) -> Result<User, AppError> {
+    match (user_id, user_email) {
+        (Some(uid), _) => state.store.get_user_by_id(uid).await?,
+        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)
+}
+
+async fn create_notebook_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateShareBody>,
+) -> Result<Json<NotebookShare>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.can_share_write() {
+        return Err(AppError::Forbidden);
+    }
+    let requested = Capabilities::from_bits(body.capabilities);
+    if requested.bits() == 0 {
+        return Err(AppError::BadRequest(
+            "capabilities must be non-empty".into(),
+        ));
+    }
+    if requested.bits() & access.caps.bits() != requested.bits() {
+        return Err(AppError::Forbidden);
+    }
+    let target = resolve_target(&state, body.user_id, &body.user_email).await?;
+    let owner = state
+        .store
+        .notebook_owner(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if target.id == owner {
+        return Err(AppError::BadRequest("owner already has access".into()));
+    }
+    // The share write cascades onto the notebook's notes inside the store call.
+    let share = state
+        .store
+        .create_or_update_notebook_share(id, target.id, requested.bits())
+        .await?;
+    Ok(Json(share))
+}
+
+async fn list_notebook_shares(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NotebookShare>>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.caps.can_share_read() {
+        return Err(AppError::Forbidden);
+    }
+    Ok(Json(state.store.list_notebook_shares(id).await?))
+}
+
+async fn delete_notebook_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path((notebook_id, target_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let access = resolve_notebook_access(&state.store, notebook_id, user.user_id).await?;
+    if !access.can_share_write() && target_id != user.user_id {
+        return Err(AppError::Forbidden);
+    }
+    // Revocation re-cascades to the notebook's notes inside the store call.
+    state
+        .store
+        .delete_notebook_share(notebook_id, target_id)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /api/notebooks/:id/transfer` — hand notebook ownership to another user (owner-only),
+/// then re-cascade the notebook's grants so child notes reflect the new profile.
+async fn transfer_notebook(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.can_transfer_ownership() {
+        return Err(AppError::Forbidden);
+    }
+    let target = resolve_target(&state, body.user_id, &body.user_email).await?;
+    state
+        .store
+        .set_notebook_owner(id, target.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    state.store.delete_notebook_share(id, target.id).await?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "owner_id": target.id }),
+    ))
 }
 
 // ── Import / export (design §10) ─────────────────────────────────────────────

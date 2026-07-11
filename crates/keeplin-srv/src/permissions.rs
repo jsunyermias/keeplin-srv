@@ -139,6 +139,27 @@ pub async fn resolve_note_access(
     }
 }
 
+/// Resolve `user_id`'s [`Access`] to a notebook, or `Forbidden` if they have none. The owner
+/// is `notebooks.user_id`; everyone else's capabilities come from `notebook_shares`. A missing
+/// notebook is `NotFound`.
+pub async fn resolve_notebook_access(
+    store: &crate::store::Store,
+    notebook_id: Uuid,
+    user_id: Uuid,
+) -> Result<Access, AppError> {
+    let owner = store
+        .notebook_owner(notebook_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if owner == user_id {
+        return Ok(Access::owner());
+    }
+    match store.get_notebook_share(notebook_id, user_id).await? {
+        Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
+        None => Err(AppError::Forbidden),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Capabilities as C;

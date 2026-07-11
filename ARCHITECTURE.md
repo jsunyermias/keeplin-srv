@@ -33,7 +33,7 @@ Everything lives in PostgreSQL; the schema is versioned SQL migrations (`migrati
 - **`lines`** — one row per collaborative line: an independently versioned entity
   (`content`, `vv`, `last_writer`, `deleted_at` tombstone).
 - **`note_line_order`** — the versioned order of a note's lines (its own `vv`).
-- **`note_shares`** — who may enter a note, as a **capability bitset** (`read`/`write`/`share_read`/`share_write`/`manage`, higher bits implying lower; owner is implicit and transferable). See `permissions.md`.
+- **`note_shares`** / **`notebook_shares`** — who may access a note/notebook, as a **capability bitset** (`read`/`write`/`share_read`/`share_write`/`manage`, higher bits implying lower; owner is implicit and transferable). A notebook's grants **cascade destructively** onto its notes' `note_shares` (on a notebook-perm change or a note move). See `permissions.md`.
 - **`changes`** + **`device_cursors`** — the relay's durable journal and per-device delivery
   watermarks for `/api/sync`.
 - **`notebooks`**, **`tags`**, **`note_tags`**, **`resources`** (+ **`resource_blobs`**) — the
