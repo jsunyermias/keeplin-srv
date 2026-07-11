@@ -71,5 +71,5 @@ Only `Applied` ops are persisted and fanned out. `Invalid` sends the sender an `
 
 - `protocol.md` — the message/op types on the wire.
 - `store.md` — the line and order rows, and their opaque `vv` columns.
-- `permissions.md` — the role check on `Join`/`Op`.
+- `permissions.md` — the capability check on `Join`/`Op`.
 - `keeplin/keeplin-core/src/collab/` — the client that speaks this protocol.

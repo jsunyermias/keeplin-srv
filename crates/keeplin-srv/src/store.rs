@@ -48,7 +48,8 @@ const NOTE_COLS: &str = "id, title, owner_id, notebook_id, is_todo, todo_due, to
 pub struct NoteShare {
     pub note_id: Uuid,
     pub user_id: Uuid,
-    pub role: String,
+    /// The grantee's capability bitmask (see `permissions::Capabilities`), already normalised.
+    pub capabilities: i32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -569,23 +570,42 @@ impl Store {
         Ok(note)
     }
 
+    /// Transfer a note's ownership to `new_owner` (ownership is separate from capability
+    /// grants and transferable only by the current owner — enforced at the HTTP layer).
+    pub async fn set_note_owner(
+        &self,
+        id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Note>, AppError> {
+        let note = sqlx::query_as::<_, Note>(&format!(
+            r#"UPDATE notes SET owner_id = $2, updated_at = now()
+               WHERE id = $1 AND deleted_at IS NULL
+               RETURNING {NOTE_COLS}"#
+        ))
+        .bind(id)
+        .bind(new_owner)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(note)
+    }
+
     // ── Shares ───────────────────────────────────────────────────────────────
 
     pub async fn create_or_update_share(
         &self,
         note_id: Uuid,
         user_id: Uuid,
-        role: &str,
+        capabilities: i32,
     ) -> Result<NoteShare, AppError> {
         let share = sqlx::query_as::<_, NoteShare>(
-            r#"INSERT INTO note_shares (note_id, user_id, role)
+            r#"INSERT INTO note_shares (note_id, user_id, capabilities)
                VALUES ($1, $2, $3)
-               ON CONFLICT (note_id, user_id) DO UPDATE SET role = EXCLUDED.role
-               RETURNING note_id, user_id, role, created_at"#,
+               ON CONFLICT (note_id, user_id) DO UPDATE SET capabilities = EXCLUDED.capabilities
+               RETURNING note_id, user_id, capabilities, created_at"#,
         )
         .bind(note_id)
         .bind(user_id)
-        .bind(role)
+        .bind(capabilities)
         .fetch_one(&self.pool)
         .await?;
         Ok(share)
@@ -597,7 +617,7 @@ impl Store {
         user_id: Uuid,
     ) -> Result<Option<NoteShare>, AppError> {
         let share = sqlx::query_as::<_, NoteShare>(
-            r#"SELECT note_id, user_id, role, created_at
+            r#"SELECT note_id, user_id, capabilities, created_at
                FROM note_shares WHERE note_id = $1 AND user_id = $2"#,
         )
         .bind(note_id)
@@ -605,6 +625,18 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(share)
+    }
+
+    /// List every share on a note (for owners/`share_read` grantees to see who has access).
+    pub async fn list_shares(&self, note_id: Uuid) -> Result<Vec<NoteShare>, AppError> {
+        let shares = sqlx::query_as::<_, NoteShare>(
+            r#"SELECT note_id, user_id, capabilities, created_at
+               FROM note_shares WHERE note_id = $1 ORDER BY created_at"#,
+        )
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(shares)
     }
 
     pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {

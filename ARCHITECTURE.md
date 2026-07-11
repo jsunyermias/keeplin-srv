@@ -33,7 +33,7 @@ Everything lives in PostgreSQL; the schema is versioned SQL migrations (`migrati
 - **`lines`** — one row per collaborative line: an independently versioned entity
   (`content`, `vv`, `last_writer`, `deleted_at` tombstone).
 - **`note_line_order`** — the versioned order of a note's lines (its own `vv`).
-- **`note_shares`** — who may enter a note, with role `editor`/`viewer` (owner is implicit).
+- **`note_shares`** — who may enter a note, as a **capability bitset** (`read`/`write`/`share_read`/`share_write`/`manage`, higher bits implying lower; owner is implicit and transferable). See `permissions.md`.
 - **`changes`** + **`device_cursors`** — the relay's durable journal and per-device delivery
   watermarks for `/api/sync`.
 - **`notebooks`**, **`tags`**, **`note_tags`**, **`resources`** (+ **`resource_blobs`**) — the
@@ -70,7 +70,7 @@ converges.
 
 A note is a **list of independently versioned lines**; the order of lines is itself a
 versioned entity. Clients send `LineOp`s (`Insert`/`Update`/`Delete`/`Move`) signed with
-their device id; the server validates (role, existence, writer identity, vv advances),
+their device id; the server validates (capability, existence, writer identity, vv advances),
 resolves against current state with `note_log::resolve`, persists, and fans the applied ops
 out to the note's other live subscribers with a monotonic `server_seq`. On connect a client
 gets a full `Welcome` snapshot and rebuilds — there is no infinite op log. See
