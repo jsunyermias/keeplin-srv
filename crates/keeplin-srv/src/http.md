@@ -11,10 +11,10 @@ onto protected routes and the rate limiter onto everything except `/health`.
 ```
 /health                         (get)   — unauthenticated, NOT rate-limited
 ── everything below is rate-limited (per-IP) ──
-/api/metrics                    (get)   — aggregate counters
 /api/register                   (post)
 /api/login                      (post)  — returns { token, device_id }
 ── everything below also requires auth_mw (Bearer token + live device) ──
+/api/metrics                    (get)   — aggregate counters (auth required, issue #22)
 /api/devices                    (post|get)
 /api/devices/:id                (delete)          — revoke a device
 /api/notes                      (post|get)
@@ -45,7 +45,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | Handler | Route | Notes |
 |---------|-------|-------|
 | `health` | `GET /health` | returns `"ok"`; never rate-limited |
-| `metrics` | `GET /api/metrics` | row counts + live session/connection numbers |
+| `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
 | `register` | `POST /api/register` | `{email, password, display_name?}`; 409 on dup email; min 8-char password |
 | `login` | `POST /api/login` | verifies password, creates a device, returns a token |
 | `create_device` / `list_devices` | `/api/devices` | add a device (returns its token) / list |

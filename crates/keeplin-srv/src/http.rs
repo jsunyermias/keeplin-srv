@@ -31,6 +31,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(state.config.max_upload_bytes));
 
     let protected = Router::new()
+        // Aggregate counters are operational data (deployment size, live activity), so they
+        // require a valid token rather than being world-readable (issue #22). Operators who
+        // want stricter isolation should bind this behind an admin network/proxy.
+        .route("/api/metrics", get(metrics))
         .route("/api/devices", post(create_device).get(list_devices))
         .route("/api/devices/:id", axum::routing::delete(delete_device))
         .route("/api/notes", post(create_note).get(list_notes))
@@ -69,7 +73,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     // Everything except `/health` sits behind the per-IP rate limiter, so
     // orchestrator liveness probes are never throttled.
     let limited = Router::new()
-        .route("/api/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .merge(protected)
@@ -165,11 +168,16 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let user = state
-        .store
-        .get_user_by_email(&body.email)
-        .await?
-        .ok_or(AppError::InvalidToken)?;
+    let user = match state.store.get_user_by_email(&body.email).await? {
+        Some(user) => user,
+        None => {
+            // Verify against a fixed dummy hash so a missing account costs the same Argon2
+            // work as a wrong password — otherwise response timing reveals which emails have
+            // accounts (issue #32). The result is discarded; the outcome is identical.
+            let _ = auth::verify_password(&body.password, auth::dummy_password_hash());
+            return Err(AppError::InvalidToken);
+        }
+    };
 
     if !auth::verify_password(&body.password, &user.password_hash)? {
         return Err(AppError::InvalidToken);

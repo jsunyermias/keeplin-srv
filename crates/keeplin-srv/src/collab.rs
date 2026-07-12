@@ -187,6 +187,14 @@ pub async fn handler(
         .or(params.get("token").map(String::as_str))
         .ok_or(AppError::MissingToken)?;
     let authed = auth::verify_token(token, &state.config.jwt_secret)?;
+    // Deleting a device revokes its token immediately: the collaborative channel must
+    // re-check that the token's device still exists and belongs to the same user, exactly
+    // like the REST middleware and the sync relay do — otherwise a revoked token keeps
+    // editing notes until it expires (issue #20).
+    match state.store.get_device(authed.device_id).await? {
+        Some(device) if device.user_id == authed.user_id => {}
+        _ => return Err(AppError::InvalidToken),
+    }
     let user = state
         .store
         .get_user_by_id(authed.user_id)

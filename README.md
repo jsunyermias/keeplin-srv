@@ -48,7 +48,7 @@ resolve against the order entity.
 
 ## REST API
 
-- `GET /health` · `GET /api/metrics` (aggregate counters: users, notes, lines,
+- `GET /health` · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
   tombstones, live sessions/connections)
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
@@ -151,7 +151,7 @@ credentials, and put a TLS reverse proxy in front for production.
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP/WS port |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
-| `JWT_SECRET` | dev value | Token signing secret; change it |
+| `JWT_SECRET` | **required** | Token signing secret; server refuses to start on a weak/placeholder value (issue #19). `KEEPLIN_DEV_INSECURE=1` for local dev |
 | `TOKEN_TTL_DAYS` | `365` | Token lifetime |
 | `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
 | `LINES_GC_DAYS` | `30` | Compact line tombstones older than N days (`0` disables) |

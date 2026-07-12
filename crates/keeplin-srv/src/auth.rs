@@ -47,6 +47,18 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
     Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
+/// A valid Argon2 hash of a fixed dummy password, computed once. `login` verifies against
+/// it when the email has no account so that a missing account and a wrong password take the
+/// same time, closing the user-enumeration timing side-channel (issue #32).
+pub fn dummy_password_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        hash_password("timing-equalizer-not-a-real-password")
+            .expect("hashing a fixed dummy password never fails")
+    })
+}
+
 pub fn create_token(
     user_id: Uuid,
     device_id: Uuid,

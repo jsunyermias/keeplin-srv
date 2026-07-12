@@ -54,6 +54,55 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// The historical dev placeholder. It is public in the source, so a token signed with it is
+/// forgeable by anyone — it must never authenticate a real deployment.
+const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
+
+/// Minimum acceptable secret length (bytes). Short secrets are brute-forceable.
+const MIN_JWT_SECRET_LEN: usize = 16;
+
+/// Whether the operator explicitly opted into insecure local-dev behaviour.
+fn dev_insecure() -> bool {
+    std::env::var("KEEPLIN_DEV_INSECURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// A secret that must not authenticate a real deployment: empty, the public dev
+/// placeholder, or shorter than [`MIN_JWT_SECRET_LEN`].
+fn is_weak_secret(s: &str) -> bool {
+    s.trim().is_empty() || s == DEV_JWT_SECRET || s.len() < MIN_JWT_SECRET_LEN
+}
+
+/// Resolve `JWT_SECRET`, refusing to start on a missing, empty, too-short, or placeholder
+/// value — otherwise the server would sign and verify every device token with a guessable
+/// key, letting anyone forge a token for any user (issue #19). `KEEPLIN_DEV_INSECURE=1`
+/// downgrades this to a loud warning for local development only.
+fn resolve_jwt_secret() -> String {
+    let raw = std::env::var("JWT_SECRET").ok();
+    match raw {
+        Some(s) if !is_weak_secret(&s) => s,
+        other => {
+            if dev_insecure() {
+                tracing::warn!(
+                    "KEEPLIN_DEV_INSECURE=1: using an insecure JWT_SECRET — device tokens are \
+                     forgeable. NEVER do this in production."
+                );
+                other
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| DEV_JWT_SECRET.into())
+            } else {
+                panic!(
+                    "JWT_SECRET must be set to a strong random secret of at least \
+                     {MIN_JWT_SECRET_LEN} characters (not empty and not the dev placeholder). \
+                     Without it, device tokens can be forged. Set JWT_SECRET, or set \
+                     KEEPLIN_DEV_INSECURE=1 for local development only."
+                );
+            }
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         Self {
@@ -62,8 +111,7 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3000),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
-            jwt_secret: std::env::var("JWT_SECRET")
-                .unwrap_or_else(|_| "dev-secret-change-in-production".into()),
+            jwt_secret: resolve_jwt_secret(),
             token_ttl_days: std::env::var("TOKEN_TTL_DAYS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -87,5 +135,25 @@ impl Config {
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weak_secrets_are_rejected() {
+        assert!(is_weak_secret(""));
+        assert!(is_weak_secret("   "));
+        assert!(is_weak_secret(DEV_JWT_SECRET));
+        assert!(is_weak_secret("short"));
+        assert!(is_weak_secret(&"x".repeat(MIN_JWT_SECRET_LEN - 1)));
+    }
+
+    #[test]
+    fn a_strong_secret_is_accepted() {
+        assert!(!is_weak_secret(&"x".repeat(MIN_JWT_SECRET_LEN)));
+        assert!(!is_weak_secret("a-genuinely-long-random-production-secret"));
     }
 }

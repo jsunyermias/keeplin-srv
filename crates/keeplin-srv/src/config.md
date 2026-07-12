@@ -13,7 +13,8 @@ helper.
 |---------|-------|---------|---------|
 | `PORT` | `port` | `3000` | HTTP/WS listen port |
 | `DATABASE_URL` | `database_url` | — (required) | PostgreSQL connection string; panics if unset |
-| `JWT_SECRET` | `jwt_secret` | dev value | HMAC secret for signing device tokens; **change in production** |
+| `JWT_SECRET` | `jwt_secret` | — (required) | HMAC secret for signing device tokens. The server **refuses to start** if it is unset, empty, shorter than 16 chars, or the known dev placeholder (issue #19); set `KEEPLIN_DEV_INSECURE=1` to allow a weak/placeholder secret for local dev only |
+| `KEEPLIN_DEV_INSECURE` | — | `false` | `1`/`true` downgrades the `JWT_SECRET` strength check to a warning (local dev only — tokens become forgeable) |
 | `TOKEN_TTL_DAYS` | `token_ttl_days` | `365` | Device-token lifetime |
 | `CHANGES_RETENTION_DAYS` | `retention_days` | `0` (off) | Prune delivered relay-journal rows older than N days |
 | `LINES_GC_DAYS` | `lines_gc_days` | `30` | Compact line tombstones older than N days (design §6.4) |
@@ -30,12 +31,13 @@ helper.
 
 ## Notes & gotchas
 
-- `DATABASE_URL` is the only hard requirement — `from_env` panics if it is missing, on
-  purpose (the server cannot run without it).
+- `DATABASE_URL` and `JWT_SECRET` are hard requirements — `from_env` panics if either is
+  missing (or if `JWT_SECRET` is weak), on purpose: a guessable signing key lets anyone forge
+  a token for any user, so the server must not run without a real secret. Use
+  `KEEPLIN_DEV_INSECURE=1` only for local `cargo run`.
 - Leave `RATE_LIMIT_PER_MIN=0` behind a reverse proxy: every request would carry the proxy's
   IP and share one bucket. Rate-limit at the proxy instead.
-- `JWT_SECRET`'s default exists only so `cargo run` works out of the box; rotating it
-  invalidates every issued token.
+- Rotating `JWT_SECRET` invalidates every issued token (all devices must log in again).
 
 ## Related files
 
