@@ -11,6 +11,10 @@ shapes independently of the crate version.
 ## [Unreleased]
 
 ### Security
+- Optional at-rest encryption of note titles and line content (`AT_REST_KEY`,
+  AES-256-GCM), so a database dump/backup shows ciphertext, not note contents
+  (keeplin#110). Opt-in and backward compatible: unset stores plaintext, and
+  enabling it keeps pre-existing plaintext rows readable.
 - Normalize (lowercase/trim) and validate the email on register/login, share and
   transfer, so login is case-insensitive and an address maps to one account (#43).
 - Collapse database/internal errors to a generic `500` body (full detail logged

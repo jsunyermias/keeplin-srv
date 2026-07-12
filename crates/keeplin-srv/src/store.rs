@@ -268,14 +268,27 @@ fn incoming_wins(
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Store {
     pool: Pool<Postgres>,
+    /// At-rest cipher for note content/title (issue keeplin#110). Disabled
+    /// (passthrough) unless `AT_REST_KEY` is configured.
+    cipher: crate::crypto::Cipher,
 }
 
 impl Store {
+    /// Build a store with encryption **disabled** (plaintext). Used by tests and
+    /// as the default; production wires a real cipher via [`with_cipher`].
     pub fn new(pool: Pool<Postgres>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            cipher: crate::crypto::Cipher::from_key(None).expect("null key never fails"),
+        }
+    }
+
+    /// Build a store with a configured at-rest cipher.
+    pub fn with_cipher(pool: Pool<Postgres>, cipher: crate::crypto::Cipher) -> Self {
+        Self { pool, cipher }
     }
 
     // ── Users ────────────────────────────────────────────────────────────────
@@ -752,11 +765,11 @@ impl Store {
         owner_id: Uuid,
     ) -> Result<Note, AppError> {
         let mut tx = self.pool.begin().await?;
-        let note = sqlx::query_as::<_, Note>(&format!(
+        let mut note = sqlx::query_as::<_, Note>(&format!(
             "INSERT INTO notes (id, title, owner_id) VALUES ($1, $2, $3) RETURNING {NOTE_COLS}"
         ))
         .bind(id.unwrap_or_else(Uuid::new_v4))
-        .bind(title)
+        .bind(self.cipher.encrypt(title)?)
         .bind(owner_id)
         .fetch_one(&mut *tx)
         .await
@@ -764,6 +777,7 @@ impl Store {
             sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict,
             _ => AppError::from(e),
         })?;
+        note.title = title.to_string();
         sqlx::query(
             r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
                VALUES ($1, '[]', now(), '{}', $2)"#,
@@ -777,12 +791,15 @@ impl Store {
     }
 
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
-        let note = sqlx::query_as::<_, Note>(&format!(
+        let mut note = sqlx::query_as::<_, Note>(&format!(
             "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
         ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
+        if let Some(note) = note.as_mut() {
+            note.title = self.cipher.decrypt(&note.title)?;
+        }
         Ok(note)
     }
 
@@ -818,6 +835,10 @@ impl Store {
         .bind(cur_id)
         .fetch_all(&self.pool)
         .await?;
+        let mut notes = notes;
+        for note in notes.iter_mut() {
+            note.title = self.cipher.decrypt(&note.title)?;
+        }
         Ok(notes)
     }
 
@@ -827,6 +848,11 @@ impl Store {
         id: Uuid,
         patch: &NotePatch,
     ) -> Result<Option<Note>, AppError> {
+        let enc_title = patch
+            .title
+            .as_deref()
+            .map(|t| self.cipher.encrypt(t))
+            .transpose()?;
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET
                    title = COALESCE($2, title),
@@ -839,7 +865,7 @@ impl Store {
                RETURNING {NOTE_COLS}"#
         ))
         .bind(id)
-        .bind(patch.title.as_deref())
+        .bind(enc_title.as_deref())
         .bind(patch.notebook_id.is_some())
         .bind(patch.notebook_id.flatten())
         .bind(patch.is_todo)
@@ -849,7 +875,18 @@ impl Store {
         .bind(patch.todo_completed.flatten())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(note)
+        self.decrypt_note_title(note)
+    }
+
+    /// Decrypt the `title` of an optional note read straight from the database.
+    fn decrypt_note_title(&self, note: Option<Note>) -> Result<Option<Note>, AppError> {
+        match note {
+            Some(mut n) => {
+                n.title = self.cipher.decrypt(&n.title)?;
+                Ok(Some(n))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
@@ -861,7 +898,7 @@ impl Store {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(note)
+        self.decrypt_note_title(note)
     }
 
     /// Transfer a note's ownership to `new_owner` (ownership is separate from capability
@@ -880,7 +917,7 @@ impl Store {
         .bind(new_owner)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(note)
+        self.decrypt_note_title(note)
     }
 
     // ── Shares ───────────────────────────────────────────────────────────────
@@ -1077,25 +1114,31 @@ impl Store {
     where
         E: sqlx::Executor<'e, Database = Postgres>,
     {
-        let line = sqlx::query_as::<_, Line>(
+        let mut line = sqlx::query_as::<_, Line>(
             r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
                FROM lines WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(exec)
         .await?;
+        if let Some(line) = line.as_mut() {
+            line.content = self.cipher.decrypt(&line.content)?;
+        }
         Ok(line)
     }
 
     /// Every line of the note, tombstones included (snapshots need them).
     pub async fn list_lines(&self, note_id: Uuid) -> Result<Vec<Line>, AppError> {
-        let lines = sqlx::query_as::<_, Line>(
+        let mut lines = sqlx::query_as::<_, Line>(
             r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
                FROM lines WHERE note_id = $1"#,
         )
         .bind(note_id)
         .fetch_all(&self.pool)
         .await?;
+        for line in lines.iter_mut() {
+            line.content = self.cipher.decrypt(&line.content)?;
+        }
         Ok(lines)
     }
 
@@ -1135,19 +1178,20 @@ impl Store {
     where
         E: sqlx::Executor<'e, Database = Postgres>,
     {
-        let line = sqlx::query_as::<_, Line>(
+        let mut line = sqlx::query_as::<_, Line>(
             r#"INSERT INTO lines (id, note_id, content, created_at, updated_at, vv, last_writer)
                VALUES ($1, $2, $3, now(), $4, $5, $6)
                RETURNING id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer"#,
         )
         .bind(id)
         .bind(note_id)
-        .bind(content)
+        .bind(self.cipher.encrypt(content)?)
         .bind(updated_at)
         .bind(Json(vv))
         .bind(last_writer)
         .fetch_one(exec)
         .await?;
+        line.content = content.to_string();
         Ok(line)
     }
 
@@ -1179,19 +1223,22 @@ impl Store {
     where
         E: sqlx::Executor<'e, Database = Postgres>,
     {
-        let line = sqlx::query_as::<_, Line>(
+        let mut line = sqlx::query_as::<_, Line>(
             r#"UPDATE lines
                SET content = $2, vv = $3, last_writer = $4, updated_at = $5, deleted_at = NULL
                WHERE id = $1
                RETURNING id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer"#,
         )
         .bind(id)
-        .bind(content)
+        .bind(self.cipher.encrypt(content)?)
         .bind(Json(vv))
         .bind(last_writer)
         .bind(updated_at)
         .fetch_optional(exec)
         .await?;
+        if let Some(line) = line.as_mut() {
+            line.content = content.to_string();
+        }
         Ok(line)
     }
 
@@ -1222,7 +1269,7 @@ impl Store {
     where
         E: sqlx::Executor<'e, Database = Postgres>,
     {
-        let line = sqlx::query_as::<_, Line>(
+        let mut line = sqlx::query_as::<_, Line>(
             r#"UPDATE lines
                SET deleted_at = $2, vv = $3, last_writer = $4, updated_at = $5
                WHERE id = $1
@@ -1235,6 +1282,9 @@ impl Store {
         .bind(updated_at)
         .fetch_optional(exec)
         .await?;
+        if let Some(line) = line.as_mut() {
+            line.content = self.cipher.decrypt(&line.content)?;
+        }
         Ok(line)
     }
 

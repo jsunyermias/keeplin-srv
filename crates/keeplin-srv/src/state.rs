@@ -23,9 +23,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config, pool: Pool<Postgres>) -> Self {
         let rate_limiter = RateLimiter::new(config.rate_limit_per_min);
+        // A present-but-invalid AT_REST_KEY is a fatal misconfiguration; validate
+        // it at startup (main also checks it, so this never fires in practice).
+        let cipher = crate::crypto::Cipher::from_key(config.at_rest_key.as_deref())
+            .expect("valid AT_REST_KEY (validated at startup)");
         Self {
             config,
-            store: Store::new(pool),
+            store: Store::with_cipher(pool, cipher),
             hub: SyncHub::default(),
             collab: CollabRegistry::default(),
             rate_limiter,

@@ -43,6 +43,7 @@ fn test_config() -> Config {
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,
+        at_rest_key: None,
         history_since_access: false,
     }
 }
@@ -814,6 +815,73 @@ async fn oversized_note_body_is_refused(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(refused.status(), 413, "oversized body must be 413");
+}
+
+// ── At-rest encryption of note content/title (keeplin#110) ───────────────────
+
+/// With `AT_REST_KEY` set, the server transparently returns plaintext to the
+/// authorised caller, but the `notes.title` and `lines.content` columns hold
+/// ciphertext — so a database dump / SQL read never sees note contents.
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_content_is_encrypted_at_rest(pool: PgPool) {
+    // base64 of 32 zero bytes — a valid AES-256 key for the test.
+    let key = format!("{}=", "A".repeat(43));
+    let mut config = test_config();
+    config.at_rest_key = Some(key);
+    let addr = spawn_server_with_config(pool.clone(), config).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    let resp = client
+        .post(format!("http://{addr}/api/import"))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "Secret Title", "body": "line one\nline two" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let note_id = resp.json::<Value>().await.unwrap()["note_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The authorised caller gets plaintext back (server decrypts transparently).
+    let exported: Value = client
+        .get(format!("http://{addr}/api/notes/{note_id}/export"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(exported["title"], "Secret Title");
+    assert_eq!(exported["body"], "line one\nline two");
+
+    // The raw columns hold ciphertext, not the plaintext.
+    let note_uuid: Uuid = note_id.parse().unwrap();
+    let raw_title: String = sqlx::query_scalar("SELECT title FROM notes WHERE id = $1")
+        .bind(note_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        raw_title.starts_with("enc:v1:") && !raw_title.contains("Secret"),
+        "title must be encrypted at rest, got {raw_title}"
+    );
+    let raw_lines: Vec<String> = sqlx::query_scalar("SELECT content FROM lines WHERE note_id = $1")
+        .bind(note_uuid)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!raw_lines.is_empty());
+    for c in &raw_lines {
+        assert!(
+            c.starts_with("enc:v1:") && !c.contains("line "),
+            "line content must be encrypted at rest, got {c}"
+        );
+    }
 }
 
 // ── Per-entity history + visibility window (issue #27) ───────────────────────

@@ -37,6 +37,7 @@ fn test_config() -> Config {
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,
+        at_rest_key: None,
         history_since_access: false,
     }
 }

@@ -63,6 +63,10 @@ pub struct Config {
     /// so the open endpoint cannot be used to create accounts (issue #21). When
     /// `false`, registration returns `403`.
     pub registration_enabled: bool,
+    /// Base64-encoded 32-byte key for at-rest encryption of note content and
+    /// titles (issue keeplin#110), from `AT_REST_KEY`. `None` (unset) disables
+    /// encryption and stores those fields as plaintext (backward compatible).
+    pub at_rest_key: Option<String>,
     /// History visibility for shared notes/notebooks (issue #27). `false` (default,
     /// `HISTORY_VISIBILITY=creation`): everyone with read access sees the entity's full
     /// history from creation. `true` (`HISTORY_VISIBILITY=access`): a **collaborator** sees
@@ -159,6 +163,9 @@ impl Config {
             max_note_body_bytes: env_parse("MAX_NOTE_BODY_BYTES", 25 * 1024 * 1024),
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
+            at_rest_key: std::env::var("AT_REST_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty()),
             registration_enabled: env_parse("REGISTRATION_ENABLED", true),
             history_since_access: std::env::var("HISTORY_VISIBILITY")
                 .map(|v| v.eq_ignore_ascii_case("access"))
