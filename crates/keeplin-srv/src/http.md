@@ -3,20 +3,22 @@
 ## Purpose
 
 Builds the axum `Router` and implements every REST/JSON handler: accounts, devices, notes
-CRUD, sharing, and import/export, plus `/health` and `/api/metrics`. Wires the auth middleware
+CRUD, sharing, and import/export, plus `/health`, `/ready`, and `/api/metrics`. Wires the auth middleware
 onto protected routes and the rate limiter onto everything except `/health`.
 
 ## Router shape
 
 ```
-/health                         (get)   — unauthenticated, NOT rate-limited
+/health                         (get)   — liveness (unauthenticated, NOT rate-limited)
+/ready                          (get)   — readiness: DB round-trip, 503 if down (unauthenticated)
 ── everything below is rate-limited (per-IP) ──
-/api/metrics                    (get)   — aggregate counters
 /api/register                   (post)
 /api/login                      (post)  — returns { token, device_id }
 ── everything below also requires auth_mw (Bearer token + live device) ──
-/api/devices                    (post|get)
-/api/devices/:id                (delete)          — revoke a device
+/api/metrics                    (get)   — aggregate counters (auth required, issue #22)
+/api/devices                    (post|get|delete) — add / list / revoke ALL (sign out everywhere)
+/api/devices/:id                (delete)          — revoke one device
+/api/account/password           (post)            — change password (needs current)
 /api/notes                      (post|get)
 /api/notes/:id                  (get|patch|delete)
 /api/notes/:id/share            (post|get)        — grant / list shares
@@ -44,12 +46,15 @@ onto protected routes and the rate limiter onto everything except `/health`.
 
 | Handler | Route | Notes |
 |---------|-------|-------|
-| `health` | `GET /health` | returns `"ok"`; never rate-limited |
-| `metrics` | `GET /api/metrics` | row counts + live session/connection numbers |
+| `health` | `GET /health` | liveness: returns `"ok"`; never rate-limited |
+| `ready` | `GET /ready` | readiness: DB round-trip; `200 ready` or `503` if the database is unreachable (issue #36); never rate-limited |
+| `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
 | `register` | `POST /api/register` | `{email, password, display_name?}`; 409 on dup email; min 8-char password |
 | `login` | `POST /api/login` | verifies password, creates a device, returns a token |
 | `create_device` / `list_devices` | `/api/devices` | add a device (returns its token) / list |
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
+| `delete_all_devices` | `DELETE /api/devices` | revoke **all** the caller's devices — sign out everywhere (issue #31) |
+| `change_password` | `POST /api/account/password` | `{current_password, new_password}`; verifies current, min 8-char new (issue #31). Existing JWTs stay valid — follow with `DELETE /api/devices` to also sign out everywhere |
 | `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared |
 | `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
 | `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`; a move into a notebook additionally needs `write` on the **destination** notebook, since the note adopts its grants; a `notebook_id` of `null` **or the nil UUID** is a move to the Inbox — keeplin-core models the Inbox as the nil uuid — with no destination check and no cascade) / owner-only soft delete |
@@ -82,8 +87,8 @@ the server keeps the collaborative line model underneath.
 
 ## Design notes
 
-- `/health` is deliberately outside the rate-limited sub-router so orchestrator liveness
-  probes are never throttled.
+- `/health` and `/ready` sit outside the rate-limited sub-router so orchestrator probes are
+  never throttled. `/health` is liveness (no dependencies); `/ready` is readiness (DB round-trip).
 - `update_note`'s `PATCH` body deserialises present-but-null fields as "clear" and absent
   fields as "unchanged" (`present` deserializer → `NotePatch`).
 - Import seeds each line's version vector with the importer's **device** component, consistent
@@ -94,4 +99,4 @@ the server keeps the collaborative line model underneath.
 - `auth.md` — the middleware and token issuance.
 - `permissions.md` — the capability model + `resolve_note_access` used by note/share handlers.
 - `store.md` — every query these handlers run.
-- `ratelimit.md` — the layer applied to all routes but `/health`.
+- `ratelimit.md` — the layer applied to all routes but `/health` and `/ready`.

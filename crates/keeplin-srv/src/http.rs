@@ -31,8 +31,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(state.config.max_upload_bytes));
 
     let protected = Router::new()
-        .route("/api/devices", post(create_device).get(list_devices))
+        // Aggregate counters are operational data (deployment size, live activity), so they
+        // require a valid token rather than being world-readable (issue #22). Operators who
+        // want stricter isolation should bind this behind an admin network/proxy.
+        .route("/api/metrics", get(metrics))
+        .route(
+            "/api/devices",
+            post(create_device)
+                .get(list_devices)
+                .delete(delete_all_devices),
+        )
         .route("/api/devices/:id", axum::routing::delete(delete_device))
+        .route("/api/account/password", post(change_password))
         .route("/api/notes", post(create_note).get(list_notes))
         .route(
             "/api/notes/:id",
@@ -69,7 +79,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     // Everything except `/health` sits behind the per-IP rate limiter, so
     // orchestrator liveness probes are never throttled.
     let limited = Router::new()
-        .route("/api/metrics", get(metrics))
         .route("/api/register", post(register))
         .route("/api/login", post(login))
         .merge(protected)
@@ -85,12 +94,31 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .merge(limited)
         .with_state(state)
 }
 
+/// Liveness: the process is up. Cheap and dependency-free, so an orchestrator never
+/// restarts a healthy process just because the database blipped. Never rate-limited.
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Readiness: the process can actually serve requests — it does a lightweight database
+/// round-trip and returns `503` if the database is unreachable, so a load balancer stops
+/// routing traffic to an instance that would only error (issue #36). Never rate-limited.
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.ping().await {
+        Ok(()) => (axum::http::StatusCode::OK, "ready"),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "database unavailable",
+            )
+        }
+    }
 }
 
 /// Aggregate operational counters: row counts plus live session/connection
@@ -130,6 +158,11 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Json<RegisterResponse>, AppError> {
+    // A private/single-tenant deployment can close signups (issue #21); the open endpoint
+    // would otherwise let anyone create unlimited accounts.
+    if !state.config.registration_enabled {
+        return Err(AppError::Forbidden);
+    }
     if body.password.len() < 8 {
         return Err(AppError::BadRequest("password too short".into()));
     }
@@ -165,11 +198,16 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let user = state
-        .store
-        .get_user_by_email(&body.email)
-        .await?
-        .ok_or(AppError::InvalidToken)?;
+    let user = match state.store.get_user_by_email(&body.email).await? {
+        Some(user) => user,
+        None => {
+            // Verify against a fixed dummy hash so a missing account costs the same Argon2
+            // work as a wrong password — otherwise response timing reveals which emails have
+            // accounts (issue #32). The result is discarded; the outcome is identical.
+            let _ = auth::verify_password(&body.password, auth::dummy_password_hash());
+            return Err(AppError::InvalidToken);
+        }
+    };
 
     if !auth::verify_password(&body.password, &user.password_hash)? {
         return Err(AppError::InvalidToken);
@@ -254,6 +292,46 @@ async fn list_devices(
 ) -> Result<Json<Vec<UserDevice>>, AppError> {
     let devices = state.store.list_devices_by_user(user.user_id).await?;
     Ok(Json(devices))
+}
+
+/// Revoke **all** of the caller's devices — "sign out everywhere" (issue #31). Every token,
+/// including the caller's current one, stops working immediately.
+async fn delete_all_devices(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.store.delete_all_devices(user.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "revoked": removed })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+/// `POST /api/account/password` — change the caller's password (issue #31). Requires the
+/// current password. Existing device tokens remain valid (they are JWTs); call
+/// `DELETE /api/devices` afterwards to also sign out everywhere.
+async fn change_password(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if body.new_password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.current_password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    let hash = auth::hash_password(&body.new_password)?;
+    state.store.update_password(user.user_id, &hash).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── Domain entities (server = source of truth; client DB is a cache) ─────────

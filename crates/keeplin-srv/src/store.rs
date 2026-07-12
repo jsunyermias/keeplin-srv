@@ -264,6 +264,16 @@ impl Store {
         Ok(user)
     }
 
+    /// Replace a user's password hash (issue #31 — self-service password change).
+    pub async fn update_password(&self, id: Uuid, password_hash: &str) -> Result<(), AppError> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(password_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ── Devices ──────────────────────────────────────────────────────────────
 
     pub async fn create_device(
@@ -318,6 +328,16 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Delete every device of `user_id`, revoking all their tokens at once — a
+    /// "sign out everywhere" (issue #31). Returns how many devices were removed.
+    pub async fn delete_all_devices(&self, user_id: Uuid) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM user_devices WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn touch_device(&self, device_id: Uuid) -> Result<(), AppError> {
         sqlx::query("UPDATE user_devices SET last_seen_at = now() WHERE id = $1")
             .bind(device_id)
@@ -349,7 +369,7 @@ impl Store {
                 r#"INSERT INTO changes
                        (user_id, origin_device_id, batch_id, batch_index, sync_device_id, payload)
                    VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (batch_id, batch_index) DO NOTHING
+                   ON CONFLICT (user_id, batch_id, batch_index) DO NOTHING
                    RETURNING seq"#,
             )
             .bind(user_id)
@@ -494,11 +514,19 @@ impl Store {
 
     // ── Retention ────────────────────────────────────────────────────────────
 
-    /// Delete journal rows older than `older_than` that every device of the
-    /// owning user has already passed (seq <= the user's minimum cursor). A
-    /// device that has never connected holds the minimum at 0 and blocks
-    /// pruning for that user — the conservative choice: nothing is deleted
-    /// that some device may still need.
+    /// Delete journal rows older than `older_than` that every **connected** device of the
+    /// owning user has already passed (seq <= the minimum delivery cursor among devices that
+    /// have a cursor row).
+    ///
+    /// Only devices that have actually connected (and thus have a `device_cursors` row) count
+    /// toward the minimum — a device that was logged in but never connected no longer blocks
+    /// pruning forever (issue #23). This is safe because a fresh or long-absent device does
+    /// **not** replay the journal from seq 0: it cold-rehydrates the materialised entities
+    /// over REST (notebooks/tags/resources) and rebuilds note state from collaborative
+    /// snapshots, so pruned *delivered, aged-out* rows are never needed to reconstruct state
+    /// (see the `materialised_entities_survive_journal_pruning` test). Only rows older than
+    /// the retention window are eligible, so recent changes a new device might still want are
+    /// untouched. A user with no connected devices prunes nothing (MIN over no rows → 0).
     pub async fn prune_delivered_changes(
         &self,
         older_than: DateTime<Utc>,
@@ -507,11 +535,34 @@ impl Store {
             r#"DELETE FROM changes c
                WHERE c.received_at < $1
                  AND c.seq <= (
-                     SELECT COALESCE(MIN(COALESCE(dc.last_seq, 0)), 0)
+                     SELECT COALESCE(MIN(dc.last_seq), 0)
                      FROM user_devices d
-                     LEFT JOIN device_cursors dc ON dc.device_id = d.id
+                     JOIN device_cursors dc ON dc.device_id = d.id
                      WHERE d.user_id = c.user_id
                  )"#,
+        )
+        .bind(older_than)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Reclaim the binary payloads of resources soft-deleted before `older_than`, returning
+    /// how many blobs were freed. The resource **metadata tombstone is kept** (it must keep
+    /// competing in conflict resolution so the delete converges); only the dead bytes in
+    /// `resource_blobs` are released. Mirrors the client's `purge_deleted_resources`
+    /// (issue #24). A generous window avoids racing a concurrent revive on a peer that has
+    /// not synced yet.
+    pub async fn purge_deleted_resource_blobs(
+        &self,
+        older_than: DateTime<Utc>,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"DELETE FROM resource_blobs rb
+               USING resources r
+               WHERE rb.resource_id = r.id
+                 AND r.deleted_at IS NOT NULL
+                 AND r.deleted_at < $1"#,
         )
         .bind(older_than)
         .execute(&self.pool)
@@ -545,9 +596,23 @@ impl Store {
                 .push(row.get("id"));
         }
         for (note_id, dead) in by_note {
-            if let Some(order) = self.get_note_order(note_id).await? {
-                let kept: Vec<Uuid> = order
-                    .order
+            // Read-modify-write the order under a row lock so a concurrent collaborative
+            // `Insert`/`Move` (which rewrites the whole order via `set_note_order`) cannot be
+            // clobbered by this compaction (issue #25). `SELECT … FOR UPDATE` holds the lock
+            // from read to write; a concurrent order UPDATE blocks until this commits and then
+            // lands on top, so its change survives. Compaction only removes dead ids, so a
+            // membership drop the concurrent write does not know about is re-applied by the
+            // next GC pass — never a lost edit.
+            let mut tx = self.pool.begin().await?;
+            let existing: Option<(Json<Vec<Uuid>>,)> = sqlx::query_as(
+                "SELECT order_json FROM note_line_order WHERE note_id = $1 FOR UPDATE",
+            )
+            .bind(note_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((order_json,)) = existing {
+                let kept: Vec<Uuid> = order_json
+                    .0
                     .into_iter()
                     .filter(|id| !dead.contains(id))
                     .collect();
@@ -556,11 +621,19 @@ impl Store {
                 sqlx::query("UPDATE note_line_order SET order_json = $2 WHERE note_id = $1")
                     .bind(note_id)
                     .bind(Json(kept))
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
             }
+            tx.commit().await?;
         }
         Ok(rows.len() as u64)
+    }
+
+    /// Lightweight database round-trip for the readiness probe (issue #36): succeeds only if
+    /// a pooled connection can be acquired and the database answers.
+    pub async fn ping(&self) -> Result<(), AppError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
     }
 
     /// Aggregate row counts for `/api/metrics`.
@@ -1496,9 +1569,11 @@ impl Store {
 
     // ── Per-user quotas ──────────────────────────────────────────────────────
 
-    /// Total bytes of the user's resource binaries, excluding one resource id.
-    /// Excluding the resource being written means an overwrite is measured by
-    /// its new size, not double-counted.
+    /// Total bytes of the user's **live** resource binaries, excluding one resource id.
+    /// Excluding the resource being written means an overwrite is measured by its new size,
+    /// not double-counted. Soft-deleted resources are excluded (`deleted_at IS NULL`) so a
+    /// user can recover quota by deleting attachments — their bytes are later reclaimed by
+    /// `purge_deleted_resource_blobs` (issue #24).
     pub async fn user_blob_bytes_excluding(
         &self,
         user_id: Uuid,
@@ -1508,7 +1583,7 @@ impl Store {
             r#"SELECT COALESCE(SUM(octet_length(rb.data)), 0)::bigint
                FROM resource_blobs rb
                JOIN resources r ON r.id = rb.resource_id
-               WHERE r.user_id = $1 AND rb.resource_id <> $2"#,
+               WHERE r.user_id = $1 AND r.deleted_at IS NULL AND rb.resource_id <> $2"#,
         )
         .bind(user_id)
         .bind(exclude)

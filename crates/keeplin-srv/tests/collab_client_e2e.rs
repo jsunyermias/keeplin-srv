@@ -32,6 +32,7 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        resource_purge_days: 0,
         db_max_connections: 5,
         db_acquire_timeout_secs: 10,
         db_idle_timeout_secs: 600,
@@ -42,6 +43,7 @@ fn test_config() -> Config {
         max_upload_bytes: 100 * 1024 * 1024,
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
+        registration_enabled: true,
     }
 }
 

@@ -48,7 +48,7 @@ resolve against the order entity.
 
 ## REST API
 
-- `GET /health` · `GET /api/metrics` (aggregate counters: users, notes, lines,
+- `GET /health` (liveness) · `GET /ready` (readiness — DB round-trip, `503` if down) · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
   tombstones, live sessions/connections)
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
@@ -115,7 +115,7 @@ auth_token = "<token from step 2>"
 docker compose up -d postgres
 
 # 2. Copy environment variables
-cp .env.example .env   # change JWT_SECRET in production
+cp .env.example .env   # then set JWT_SECRET (required): openssl rand -hex 32
 
 # 3. Build and run
 cargo run
@@ -131,7 +131,9 @@ The `keeplin-core` git dependency is **pinned by commit** in `Cargo.toml` for
 reproducible builds — bump that `rev` to adopt newer keeplin.
 
 ```bash
-# Whole stack (Postgres + server) for a local/demo run:
+# Whole stack (Postgres + server) for a local/demo run.
+# JWT_SECRET is REQUIRED — compose refuses to start without it:
+cp .env.example .env && printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 docker compose up --build
 
 # Or just the image:
@@ -142,8 +144,7 @@ docker run --rm -p 3000:3000 \
   keeplin-srv
 ```
 
-The Compose defaults are dev/demo only — override `JWT_SECRET`, use real Postgres
-credentials, and put a TLS reverse proxy in front for production.
+The Compose topology is dev/demo only: Postgres is bound to loopback (not the LAN), and `JWT_SECRET` must be supplied via `.env` (no working default). For production use real Postgres credentials, put a TLS reverse proxy in front, and consider `REGISTRATION_ENABLED=false`.
 
 ## Environment variables
 
@@ -151,7 +152,7 @@ credentials, and put a TLS reverse proxy in front for production.
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP/WS port |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
-| `JWT_SECRET` | dev value | Token signing secret; change it |
+| `JWT_SECRET` | **required** | Token signing secret; server refuses to start on a weak/placeholder value (issue #19). `KEEPLIN_DEV_INSECURE=1` for local dev |
 | `TOKEN_TTL_DAYS` | `365` | Token lifetime |
 | `CHANGES_RETENTION_DAYS` | `0` (disabled) | Relay journal pruning |
 | `LINES_GC_DAYS` | `30` | Compact line tombstones older than N days (`0` disables) |

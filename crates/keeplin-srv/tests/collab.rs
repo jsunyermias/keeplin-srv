@@ -24,6 +24,7 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        resource_purge_days: 0,
         db_max_connections: 5,
         db_acquire_timeout_secs: 10,
         db_idle_timeout_secs: 600,
@@ -34,6 +35,7 @@ fn test_config() -> Config {
         max_upload_bytes: 100 * 1024 * 1024,
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
+        registration_enabled: true,
     }
 }
 
@@ -481,6 +483,50 @@ async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     assert_eq!(export_body(addr, &token_b, &note_id).await, "");
 }
 
+/// Revoking a collaborator's share takes effect immediately on the live channel: a further
+/// edit is rejected without waiting for a reconnect (issue #30).
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid_a, _did_a, token_a) = user(addr, "a@example.com").await;
+    let (uid_b, did_b, token_b) = user(addr, "b@example.com").await;
+    let note_id = create_note(addr, &token_a, "Colaborativa").await;
+    share(addr, &token_a, &note_id, "b@example.com", "editor").await;
+
+    let mut ws_b = ws_connect(addr, &token_b).await;
+    send(&mut ws_b, join(&note_id)).await;
+    recv_until(&mut ws_b, "Welcome", |v| v["type"] == "Welcome").await;
+
+    // B edits successfully while shared.
+    let l1 = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_b,
+        insert_op(&note_id, &l1, None, "primera", &did_b, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token_a, &note_id, "primera").await;
+
+    // A revokes B's share while B stays connected.
+    let code = reqwest::Client::new()
+        .delete(format!("http://{addr}/api/notes/{note_id}/share/{uid_b}"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+
+    // B's next edit is rejected immediately (no reconnect needed).
+    let l2 = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_b,
+        insert_op(&note_id, &l2, Some(&l1), "segunda", &did_b, 2, T2),
+    )
+    .await;
+    let err = recv_until(&mut ws_b, "Error", |v| v["type"] == "Error").await;
+    assert_eq!(err["code"], "forbidden");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn outsider_cannot_join(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -679,6 +725,52 @@ async fn deleting_a_device_revokes_its_token(pool: PgPool) {
     assert_eq!(denied.status(), 401);
 }
 
+/// Deleting a device must also revoke its token on the collaborative channel, not only on
+/// REST (issue #20): `/api/ws` re-checks that the token's device still exists.
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleting_a_device_revokes_its_collab_token(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
+    let client = reqwest::Client::new();
+
+    let second: Value = client
+        .post(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token)
+        .json(&json!({ "device_name": "stolen-phone" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_token = second["token"].as_str().unwrap();
+    let second_id = second["device_id"].as_str().unwrap();
+
+    // The second token opens a collaborative connection…
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws?token={second_token}"))
+            .await
+            .is_ok(),
+        "a live device's token must connect"
+    );
+
+    // …until its device is revoked.
+    let del = client
+        .delete(format!("http://{addr}/api/devices/{second_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 200);
+
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws?token={second_token}"))
+            .await
+            .is_err(),
+        "a revoked device's token must be rejected on /api/ws"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn gc_compacts_old_tombstones(pool: PgPool) {
     let (addr, state) = spawn_server_with_state(pool).await;
@@ -755,14 +847,48 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     assert_eq!(order.order.len(), 1);
 }
 
+/// `/health` is a cheap liveness stub; `/ready` does a real DB round-trip. Both are
+/// unauthenticated and not rate-limited (issue #36).
+#[sqlx::test(migrations = "../../migrations")]
+async fn health_and_readiness_probes(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+
+    let health = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    assert_eq!(health.text().await.unwrap(), "ok");
+
+    // The database is up, so readiness passes with a DB round-trip.
+    let ready = client
+        .get(format!("http://{addr}/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 200);
+    assert_eq!(ready.text().await.unwrap(), "ready");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn metrics_reports_counts(pool: PgPool) {
     let addr = spawn_server(pool).await;
     let (_uid, _did, token) = user(addr, "a@example.com").await;
     create_note(addr, &token, "Contada").await;
 
+    // Metrics now require a valid token (issue #22): anonymous access is 401.
+    let anon = reqwest::Client::new()
+        .get(format!("http://{addr}/api/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), 401, "metrics must not be world-readable");
+
     let m: Value = reqwest::Client::new()
         .get(format!("http://{addr}/api/metrics"))
+        .bearer_auth(&token)
         .send()
         .await
         .unwrap()
@@ -795,25 +921,39 @@ async fn spawn_rate_limited(pool: PgPool, per_min: u32) -> SocketAddr {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
-    // Budget of 3 requests/minute from this IP.
-    let addr = spawn_rate_limited(pool, 3).await;
+    // Budget of 10 requests/minute from this IP (registration + login spend two).
+    let addr = spawn_rate_limited(pool, 10).await;
+    let (_uid, _did, token) = user(addr, "a@example.com").await;
     let client = reqwest::Client::new();
 
-    // The 4th rapid request to a limited route is throttled.
-    let mut statuses = Vec::new();
-    for _ in 0..5 {
+    // Hammer an authenticated limited route: early requests pass the limiter (200), and once
+    // the budget is spent the limiter short-circuits with 429 before the handler runs.
+    let mut got_ok = false;
+    let mut got_throttled = false;
+    for _ in 0..40 {
         let code = client
             .get(format!("http://{addr}/api/metrics"))
+            .bearer_auth(&token)
             .send()
             .await
             .unwrap()
             .status();
-        statuses.push(code);
+        match code.as_u16() {
+            200 => got_ok = true,
+            429 => {
+                got_throttled = true;
+                break;
+            }
+            other => panic!("unexpected status {other}"),
+        }
     }
-    assert_eq!(statuses[0], 200);
-    assert_eq!(
-        statuses[4], 429,
-        "burst past the budget must be throttled: {statuses:?}"
+    assert!(
+        got_ok,
+        "authenticated requests succeed before the budget is spent"
+    );
+    assert!(
+        got_throttled,
+        "burst past the budget must be throttled with 429"
     );
 
     // /health is never rate-limited — orchestrator probes must always pass.

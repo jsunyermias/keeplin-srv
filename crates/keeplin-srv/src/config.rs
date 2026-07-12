@@ -13,6 +13,10 @@ pub struct Config {
     /// Compact line tombstones soft-deleted more than this many days ago
     /// (design §6.4). `0` disables the garbage collection.
     pub lines_gc_days: u64,
+    /// Reclaim the binary payloads of resources soft-deleted more than this many
+    /// days ago (the metadata tombstone is always kept). `0` disables it. Mirrors
+    /// the client's `resource_purge_days` (issue #24).
+    pub resource_purge_days: u64,
 
     // ── Operability ──────────────────────────────────────────────────────────
     /// Maximum PostgreSQL pool connections.
@@ -45,6 +49,13 @@ pub struct Config {
     /// Maximum number of live notes a single user may own. Creating one past
     /// this is rejected with `507`.
     pub max_notes_per_user: i64,
+
+    // ── Access ────────────────────────────────────────────────────────────────
+    /// Whether `POST /api/register` accepts new signups. Defaults to `true` for
+    /// backward compatibility; set `false` on a private/single-tenant deployment
+    /// so the open endpoint cannot be used to create accounts (issue #21). When
+    /// `false`, registration returns `403`.
+    pub registration_enabled: bool,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -52,6 +63,55 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+/// The historical dev placeholder. It is public in the source, so a token signed with it is
+/// forgeable by anyone — it must never authenticate a real deployment.
+const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
+
+/// Minimum acceptable secret length (bytes). Short secrets are brute-forceable.
+const MIN_JWT_SECRET_LEN: usize = 16;
+
+/// Whether the operator explicitly opted into insecure local-dev behaviour.
+fn dev_insecure() -> bool {
+    std::env::var("KEEPLIN_DEV_INSECURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// A secret that must not authenticate a real deployment: empty, the public dev
+/// placeholder, or shorter than [`MIN_JWT_SECRET_LEN`].
+fn is_weak_secret(s: &str) -> bool {
+    s.trim().is_empty() || s == DEV_JWT_SECRET || s.len() < MIN_JWT_SECRET_LEN
+}
+
+/// Resolve `JWT_SECRET`, refusing to start on a missing, empty, too-short, or placeholder
+/// value — otherwise the server would sign and verify every device token with a guessable
+/// key, letting anyone forge a token for any user (issue #19). `KEEPLIN_DEV_INSECURE=1`
+/// downgrades this to a loud warning for local development only.
+fn resolve_jwt_secret() -> String {
+    let raw = std::env::var("JWT_SECRET").ok();
+    match raw {
+        Some(s) if !is_weak_secret(&s) => s,
+        other => {
+            if dev_insecure() {
+                tracing::warn!(
+                    "KEEPLIN_DEV_INSECURE=1: using an insecure JWT_SECRET — device tokens are \
+                     forgeable. NEVER do this in production."
+                );
+                other
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| DEV_JWT_SECRET.into())
+            } else {
+                panic!(
+                    "JWT_SECRET must be set to a strong random secret of at least \
+                     {MIN_JWT_SECRET_LEN} characters (not empty and not the dev placeholder). \
+                     Without it, device tokens can be forged. Set JWT_SECRET, or set \
+                     KEEPLIN_DEV_INSECURE=1 for local development only."
+                );
+            }
+        }
+    }
 }
 
 impl Config {
@@ -62,8 +122,7 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3000),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
-            jwt_secret: std::env::var("JWT_SECRET")
-                .unwrap_or_else(|_| "dev-secret-change-in-production".into()),
+            jwt_secret: resolve_jwt_secret(),
             token_ttl_days: std::env::var("TOKEN_TTL_DAYS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -76,6 +135,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+            resource_purge_days: env_parse("RESOURCE_PURGE_DAYS", 0),
             db_max_connections: env_parse("DB_MAX_CONNECTIONS", 10),
             db_acquire_timeout_secs: env_parse("DB_ACQUIRE_TIMEOUT_SECS", 10),
             db_idle_timeout_secs: env_parse("DB_IDLE_TIMEOUT_SECS", 600),
@@ -86,6 +146,27 @@ impl Config {
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 100 * 1024 * 1024),
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
+            registration_enabled: env_parse("REGISTRATION_ENABLED", true),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weak_secrets_are_rejected() {
+        assert!(is_weak_secret(""));
+        assert!(is_weak_secret("   "));
+        assert!(is_weak_secret(DEV_JWT_SECRET));
+        assert!(is_weak_secret("short"));
+        assert!(is_weak_secret(&"x".repeat(MIN_JWT_SECRET_LEN - 1)));
+    }
+
+    #[test]
+    fn a_strong_secret_is_accepted() {
+        assert!(!is_weak_secret(&"x".repeat(MIN_JWT_SECRET_LEN)));
+        assert!(!is_weak_secret("a-genuinely-long-random-production-secret"));
     }
 }
