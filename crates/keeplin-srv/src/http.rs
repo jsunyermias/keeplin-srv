@@ -95,8 +95,34 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/version", get(version))
         .merge(limited)
         .with_state(state)
+}
+
+/// Wire-protocol version the server speaks. Bump on a breaking change to the relay/collab
+/// message shapes so a client can detect an incompatible server at connect (issues #39/#114).
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Feature flags a client can probe to branch behaviour instead of guessing (e.g. skip the
+/// history endpoint on a server that lacks it). Additive: new capabilities are appended.
+const CAPABILITIES: &[&str] = &[
+    "history",            // GET /api/{notes,notebooks}/:id/history
+    "history_visibility", // HISTORY_VISIBILITY policy (issue #27)
+    "resource_purge",     // server-side deleted-blob purge (issue #24)
+    "readiness",          // GET /ready (issue #36)
+    "account_management", // password change + sign-out-everywhere (issue #31)
+];
+
+/// `GET /version` — unauthenticated capability/version handshake so a client can negotiate
+/// behaviour without guessing (issues #39/#114). Never rate-limited.
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": "keeplin-srv",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": PROTOCOL_VERSION,
+        "capabilities": CAPABILITIES,
+    }))
 }
 
 /// Liveness: the process is up. Cheap and dependency-free, so an orchestrator never

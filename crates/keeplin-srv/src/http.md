@@ -11,6 +11,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 ```
 /health                         (get)   — liveness (unauthenticated, NOT rate-limited)
 /ready                          (get)   — readiness: DB round-trip, 503 if down (unauthenticated)
+/version                        (get)   — protocol version + capabilities (unauthenticated)
 ── everything below is rate-limited (per-IP) ──
 /api/register                   (post)
 /api/login                      (post)  — returns { token, device_id }
@@ -48,6 +49,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 |---------|-------|-------|
 | `health` | `GET /health` | liveness: returns `"ok"`; never rate-limited |
 | `ready` | `GET /ready` | readiness: DB round-trip; `200 ready` or `503` if the database is unreachable (issue #36); never rate-limited |
+| `version` | `GET /version` | `{ name, version, protocol_version, capabilities[] }` — a client negotiates behaviour instead of guessing (issues #39/#114); never rate-limited |
 | `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
 | `register` | `POST /api/register` | `{email, password, display_name?}`; 409 on dup email; min 8-char password |
 | `login` | `POST /api/login` | verifies password, creates a device, returns a token |

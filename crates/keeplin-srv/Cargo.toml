@@ -26,8 +26,13 @@ sqlx = { version = "0.8", features = [
 # collaborative line editing converges exactly like keeplin-core entities.
 # Pinned to a specific commit for reproducible builds: an unpinned git dep would
 # silently follow keeplin's default branch and could break the wire protocol
-# without a code change here. Bump this `rev` deliberately to adopt newer keeplin.
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "9c884e7f15851409740307ff624799156f2f64ab" }
+# without a code change here (issue #28).
+#
+# Bump process: set `rev` to the keeplin release you are adopting, then run the
+# full test suite (the materialisation path in sync.rs depends on keeplin-core's
+# `Change` model and `note_log::resolve`). When keeplin publishes git tags, prefer
+# `tag = "vX.Y.Z"` over a bare commit. This rev is keeplin main @ v0.1.0 baseline.
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "fd06a3049a677381462845014e12472fef279ec9" }
 argon2 = "0.5"
 password-hash = "0.5"
 tracing = "0.1"

@@ -48,7 +48,7 @@ resolve against the order entity.
 
 ## REST API
 
-- `GET /health` (liveness) · `GET /ready` (readiness — DB round-trip, `503` if down) · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
+- `GET /health` (liveness) · `GET /ready` (readiness — DB round-trip, `503` if down) · `GET /version` (protocol version + capabilities) · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
   tombstones, live sessions/connections)
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
