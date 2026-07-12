@@ -462,9 +462,17 @@ async fn update_note(
     if !access.can_write() {
         return Err(AppError::Forbidden);
     }
+    // keeplin-core models the Inbox as the nil UUID (`ordering::INBOX_ID`); this server
+    // models it as NULL. Map nil → NULL so a client mirroring an Inbox note performs a
+    // move *out* of any notebook (shares untouched) instead of naming a notebook that
+    // cannot exist — which would 404 on the destination check below.
+    let notebook_id = match body.notebook_id {
+        Some(Some(nb)) if nb.is_nil() => Some(None),
+        other => other,
+    };
     let patch = crate::store::NotePatch {
         title: body.title,
-        notebook_id: body.notebook_id,
+        notebook_id,
         is_todo: body.is_todo,
         todo_due: body.todo_due,
         todo_completed: body.todo_completed,

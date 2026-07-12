@@ -1109,3 +1109,32 @@ async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
     assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
     assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
 }
+
+/// keeplin-core models the Inbox as the nil UUID; this server models it as NULL. A PATCH
+/// with the nil UUID (what the collab client mirrors for an Inbox note) must behave as a
+/// move to the Inbox: no destination check, no cascade, shares untouched.
+#[sqlx::test(migrations = "../../migrations")]
+async fn nil_notebook_id_patch_means_inbox_and_keeps_shares(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_a, _da, token_a) = user(addr, "a@example.com").await;
+    let (_b, _db, token_b) = user(addr, "b@example.com").await;
+    let note_id = create_note(addr, &token_a, "N").await;
+    share(addr, &token_a, &note_id, "b@example.com", "viewer").await;
+
+    let response = reqwest::Client::new()
+        .patch(format!("http://{addr}/api/notes/{note_id}"))
+        .bearer_auth(&token_a)
+        .json(&json!({
+            "title": "renamed",
+            "notebook_id": "00000000-0000-0000-0000-000000000000",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "nil uuid is the Inbox, not a 404");
+    let note: Value = response.json().await.unwrap();
+    assert!(note["notebook_id"].is_null(), "stored as NULL (the Inbox)");
+    assert_eq!(note["title"], "renamed");
+    // No destructive cascade ran: B's share survives.
+    assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 200);
+}
