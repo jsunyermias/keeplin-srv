@@ -13,6 +13,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use tokio::sync::Mutex;
+
+/// Serialise the tests in this file. Each drives the **full real client** (its own
+/// async connect/reconnect loops plus a second `/api/sync` connection) against a
+/// throwaway database. Run concurrently — as `cargo test`'s default multi-threaded
+/// harness does — several of these overwhelm the shared `#[sqlx::test]` PostgreSQL
+/// harness and a client's convergence stalls past any reasonable deadline. That is
+/// a test-harness resource limit, not a server bug (each test passes reliably on
+/// its own), so we run them one at a time.
+static SERIAL: Mutex<()> = Mutex::const_new(());
 use keeplin_core::{
     collab::{CollabBackend, CollabConfig},
     models::Note,
@@ -45,6 +55,7 @@ fn test_config() -> Config {
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,
+        at_rest_key: None,
         history_since_access: false,
     }
 }
@@ -113,12 +124,19 @@ async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<DbBac
     collab
 }
 
+/// How long the convergence polls wait. Generous on purpose: these tests drive
+/// the *real* client (its own async connect/reconnect + a second `/api/sync`
+/// connection), so convergence latency tracks database throughput. Under a busy
+/// CI database a tight deadline flakes even though the client converges fine — so
+/// wait ~30s rather than assert an artificial 10s bound.
+const CONVERGE_TRIES: usize = 300;
+
 /// Poll the server's export endpoint until the materialised body equals `want`,
 /// tolerating the transient `404`/empty window before the note's lines exist.
 async fn wait_server_body(addr: SocketAddr, token: &str, note_id: Uuid, want: &str) {
     let client = reqwest::Client::new();
     let mut last = String::new();
-    for _ in 0..100 {
+    for _ in 0..CONVERGE_TRIES {
         if let Ok(resp) = client
             .get(format!("http://{addr}/api/notes/{note_id}/export"))
             .bearer_auth(token)
@@ -142,7 +160,7 @@ async fn wait_server_body(addr: SocketAddr, token: &str, note_id: Uuid, want: &s
 /// Poll a client's local note body until it equals `want`.
 async fn wait_local_body(dev: &Arc<CollabBackend<DbBackend>>, note_id: Uuid, want: &str) {
     let mut last = String::new();
-    for _ in 0..100 {
+    for _ in 0..CONVERGE_TRIES {
         if let Ok(note) = dev.read_note(note_id).await {
             last = note.body.clone();
             if last == want {
@@ -156,6 +174,7 @@ async fn wait_local_body(dev: &Arc<CollabBackend<DbBackend>>, note_id: Uuid, wan
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn collab_client_writes_note_through_to_the_server(pool: PgPool) {
+    let _serial = SERIAL.lock().await;
     let addr = spawn_server(pool).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
@@ -173,6 +192,7 @@ async fn collab_client_writes_note_through_to_the_server(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn reconnecting_client_rebuilds_note_from_snapshot(pool: PgPool) {
+    let _serial = SERIAL.lock().await;
     let addr = spawn_server(pool).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;

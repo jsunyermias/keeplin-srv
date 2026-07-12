@@ -14,6 +14,7 @@ only `pub mod` declarations, one per source file.
 | `bus` | yes | cross-instance coordination over Postgres `LISTEN/NOTIFY` (multi-replica collab/relay, issue #45) |
 | `collab` | yes | the collaborative line-editing session engine (`/api/ws`) |
 | `config` | yes | `Config` loaded from environment variables |
+| `crypto` | yes | at-rest AES-256-GCM encryption of note title/content (`AT_REST_KEY`, keeplin#110) |
 | `error` | yes | `AppError` and its HTTP status mapping |
 | `http` | yes | the axum router and every REST handler |
 | `permissions` | yes | `Role` (owner/editor/viewer) and `resolve_role` |

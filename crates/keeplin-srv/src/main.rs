@@ -39,6 +39,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("run database migrations")?;
 
+    // Fail fast on a malformed AT_REST_KEY rather than deep inside a request.
+    keeplin_srv::crypto::Cipher::from_key(config.at_rest_key.as_deref())
+        .map_err(|e| anyhow::anyhow!("AT_REST_KEY: {e}"))?;
+
     let state = Arc::new(AppState::new(config.clone(), pool));
 
     // Clear any presence rows this instance left behind on a previous run before

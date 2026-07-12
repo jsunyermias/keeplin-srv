@@ -167,6 +167,7 @@ The Compose topology is dev/demo only: Postgres is bound to loopback (not the LA
 | `MAX_NOTE_BODY_BYTES` | `26214400` (25 MiB) | Max size of a materialised note body (`GET /api/notes/:id`, export); `413` over it. `0` disables |
 | `MAX_USER_STORAGE_BYTES` | `0` (disabled) | Per-user resource-blob storage cap; `507` when a blob upload would exceed it |
 | `MAX_NOTES_PER_USER` | `0` (disabled) | Per-user live-note cap; `507` when creating past it |
+| `AT_REST_KEY` | — (disabled) | base64 32-byte key; when set, encrypts note **title and line content** at rest (AES-256-GCM) so a DB dump/backup shows ciphertext (keeplin#110). Unset = plaintext. Generate with `openssl rand -base64 32`. Losing the key makes existing notes unreadable |
 | `RUST_LOG` | `info` | Log level |
 
 The server drains in-flight requests on `SIGTERM`/`Ctrl-C` (bounded by
@@ -177,6 +178,18 @@ so liveness probes always pass.
 In production terminate TLS at a reverse proxy (`wss://`). The collaborative
 channel accepts the token in the `Authorization: Bearer` header (preferred —
 query strings end up in proxy logs) with `?token=` kept as a fallback.
+
+### At-rest encryption
+
+Collaborative editing needs the plaintext in server memory to merge line ops, so
+notes are **not** end-to-end encrypted (the server, and thus its operator, can
+read them). Setting `AT_REST_KEY` encrypts note titles and line content **at
+rest** in PostgreSQL with AES-256-GCM, so a database dump, stolen backup, or SQL
+read access sees ciphertext instead of note contents — it does **not** defend
+against a compromised running server. Enabling the key on an existing database is
+safe: rows written before it stay readable (they are plaintext) and new writes
+are encrypted; a one-off re-encrypt pass can migrate the old rows. **Back up the
+key** separately from the database — losing it makes encrypted notes unrecoverable.
 
 ## Operating in production
 

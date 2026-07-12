@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bus;
 pub mod collab;
 pub mod config;
+pub mod crypto;
 pub mod error;
 pub mod http;
 pub mod permissions;
