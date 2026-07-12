@@ -42,6 +42,7 @@ fn test_config() -> Config {
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,
+        history_since_access: false,
     }
 }
 
@@ -423,7 +424,8 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
     assert_eq!(versions[0]["entity"]["title"], "new");
     assert_eq!(versions[1]["entity"]["title"], "old");
 
-    // Another account sees nothing: history reads only the caller's own journal.
+    // This note only ever travelled the relay (no server-side `notes` row), so it is private
+    // to A's account: another user's history read is scoped to their own (empty) journal.
     register(addr, "b@example.com").await;
     let token_b = login(addr, "b@example.com", "phone").await;
     let other: Value = client
@@ -436,6 +438,16 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
         .await
         .unwrap();
     assert!(other.as_array().unwrap().is_empty());
+
+    // A materialised notebook, by contrast, is gated on read access: B cannot see A's
+    // notebook history at all.
+    let denied = client
+        .get(format!("http://{addr}/api/notebooks/{}/history", nb.id))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403, "no access to the notebook → 403");
 }
 
 // ── Account management (issue #31) ───────────────────────────────────────────
@@ -500,4 +512,164 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(denied.status(), 401, "revoked token must stop working");
+}
+
+// ── Per-entity history + visibility window (issue #27) ───────────────────────
+
+async fn spawn_server_with_config(pool: PgPool, config: Config) -> SocketAddr {
+    let state = Arc::new(AppState::new(config, pool));
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+async fn notebook_history(addr: SocketAddr, token: &str, nb: Uuid) -> Vec<Value> {
+    reqwest::Client::new()
+        .get(format!("http://{addr}/api/notebooks/{nb}/history"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A shared notebook has one timeline: a collaborator with read access sees the owner's
+/// edits, not only their own (issue #27 — history is per-entity, not per-user).
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
+    use keeplin_core::storage::NotebookRepository;
+    let addr = spawn_server(pool).await; // default policy: from creation
+    register(addr, "a@example.com").await;
+    register(addr, "b@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "dev-a").await).await;
+    let ta = login(addr, "a@example.com", "rest-a").await;
+
+    // A creates + renames a notebook through the relay (materialises on the server).
+    let nb = a
+        .create_notebook(keeplin_core::models::Notebook::new("old"))
+        .await
+        .unwrap();
+    let mut renamed = nb.clone();
+    renamed.title = "new".into();
+    a.update_notebook(renamed).await.unwrap();
+    push(&a).await;
+
+    // A shares the notebook with B (read).
+    let client = reqwest::Client::new();
+    let mut shared = false;
+    for _ in 0..50 {
+        let code = client
+            .post(format!("http://{addr}/api/notebooks/{}/share", nb.id))
+            .bearer_auth(&ta)
+            .json(&json!({ "user_email": "b@example.com", "capabilities": 1 }))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        if code == 200 {
+            shared = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(shared, "A could share the materialised notebook with B");
+
+    // B sees A's two versions — the owner's edits, not B's own (B authored none).
+    let tb = login(addr, "b@example.com", "dev-b").await;
+    let mut versions = Vec::new();
+    for _ in 0..50 {
+        versions = notebook_history(addr, &tb, nb.id).await;
+        if versions.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        versions.len(),
+        2,
+        "collaborator sees the owner's full history"
+    );
+    assert_eq!(versions[0]["entity"]["title"], "new");
+    assert_eq!(versions[1]["entity"]["title"], "old");
+}
+
+/// With `HISTORY_VISIBILITY=access` a collaborator only sees versions from after they were
+/// granted access; the owner still sees everything (issue #27).
+#[sqlx::test(migrations = "../../migrations")]
+async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
+    use keeplin_core::storage::NotebookRepository;
+    let mut config = test_config();
+    config.history_since_access = true;
+    let addr = spawn_server_with_config(pool, config).await;
+    register(addr, "a@example.com").await;
+    register(addr, "b@example.com").await;
+    let a = device(addr, &login(addr, "a@example.com", "dev-a").await).await;
+    let ta = login(addr, "a@example.com", "rest-a").await;
+    let client = reqwest::Client::new();
+
+    // Version 1 (before B has access).
+    let nb = a
+        .create_notebook(keeplin_core::models::Notebook::new("v1"))
+        .await
+        .unwrap();
+    push(&a).await;
+    // Let the create land before the share is granted.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // Grant B access now.
+    let code = client
+        .post(format!("http://{addr}/api/notebooks/{}/share", nb.id))
+        .bearer_auth(&ta)
+        .json(&json!({ "user_email": "b@example.com", "capabilities": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Version 2 (after B has access). Push only this change, not the whole journal from
+    // epoch — re-sending v1 now (after the share) would make it pass the access-window
+    // filter and defeat the test.
+    let cut = chrono::Utc::now();
+    let mut renamed = nb.clone();
+    renamed.title = "v2".into();
+    a.update_notebook(renamed).await.unwrap();
+    let only_v2 = a.get_changes_since(cut).await.unwrap();
+    a.send_changes(only_v2).await.unwrap();
+
+    let tb = login(addr, "b@example.com", "dev-b").await;
+    // B eventually sees v2 (post-access) but never v1 (pre-access).
+    let mut b_versions = Vec::new();
+    for _ in 0..50 {
+        b_versions = notebook_history(addr, &tb, nb.id).await;
+        if !b_versions.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        b_versions.len(),
+        1,
+        "collaborator sees only post-access versions"
+    );
+    assert_eq!(b_versions[0]["entity"]["title"], "v2");
+
+    // The owner still sees both versions.
+    let a_versions = notebook_history(addr, &ta, nb.id).await;
+    assert_eq!(a_versions.len(), 2, "owner sees the full history");
 }

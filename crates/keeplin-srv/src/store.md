@@ -29,12 +29,13 @@ token), `touch_device` (last-seen).
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
 `list_notes_for_user` (owned + shared + filed in a notebook the user owns), `update_note_meta`, `soft_delete_note`.
 **Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, `set_note_owner`.
-**History** (Front D stage 2): `entity_history(user_id, HistoryKind, id, limit, not_before)`
-reads an entity's past versions from the caller's own journal rows, newest first (`seq DESC`),
-matching note/notebook `Change` payloads by their `op` tag and snapshot id; only the envelope
-is inspected — snapshots stay opaque. Returns `EntityVersionRow { timestamp, device_id,
-entity? }` (`entity` `None` = tombstone; `timestamp` from the payload, falling back to
-`received_at`).
+**History** (Front D stage 2; per-entity, issue #27): `entity_history(HistoryKind, id, limit, not_before, user_scope)`
+reads an entity's past versions newest first (`seq DESC`), matching note/notebook `Change`
+payloads by their `op` tag and snapshot id; only the envelope is inspected — snapshots stay
+opaque. `user_scope = None` reads across **all** users (per-entity history for a shared,
+server-materialised entity — the HTTP handler authorises read access first); `Some(user)`
+restricts to one account (a relay-only entity with no server owner/share model). Returns
+`EntityVersionRow { timestamp, device_id, entity? }` (`entity` `None` = tombstone).
 
 **Notebook permissions**: `notebook_owner`, `set_notebook_owner`, `create_or_update_notebook_share`/`get_notebook_share`/`list_notebook_shares`/`delete_notebook_share`, and the destructive cascade (`cascade_notebook_to_notes`, `apply_notebook_shares_to_note`) that replaces child notes' `note_shares` with the notebook's grants on a notebook-perm change or a note move.
 **Lines**: `get_line`, `list_lines`, `insert_line`, `update_line`, `soft_delete_line`.
