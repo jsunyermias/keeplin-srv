@@ -274,6 +274,21 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a user and everything they own (issue #31 — account deletion).
+    ///
+    /// Every foreign key back to `users` (devices, cursors, the change journal,
+    /// notes and their lines/order/shares, notebooks, tags, resources and their
+    /// blobs, note_tags) is declared `ON DELETE CASCADE`, so removing the row
+    /// tears down the whole account in one statement. Returns `false` if the
+    /// user did not exist.
+    pub async fn delete_user(&self, id: Uuid) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ── Devices ──────────────────────────────────────────────────────────────
 
     pub async fn create_device(

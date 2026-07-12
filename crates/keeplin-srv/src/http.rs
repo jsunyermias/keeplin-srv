@@ -43,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/devices/:id", axum::routing::delete(delete_device))
         .route("/api/account/password", post(change_password))
+        .route("/api/account", axum::routing::delete(delete_account))
         .route("/api/notes", post(create_note).get(list_notes))
         .route(
             "/api/notes/:id",
@@ -357,6 +358,32 @@ async fn change_password(
     }
     let hash = auth::hash_password(&body.new_password)?;
     state.store.update_password(user.user_id, &hash).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteAccountBody {
+    password: String,
+}
+
+/// `DELETE /api/account` — permanently delete the caller's account and everything it
+/// owns (devices, notes, notebooks, tags, resources, shares, journal) (issue #31). The
+/// current password is required as a confirmation; the deletion cascades in the database,
+/// so it is irreversible.
+async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<DeleteAccountBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    state.store.delete_user(user.user_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

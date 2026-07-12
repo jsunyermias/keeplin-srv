@@ -22,7 +22,9 @@ shapes independently of the crate version.
 - `REGISTRATION_ENABLED` to close open signups (#21).
 - `RESOURCE_PURGE_DAYS`: server-side purge of deleted resource blobs (#24).
 - `GET /ready` readiness probe (DB round-trip, `503` when down) + Dockerfile HEALTHCHECK (#36).
-- `POST /api/account/password` and `DELETE /api/devices` (sign out everywhere) (#31).
+- `POST /api/account/password`, `DELETE /api/devices` (sign out everywhere), and
+  `DELETE /api/account` (password-confirmed account deletion; cascades to all owned
+  data) (#31).
 - `HISTORY_VISIBILITY` (`creation`|`access`) visibility window for shared history (#27).
 - `GET /version` capability/version handshake (#39).
 

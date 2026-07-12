@@ -514,6 +514,71 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
     assert_eq!(denied.status(), 401, "revoked token must stop working");
 }
 
+/// Account deletion requires the current password and then removes the account: the token
+/// stops working, the notes are gone, and the email can be registered afresh (issue #31).
+#[sqlx::test(migrations = "../../migrations")]
+async fn delete_account_requires_password_and_cascades(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    // Create a note so we can prove ownership is torn down with the account.
+    let created = client
+        .post(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "keep me?" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200);
+
+    // Wrong password is rejected and the account survives.
+    let bad = client
+        .delete(format!("http://{addr}/api/account"))
+        .bearer_auth(&token)
+        .json(&json!({ "password": "wrong-one" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 401);
+    let still = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still.status(), 200, "account must survive a failed delete");
+
+    // Correct password deletes the account.
+    let gone = client
+        .delete(format!("http://{addr}/api/account"))
+        .bearer_auth(&token)
+        .json(&json!({ "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), 200);
+
+    // The token no longer authenticates (its device row cascaded away).
+    let denied = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401, "deleted account's token must stop working");
+
+    // The email is free again — the user row (and its unique email) is gone.
+    let reused = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "a@example.com", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reused.status(), 200, "email must be reusable after deletion");
+}
+
 // ── Per-entity history + visibility window (issue #27) ───────────────────────
 
 async fn spawn_server_with_config(pool: PgPool, config: Config) -> SocketAddr {
