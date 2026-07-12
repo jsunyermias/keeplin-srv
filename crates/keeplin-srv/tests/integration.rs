@@ -587,6 +587,90 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
     );
 }
 
+/// `GET /api/notes?limit=&cursor=` returns a bounded page and an `X-Next-Cursor`
+/// header; following it walks every note exactly once, and omitting `limit`
+/// still returns them all (back-compatible) (issue #29).
+#[sqlx::test(migrations = "../../migrations")]
+async fn list_notes_paginates_with_cursor(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    // Create seven notes. Their updated_at values may tie, so the id tiebreaker
+    // is what keeps the keyset walk total and duplicate-free.
+    let total = 7;
+    for i in 0..total {
+        let resp = client
+            .post(format!("http://{addr}/api/notes"))
+            .bearer_auth(&token)
+            .json(&json!({ "title": format!("note {i}") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // Page through with limit=3, following X-Next-Cursor until it stops.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut req = client
+            .get(format!("http://{addr}/api/notes"))
+            .bearer_auth(&token)
+            .query(&[("limit", "3")]);
+        if let Some(c) = &cursor {
+            req = req.query(&[("cursor", c)]);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let next = resp
+            .headers()
+            .get("x-next-cursor")
+            .map(|v| v.to_str().unwrap().to_string());
+        let page: Vec<Value> = resp.json().await.unwrap();
+        assert!(page.len() <= 3, "page must respect the limit");
+        for n in &page {
+            seen.push(n["id"].as_str().unwrap().to_string());
+        }
+        pages += 1;
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        assert!(pages < 10, "pagination must terminate");
+    }
+
+    // Every note seen exactly once: 3 + 3 + 1 across three pages.
+    assert_eq!(pages, 3);
+    assert_eq!(seen.len(), total);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), total, "no note may repeat across pages");
+
+    // No limit → the whole list, and no next-cursor header.
+    let all = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(all.headers().get("x-next-cursor").is_none());
+    let all_notes: Vec<Value> = all.json().await.unwrap();
+    assert_eq!(all_notes.len(), total);
+
+    // A garbage cursor is a client error, not a silent empty page.
+    let bad = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&token)
+        .query(&[("limit", "3"), ("cursor", "not-a-cursor")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+}
+
 // ── Per-entity history + visibility window (issue #27) ───────────────────────
 
 async fn spawn_server_with_config(pool: PgPool, config: Config) -> SocketAddr {

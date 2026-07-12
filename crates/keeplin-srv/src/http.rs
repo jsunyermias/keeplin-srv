@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::header,
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -17,8 +17,59 @@ use crate::{
     error::AppError,
     permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
     state::AppState,
-    store::{Note, NoteShare, Notebook, NotebookShare, ResourceMeta, Tag, User, UserDevice},
+    store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
 };
+
+/// Hard ceiling on `?limit=` so a client cannot ask for an unbounded page and
+/// defeat pagination (issue #29).
+const MAX_PAGE_LIMIT: i64 = 500;
+
+/// Query string shared by the paginated list endpoints: `?limit=&cursor=`.
+/// Both are optional — omitting `limit` returns every row (back-compatible with
+/// pre-pagination clients).
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+impl ListQuery {
+    /// Clamp the requested limit to `[1, MAX_PAGE_LIMIT]` (or `None` for "all")
+    /// and decode the opaque cursor, rejecting a malformed one with `400`.
+    fn resolve(&self) -> Result<(Option<i64>, Option<PageCursor>), AppError> {
+        let limit = self.limit.map(|l| l.clamp(1, MAX_PAGE_LIMIT));
+        let cursor = match self.cursor.as_deref() {
+            Some(token) => Some(
+                PageCursor::decode(token)
+                    .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?,
+            ),
+            None => None,
+        };
+        Ok((limit, cursor))
+    }
+}
+
+/// Build a list response: the JSON array (unchanged shape) plus an
+/// `X-Next-Cursor` header when a full page was returned, so a paging client
+/// knows to ask for more. When `limit` is `None` (unpaginated) or the page came
+/// back short, no header is set — the list is complete.
+fn paginated<T: Serialize>(
+    items: Vec<T>,
+    limit: Option<i64>,
+    cursor_of: impl Fn(&T) -> PageCursor,
+) -> Response {
+    let next = match limit {
+        Some(l) if items.len() as i64 >= l => items.last().map(|it| cursor_of(it).encode()),
+        _ => None,
+    };
+    let mut resp = Json(items).into_response();
+    if let Some(token) = next {
+        if let Ok(value) = token.parse() {
+            resp.headers_mut().insert("x-next-cursor", value);
+        }
+    }
+    resp
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     // Resource binary upload/download carries a raised body limit (metadata and
@@ -112,7 +163,8 @@ const CAPABILITIES: &[&str] = &[
     "history_visibility", // HISTORY_VISIBILITY policy (issue #27)
     "resource_purge",     // server-side deleted-blob purge (issue #24)
     "readiness",          // GET /ready (issue #36)
-    "account_management", // password change + sign-out-everywhere (issue #31)
+    "account_management", // password change + sign-out-everywhere + deletion (issue #31)
+    "pagination",         // ?limit=&cursor= on list endpoints + X-Next-Cursor (issue #29)
 ];
 
 /// `GET /version` — unauthenticated capability/version handshake so a client can negotiate
@@ -393,16 +445,29 @@ async fn delete_account(
 async fn list_notebooks(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
-) -> Result<Json<Vec<Notebook>>, AppError> {
-    Ok(Json(state.store.list_notebooks(user.user_id).await?))
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state
+        .store
+        .list_notebooks(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(items, limit, |nb| {
+        PageCursor::new(nb.created_at, nb.id)
+    }))
 }
 
 /// Live tags of the authenticated user.
 async fn list_tags(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
-) -> Result<Json<Vec<Tag>>, AppError> {
-    Ok(Json(state.store.list_tags(user.user_id).await?))
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state.store.list_tags(user.user_id, limit, cursor).await?;
+    Ok(paginated(items, limit, |t| {
+        PageCursor::new(t.created_at, t.id)
+    }))
 }
 
 /// Live resource metadata of the authenticated user. Binaries are fetched
@@ -410,8 +475,16 @@ async fn list_tags(
 async fn list_resources(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
-) -> Result<Json<Vec<ResourceMeta>>, AppError> {
-    Ok(Json(state.store.list_resources(user.user_id).await?))
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state
+        .store
+        .list_resources(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(items, limit, |r| {
+        PageCursor::new(r.created_at, r.id)
+    }))
 }
 
 /// Live tag ids attached to a note.
@@ -541,9 +614,16 @@ async fn create_note(
 async fn list_notes(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
-) -> Result<Json<Vec<Note>>, AppError> {
-    let notes = state.store.list_notes_for_user(user.user_id).await?;
-    Ok(Json(notes))
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let notes = state
+        .store
+        .list_notes_for_user(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(notes, limit, |n| {
+        PageCursor::new(n.updated_at, n.id)
+    }))
 }
 
 async fn get_note(

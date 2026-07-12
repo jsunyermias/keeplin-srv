@@ -59,14 +59,14 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `delete_all_devices` | `DELETE /api/devices` | revoke **all** the caller's devices — sign out everywhere (issue #31) |
 | `change_password` | `POST /api/account/password` | `{current_password, new_password}`; verifies current, min 8-char new (issue #31). Existing JWTs stay valid — follow with `DELETE /api/devices` to also sign out everywhere |
 | `delete_account` | `DELETE /api/account` | `{password}`; verifies the current password, then deletes the user row. Every owned entity (devices, notes, notebooks, tags, resources, shares, journal) cascades away — irreversible (issue #31) |
-| `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared |
+| `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared. `GET` takes optional `?limit=&cursor=` (issue #29): a bare array as before, plus an `X-Next-Cursor` response header when a full page is returned — follow it to page. Omitting `limit` returns everything (back-compatible); `limit` is capped at 500 |
 | `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
 | `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`; a move into a notebook additionally needs `write` on the **destination** notebook, since the note adopts its grants; a `notebook_id` of `null` **or the nil UUID** is a move to the Inbox — keeplin-core models the Inbox as the nil uuid — with no destination check and no cascade) / owner-only soft delete |
 | `create_share` / `list_shares` / `delete_share` | `/api/notes/:id/share…` | grant `{user_id\|user_email, capabilities}` (needs `share_write`, capped to the granter's own caps); list (needs `share_read`); revoke (needs `share_write`, or self) |
 | `transfer_ownership` | `/api/notes/:id/transfer` | owner-only; `{user_id\|user_email}` — moves `owner_id`, drops any share row for the new owner |
 | `note_history` / `notebook_history` | `GET /api/{notes,notebooks}/:id/history?limit=` | **per-entity** past versions, newest first: for a server-materialised note/notebook every user with **read access** sees every collaborator's edits (issue #27); a relay-only entity is private to the account (read per-user). `[{ timestamp, device_id, entity? }]`, `entity` null = tombstone. `limit` defaults to 100, capped at 10 000; bounded by `CHANGES_RETENTION_DAYS` and, under `HISTORY_VISIBILITY=access`, by the collaborator's access-grant time |
 | `import_note` / `export_note` | `/api/import`, `…/export` | split a flat body into versioned lines / join live lines |
-| `list_notebooks` / `list_tags` / `list_resources` | `GET /api/{notebooks,tags,resources}` | live entities the server materialised from the relay (for cold rehydration) |
+| `list_notebooks` / `list_tags` / `list_resources` | `GET /api/{notebooks,tags,resources}` | live entities the server materialised from the relay (for cold rehydration); paginated like `list_notes` |
 | `list_note_tags` | `GET /api/notes/:id/tags` | live tag ids attached to a note |
 | `get_resource_data` / `put_resource_data` | `GET`/`PUT /api/resources/:id/data` | download / upload the binary; `PUT` capped by `MAX_UPLOAD_BYTES` (413 over it), `404` if metadata is unknown, `507` if it would exceed the user's storage quota |
 
@@ -81,6 +81,21 @@ Insufficient Storage` (`AppError::QuotaExceeded`):
   if adding the incoming body would exceed the limit (an overwrite is measured by its new size, not
   double-counted). Blob byte totals and note counts come from `store` (`user_blob_bytes_excluding`,
   `count_live_notes_for_user`).
+
+## Pagination (issue #29)
+
+The list endpoints (`/api/notes`, `/api/notebooks`, `/api/tags`, `/api/resources`) accept
+`?limit=N&cursor=…`:
+
+- The **body shape is unchanged** — always a bare JSON array — so pre-pagination clients keep
+  working. Pagination is opt-in.
+- Omitting `limit` returns **every** row (the old behaviour). With `limit`, at most `N` rows
+  (capped at `MAX_PAGE_LIMIT = 500`) come back, and when the page is full the server sets an
+  **`X-Next-Cursor`** response header. Re-request with `cursor=<that value>` to get the next page;
+  the absence of the header means the list is exhausted.
+- The cursor is opaque (`store::PageCursor`, `"<micros>_<uuid>"`) and drives **keyset** paging on
+  `(created_at, id)` (or `(updated_at, id)` for notes), so deep pages stay cheap and the walk is
+  stable under concurrent inserts. A malformed cursor is a `400`.
 
 ## Body materialisation
 

@@ -27,6 +27,9 @@ shapes independently of the crate version.
   data) (#31).
 - `HISTORY_VISIBILITY` (`creation`|`access`) visibility window for shared history (#27).
 - `GET /version` capability/version handshake (#39).
+- Keyset pagination on the list endpoints (`/api/notes`, `/api/notebooks`, `/api/tags`,
+  `/api/resources`): opt-in `?limit=&cursor=` with an `X-Next-Cursor` header; the array
+  response shape is unchanged, so old clients keep working (#29).
 
 ### Changed
 - Per-user rate-limiter bucket map is swept of idle buckets (bounded memory) (#33).
