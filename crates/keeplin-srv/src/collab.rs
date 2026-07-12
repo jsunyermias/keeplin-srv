@@ -66,9 +66,6 @@ const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
 struct Subscriber {
-    user_id: Uuid,
-    display_name: String,
-    cursor: Option<Cursor>,
     tx: mpsc::Sender<String>,
 }
 
@@ -77,8 +74,9 @@ struct Subscriber {
 /// leaves. If the server restarts, clients reconnect and get a fresh snapshot
 /// from the database — the session itself holds no durable state.
 pub struct CollabSession {
-    note_id: Uuid,
-    /// Monotonic per-session sequence stamped on each fanned-out `Op`.
+    /// Monotonic per-session sequence stamped on each fanned-out `Op` by *this*
+    /// instance; a connection only ever talks to one instance, so a per-instance
+    /// counter is enough for the client's ordering (issue #45).
     seq: AtomicU64,
     /// Serialises op application and join snapshots for this note, so a
     /// joiner can never miss an op between reading the snapshot and
@@ -104,13 +102,19 @@ impl CollabRegistry {
         (sessions.len(), connections)
     }
 
+    /// The live session for a note on *this* instance, if any. Used by the
+    /// cross-instance bus to deliver a sibling's op/presence to local
+    /// subscribers (issue #45).
+    pub async fn get(&self, note_id: Uuid) -> Option<Arc<CollabSession>> {
+        self.sessions.read().await.get(&note_id).cloned()
+    }
+
     async fn get_or_create(&self, note_id: Uuid) -> Arc<CollabSession> {
         let mut sessions = self.sessions.write().await;
         sessions
             .entry(note_id)
             .or_insert_with(|| {
                 Arc::new(CollabSession {
-                    note_id,
                     seq: AtomicU64::new(0),
                     apply_lock: Mutex::new(()),
                     subscribers: RwLock::new(HashMap::new()),
@@ -157,40 +161,132 @@ impl CollabSession {
             }
         }
     }
+}
 
-    /// Current presence list, one entry per user (a user with several
-    /// connections appears once).
-    async fn presence(&self) -> Vec<PresenceInfo> {
-        let subscribers = self.subscribers.read().await;
-        let mut by_user: HashMap<Uuid, PresenceInfo> = HashMap::new();
-        for sub in subscribers.values() {
-            by_user
-                .entry(sub.user_id)
-                .and_modify(|p| {
-                    if p.cursor.is_none() {
-                        p.cursor = sub.cursor.clone();
-                    }
-                })
-                .or_insert_with(|| PresenceInfo {
-                    user_id: sub.user_id.to_string(),
-                    display_name: sub.display_name.clone(),
-                    cursor: sub.cursor.clone(),
-                });
-        }
-        by_user.into_values().collect()
+/// Publish a note's merged presence (across every instance) to another instance
+/// so all replicas broadcast the same list. Records/removes this connection's row
+/// and fires a `collab_presence` notification; the actual broadcast to local
+/// subscribers happens in [`deliver_presence`] when the notification comes back.
+async fn touch_presence(
+    state: &AppState,
+    note_id: Uuid,
+    conn_id: u64,
+    user_id: Uuid,
+    display_name: &str,
+    cursor: Option<&Cursor>,
+) -> Result<(), AppError> {
+    let cursor_json = cursor.map(|c| serde_json::to_value(c).unwrap_or(serde_json::Value::Null));
+    state
+        .store
+        .upsert_presence(
+            note_id,
+            state.instance_id,
+            conn_id as i64,
+            user_id,
+            display_name,
+            cursor_json.as_ref(),
+        )
+        .await?;
+    announce_presence(state, note_id).await;
+    Ok(())
+}
+
+async fn clear_presence(state: &AppState, note_id: Uuid, conn_id: u64) -> Result<(), AppError> {
+    state
+        .store
+        .delete_presence(note_id, state.instance_id, conn_id as i64)
+        .await?;
+    announce_presence(state, note_id).await;
+    Ok(())
+}
+
+/// Broadcast the merged presence to this instance's subscribers now, and notify
+/// the other instances to do the same. The local broadcast means presence works
+/// with a single instance even if the bus is not running; the notification
+/// carries our instance id so a sibling's bus handler skips it back to us (we
+/// already broadcast it) — see [`deliver_presence`] and `bus`.
+async fn announce_presence(state: &AppState, note_id: Uuid) {
+    deliver_presence(state, note_id).await;
+    let payload = format!("{}:{}", note_id, state.instance_id);
+    if let Err(e) = state.store.notify("collab_presence", &payload).await {
+        tracing::warn!(error = %e, %note_id, "presence notify failed");
     }
+}
 
-    async fn broadcast_presence(&self) {
-        let users = self.presence().await;
-        self.broadcast(
+/// Bus entrypoint: a `collab_presence` notification for `note_id`. If this
+/// instance has a live session for the note, rebuild the merged presence list
+/// from the shared table and broadcast it to the local subscribers (issue #45).
+pub async fn deliver_presence(state: &AppState, note_id: Uuid) {
+    let Some(session) = state.collab.get(note_id).await else {
+        return;
+    };
+    let rows = match state.store.list_presence(note_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, %note_id, "presence read failed");
+            return;
+        }
+    };
+    let mut by_user: HashMap<Uuid, PresenceInfo> = HashMap::new();
+    for row in rows {
+        let cursor = row
+            .cursor
+            .and_then(|c| serde_json::from_value::<Cursor>(c).ok());
+        by_user
+            .entry(row.user_id)
+            .and_modify(|p| {
+                if p.cursor.is_none() {
+                    p.cursor = cursor.clone();
+                }
+            })
+            .or_insert_with(|| PresenceInfo {
+                user_id: row.user_id.to_string(),
+                display_name: row.display_name,
+                cursor,
+            });
+    }
+    session
+        .broadcast(
             &CollabServerMsg::Presence {
-                note_id: self.note_id,
-                users,
+                note_id,
+                users: by_user.into_values().collect(),
             },
             None,
         )
         .await;
-    }
+}
+
+/// Bus entrypoint: a `collab_op` event authored by *another* instance. Deliver
+/// its ops to this instance's local subscribers of the note, stamped with this
+/// instance's own session sequence (issue #45). Events this instance authored
+/// are filtered out by the caller (they were already broadcast locally).
+pub async fn deliver_event(state: &AppState, event: crate::store::CollabEvent) {
+    let Some(session) = state.collab.get(event.note_id).await else {
+        return;
+    };
+    let ops: Vec<LineOp> = match serde_json::from_value(event.ops) {
+        Ok(ops) => ops,
+        Err(e) => {
+            tracing::warn!(error = %e, note_id = %event.note_id, "collab event ops unparseable");
+            return;
+        }
+    };
+    // Serialise against a concurrent local join so a just-subscribed connection
+    // cannot miss this op between its snapshot and subscribe (the op is already
+    // durable, so a duplicate delivery here is resolved away by the client).
+    let _guard = session.apply_lock.lock().await;
+    let server_seq = session.seq.fetch_add(1, Ordering::Relaxed) + 1;
+    session
+        .broadcast(
+            &CollabServerMsg::Op {
+                server_seq,
+                note_id: event.note_id,
+                user_id: event.user_id.to_string(),
+                ops,
+            },
+            None,
+        )
+        .await;
 }
 
 // ── Connection handling ──────────────────────────────────────────────────────
@@ -312,10 +408,11 @@ async fn run_connection(
         }
     }
 
-    // Disconnect: leave every joined session.
+    // Disconnect: leave every joined session and drop this connection's shared
+    // presence rows (issue #45).
     for (note_id, session) in joined {
         session.subscribers.write().await.remove(&conn_id);
-        session.broadcast_presence().await;
+        let _ = clear_presence(&state, note_id, conn_id).await;
         state.collab.drop_if_empty(note_id).await;
     }
     writer.abort();
@@ -359,36 +456,36 @@ async fn handle_msg(
             };
 
             let session = state.collab.get_or_create(note_id).await;
-            // Snapshot and subscription happen under the apply lock so no op
-            // can slip between them (it would be missing from both).
-            let snapshot = {
+            // Snapshot, subscribe, and enqueue the Welcome all under the apply
+            // lock, so (a) no op can slip between the snapshot and the
+            // subscription — local ops and cross-instance ops both take this
+            // lock before broadcasting — and (b) the Welcome is queued on the
+            // connection's channel before any op can be, keeping Welcome first.
+            {
                 let _guard = session.apply_lock.lock().await;
                 let snapshot = read_snapshot(state, note_id).await?;
-                session.subscribers.write().await.insert(
-                    conn_id,
-                    Subscriber {
-                        user_id,
-                        display_name: display_name.to_string(),
-                        cursor: None,
-                        tx: tx.clone(),
-                    },
-                );
-                snapshot
-            };
+                session
+                    .subscribers
+                    .write()
+                    .await
+                    .insert(conn_id, Subscriber { tx: tx.clone() });
+                let welcome = CollabServerMsg::Welcome { note_id, snapshot };
+                let _ = tx.try_send(serde_json::to_string(&welcome).expect("serializable welcome"));
+            }
             // `access` was only needed to gate the join (read check); it is intentionally not
             // stored — writes re-resolve access on every op batch (issue #30).
             let _ = access;
             joined.insert(note_id, session.clone());
 
-            let welcome = CollabServerMsg::Welcome { note_id, snapshot };
-            let _ = tx.try_send(serde_json::to_string(&welcome).expect("serializable welcome"));
-            session.broadcast_presence().await;
+            // Presence is shared across instances: record this connection and
+            // notify, so every replica rebroadcasts the merged list (issue #45).
+            touch_presence(state, note_id, conn_id, user_id, display_name, None).await?;
         }
 
         CollabClientMsg::Leave { note_id } => {
             if let Some(session) = joined.remove(&note_id) {
                 session.subscribers.write().await.remove(&conn_id);
-                session.broadcast_presence().await;
+                let _ = clear_presence(state, note_id, conn_id).await;
                 state.collab.drop_if_empty(note_id).await;
             }
         }
@@ -423,13 +520,16 @@ async fn handle_msg(
                 return Ok(());
             }
 
-            // Apply sequentially under the note's lock (design §6.3); keep
-            // only the ops that actually won their resolution.
+            // Apply sequentially under the note's in-process lock (local join
+            // ordering) *and* a Postgres advisory lock keyed by the note, so two
+            // instances editing the same order serialise at the database and
+            // cannot lose an update (issue #45). Keep only the ops that won.
             let mut applied = Vec::new();
             {
                 let _guard = session.apply_lock.lock().await;
+                let mut lock_tx = state.store.lock_note_order(note_id).await?;
                 for op in ops {
-                    match apply_op(state, note_id, device_id, op).await? {
+                    match apply_op(state, &mut lock_tx, note_id, device_id, op).await? {
                         OpOutcome::Applied(op) => applied.push(op),
                         OpOutcome::Ignored => {}
                         OpOutcome::Invalid { code, message } => {
@@ -437,29 +537,63 @@ async fn handle_msg(
                         }
                     }
                 }
+                lock_tx.commit().await?; // release the advisory lock
+                if !applied.is_empty() {
+                    let server_seq = session.seq.fetch_add(1, Ordering::Relaxed) + 1;
+                    session
+                        .broadcast(
+                            &CollabServerMsg::Op {
+                                server_seq,
+                                note_id,
+                                user_id: user_id.to_string(),
+                                ops: applied.clone(),
+                            },
+                            Some(conn_id),
+                        )
+                        .await;
+                }
             }
+            // Fan the applied batch out to *other* instances' subscribers via the
+            // outbox + NOTIFY (issue #45). Done after the local broadcast so local
+            // latency is unaffected; siblings deliver it under their own sequence.
             if !applied.is_empty() {
-                let server_seq = session.seq.fetch_add(1, Ordering::Relaxed) + 1;
-                session
-                    .broadcast(
-                        &CollabServerMsg::Op {
-                            server_seq,
+                if let Ok(ops_json) = serde_json::to_value(&applied) {
+                    match state
+                        .store
+                        .insert_collab_event(
                             note_id,
-                            user_id: user_id.to_string(),
-                            ops: applied,
-                        },
-                        Some(conn_id),
-                    )
-                    .await;
+                            state.instance_id,
+                            conn_id as i64,
+                            user_id,
+                            &ops_json,
+                        )
+                        .await
+                    {
+                        Ok(seq) => {
+                            let _ = state
+                                .store
+                                .notify("collab_op", &format!("{}:{}", seq, state.instance_id))
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, %note_id, "collab outbox insert failed")
+                        }
+                    }
+                }
             }
         }
 
         CollabClientMsg::Cursor { note_id, cursor } => {
-            if let Some(session) = joined.get(&note_id) {
-                if let Some(sub) = session.subscribers.write().await.get_mut(&conn_id) {
-                    sub.cursor = Some(cursor);
-                }
-                session.broadcast_presence().await;
+            if joined.contains_key(&note_id) {
+                touch_presence(
+                    state,
+                    note_id,
+                    conn_id,
+                    user_id,
+                    display_name,
+                    Some(&cursor),
+                )
+                .await?;
             }
         }
 
@@ -538,8 +672,13 @@ fn advances_writer(current: &VersionVector, op_vv: &VersionVector, writer: &str)
     op_vv.get(writer).copied().unwrap_or(0) > current.get(writer).copied().unwrap_or(0)
 }
 
+/// Apply one op. All reads and writes go through `conn` — the connection that
+/// holds the note's advisory lock — so the whole batch runs on a single
+/// connection and cannot deadlock against the bounded pool, and the order's
+/// read-modify-write is serialised across instances (issue #45).
 async fn apply_op(
     state: &AppState,
+    conn: &mut sqlx::PgConnection,
     note_id: Uuid,
     device_id: Uuid,
     op: LineOp,
@@ -568,12 +707,17 @@ async fn apply_op(
             if content.len() > MAX_LINE_LEN {
                 return Ok(invalid("too_long", "line exceeds maximum length"));
             }
-            if state.store.get_line(*line_id).await?.is_some() {
+            if state
+                .store
+                .get_line_on(&mut *conn, *line_id)
+                .await?
+                .is_some()
+            {
                 return Ok(invalid("line_exists", "line_id already exists"));
             }
             let order = state
                 .store
-                .get_note_order(note_id)
+                .get_note_order_on(&mut *conn, note_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
             if order.order.len() >= MAX_LINES_PER_NOTE {
@@ -593,13 +737,22 @@ async fn apply_op(
 
             state
                 .store
-                .insert_line(*line_id, note_id, content, vv, last_writer, *updated_at)
+                .insert_line_on(
+                    &mut *conn,
+                    *line_id,
+                    note_id,
+                    content,
+                    vv,
+                    last_writer,
+                    *updated_at,
+                )
                 .await?;
             let mut new_order = order.order.clone();
             new_order.insert(position, *line_id);
             state
                 .store
-                .set_note_order(
+                .set_note_order_on(
+                    &mut *conn,
                     note_id,
                     &new_order,
                     &merge_vv(&order.vv, vv),
@@ -623,7 +776,7 @@ async fn apply_op(
             if content.len() > MAX_LINE_LEN {
                 return Ok(invalid("too_long", "line exceeds maximum length"));
             }
-            let line = match state.store.get_line(*line_id).await? {
+            let line = match state.store.get_line_on(&mut *conn, *line_id).await? {
                 Some(line) if line.note_id == note_id => line,
                 _ => return Ok(invalid("not_found", "line not found in this note")),
             };
@@ -634,7 +787,8 @@ async fn apply_op(
             }
             state
                 .store
-                .update_line(
+                .update_line_on(
+                    &mut *conn,
                     *line_id,
                     content,
                     &merge_vv(&line.vv.0, vv),
@@ -652,7 +806,7 @@ async fn apply_op(
             last_writer,
             updated_at,
         } => {
-            let line = match state.store.get_line(*line_id).await? {
+            let line = match state.store.get_line_on(&mut *conn, *line_id).await? {
                 Some(line) if line.note_id == note_id => line,
                 _ => return Ok(invalid("not_found", "line not found in this note")),
             };
@@ -663,7 +817,8 @@ async fn apply_op(
             }
             state
                 .store
-                .soft_delete_line(
+                .soft_delete_line_on(
+                    &mut *conn,
                     *line_id,
                     *deleted_at,
                     &merge_vv(&line.vv.0, vv),
@@ -686,7 +841,7 @@ async fn apply_op(
             }
             let order = state
                 .store
-                .get_note_order(note_id)
+                .get_note_order_on(&mut *conn, note_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
             if line_ids.iter().any(|id| !order.order.contains(id)) {
@@ -720,7 +875,8 @@ async fn apply_op(
             new_order.splice(position..position, line_ids.iter().copied());
             state
                 .store
-                .set_note_order(
+                .set_note_order_on(
+                    &mut *conn,
                     note_id,
                     &new_order,
                     &merge_vv(&order.vv, vv),

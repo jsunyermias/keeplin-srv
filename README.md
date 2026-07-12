@@ -184,6 +184,14 @@ keeplin-srv is stateless — all durable state lives in PostgreSQL — so operat
 operating its database. See **[`RUNBOOK.md`](RUNBOOK.md)** for backup/restore (pg_dump and PITR),
 upgrades, routine maintenance, capacity/quotas, and an incident quick reference.
 
+### Running multiple replicas
+
+The server scales horizontally: run several instances behind a load balancer, all pointed at the
+same PostgreSQL. Instances coordinate the live collaborative channel, presence, and the device
+relay over Postgres `LISTEN/NOTIFY` (no Redis or other broker), and the per-note line order is
+serialised across replicas with a Postgres advisory lock, so edits made on different instances
+converge without lost updates (see `src/bus.md`). WebSocket connections can land on any replica.
+
 ## Tests
 
 ```bash

@@ -11,6 +11,7 @@ only `pub mod` declarations, one per source file.
 | Module | Public | Description |
 |--------|--------|-------------|
 | `auth` | yes | password hashing, JWT mint/verify, the auth middleware and device-revocation check |
+| `bus` | yes | cross-instance coordination over Postgres `LISTEN/NOTIFY` (multi-replica collab/relay, issue #45) |
 | `collab` | yes | the collaborative line-editing session engine (`/api/ws`) |
 | `config` | yes | `Config` loaded from environment variables |
 | `error` | yes | `AppError` and its HTTP status mapping |

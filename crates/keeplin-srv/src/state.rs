@@ -1,4 +1,5 @@
 use sqlx::{Pool, Postgres};
+use uuid::Uuid;
 
 use crate::{
     collab::CollabRegistry, config::Config, ratelimit::RateLimiter, store::Store, sync::SyncHub,
@@ -13,6 +14,10 @@ pub struct AppState {
     pub collab: CollabRegistry,
     /// Per-IP request rate limiter (a no-op when disabled).
     pub rate_limiter: RateLimiter,
+    /// Identity of this server process, minted at startup. Stamped on collab
+    /// fan-out events and presence rows so an instance can tell its own writes
+    /// apart from a sibling's over the cross-instance bus (issue #45).
+    pub instance_id: Uuid,
 }
 
 impl AppState {
@@ -24,6 +29,7 @@ impl AppState {
             hub: SyncHub::default(),
             collab: CollabRegistry::default(),
             rate_limiter,
+            instance_id: Uuid::new_v4(),
         }
     }
 }

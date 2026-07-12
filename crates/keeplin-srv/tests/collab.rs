@@ -45,6 +45,26 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     spawn_server_with_state(pool).await.0
 }
 
+/// Spawn a server instance **with the cross-instance bus running** (issue #45).
+/// Only the multi-instance test needs it; the other tests rely on the local
+/// broadcast path, so they avoid holding a permanent `PgListener` connection.
+async fn spawn_instance(pool: PgPool) -> SocketAddr {
+    let state = Arc::new(AppState::new(test_config(), pool));
+    keeplin_srv::bus::spawn(state.clone());
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
 /// Like `spawn_server` but also hands back the state, for tests that poke the
 /// store directly (e.g. the tombstone GC).
 async fn spawn_server_with_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
@@ -309,6 +329,75 @@ async fn ops_propagate_between_participants(pool: PgPool) {
 
     // The materialised body reflects the final state.
     assert_eq!(export_body(addr, &token_a, &note_id).await, "editada por B");
+}
+
+/// Two server instances share one database; an op applied on one instance must
+/// reach a subscriber connected to the *other* instance, and presence must merge
+/// across both — the whole point of the LISTEN/NOTIFY bus (issue #45).
+#[sqlx::test(migrations = "../../migrations")]
+async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
+    let addr_a = spawn_instance(pool.clone()).await;
+    let addr_b = spawn_instance(pool.clone()).await;
+
+    // Accounts and the shared note are created against instance A; both live in
+    // the shared database, so instance B sees them too.
+    let (uid_a, did_a, token_a) = user(addr_a, "a@example.com").await;
+    let (_uid_b, did_b, token_b) = user(addr_a, "b@example.com").await;
+    let note_id = create_note(addr_a, &token_a, "Cross-instance").await;
+    share(addr_a, &token_a, &note_id, "b@example.com", "editor").await;
+
+    // A joins on instance A, B joins on instance B.
+    let mut ws_a = ws_connect(addr_a, &token_a).await;
+    let mut ws_b = ws_connect(addr_b, &token_b).await;
+    send(&mut ws_a, join(&note_id)).await;
+    recv_until(&mut ws_a, "Welcome A", |v| v["type"] == "Welcome").await;
+    send(&mut ws_b, join(&note_id)).await;
+    recv_until(&mut ws_b, "Welcome B", |v| v["type"] == "Welcome").await;
+
+    // Presence merges across instances: A eventually sees both participants,
+    // even though B is connected to the other replica.
+    recv_until(&mut ws_a, "merged presence", |v| {
+        v["type"] == "Presence" && v["users"].as_array().map(|u| u.len()) == Some(2)
+    })
+    .await;
+
+    // An op on instance A reaches the subscriber on instance B via the bus.
+    let line_id = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_a,
+        insert_op(&note_id, &line_id, None, "from instance A", &did_a, 1, T1),
+    )
+    .await;
+    let op_at_b = recv_until(&mut ws_b, "Op at B across instances", |v| v["type"] == "Op").await;
+    assert_eq!(op_at_b["user_id"].as_str().unwrap(), uid_a);
+    assert_eq!(op_at_b["ops"][0]["content"], "from instance A");
+
+    // And the reverse direction: B's op reaches A.
+    let line_b = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_b,
+        insert_op(
+            &note_id,
+            &line_b,
+            Some(&line_id),
+            "from instance B",
+            &did_b,
+            1,
+            T2,
+        ),
+    )
+    .await;
+    let op_at_a = recv_until(&mut ws_a, "Op at A across instances", |v| v["type"] == "Op").await;
+    assert_eq!(op_at_a["ops"][0]["content"], "from instance B");
+
+    // Both replicas converge on the same materialised body.
+    wait_export(
+        addr_b,
+        &token_b,
+        &note_id,
+        "from instance A\nfrom instance B",
+    )
+    .await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]

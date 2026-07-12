@@ -23,6 +23,13 @@ shapes independently of the crate version.
 - Harden the example `docker-compose` (loopback Postgres, required `JWT_SECRET`) (#38).
 
 ### Added
+- **Horizontal scaling**: the collaborative channel and the device relay now work
+  across multiple replicas, coordinated over Postgres `LISTEN/NOTIFY` (no new
+  infrastructure). Collab ops and presence fan out to subscribers on sibling
+  instances via a `collab_events` outbox + `collab_presence` table (migration
+  `0010`); the relay wakes a user's devices on other instances to re-scan the
+  journal. The order read-modify-write runs under a per-note advisory lock so
+  concurrent edits on different replicas cannot lose an update (#45).
 - `MAX_NOTE_BODY_BYTES` (default 25 MiB, `0` disables): refuse to materialise a
   note body larger than the cap with `413` instead of building it in memory (#44).
 - `REGISTRATION_ENABLED` to close open signups (#21).

@@ -67,11 +67,21 @@ pub struct FanoutBatch {
     pub frame: String,
 }
 
+/// What travels on a user's fan-out channel. `Batch` is a live batch from a
+/// device on *this* instance; `Rescan` is a wake from the cross-instance bus
+/// telling connections to re-scan the journal because a batch landed on another
+/// replica (issue #45).
+#[derive(Clone)]
+pub enum FanoutMsg {
+    Batch(Arc<FanoutBatch>),
+    Rescan,
+}
+
 /// Per-user fan-out: one broadcast channel per user with at least one device
 /// connected. Senders are dropped lazily when a user's last connection closes.
 #[derive(Default)]
 pub struct SyncHub {
-    channels: RwLock<HashMap<Uuid, broadcast::Sender<Arc<FanoutBatch>>>>,
+    channels: RwLock<HashMap<Uuid, broadcast::Sender<FanoutMsg>>>,
 }
 
 impl SyncHub {
@@ -80,15 +90,22 @@ impl SyncHub {
         self.channels.read().await.len()
     }
 
+    /// Wake a user's local relay connections to re-scan the journal, because a
+    /// batch was appended for them on another instance (issue #45). No-op if the
+    /// user has no live connection here.
+    pub async fn wake_user(&self, user_id: Uuid) {
+        let channels = self.channels.read().await;
+        if let Some(tx) = channels.get(&user_id) {
+            let _ = tx.send(FanoutMsg::Rescan);
+        }
+    }
+
     /// Subscribe to a user's fan-out channel, creating it if needed. Returns
     /// the sender (to publish) and a fresh receiver (to consume).
     async fn join(
         &self,
         user_id: Uuid,
-    ) -> (
-        broadcast::Sender<Arc<FanoutBatch>>,
-        broadcast::Receiver<Arc<FanoutBatch>>,
-    ) {
+    ) -> (broadcast::Sender<FanoutMsg>, broadcast::Receiver<FanoutMsg>) {
         let mut channels = self.channels.write().await;
         let tx = channels
             .entry(user_id)
@@ -233,8 +250,8 @@ async fn deliver_backlog(
 async fn relay_loop(
     state: &AppState,
     socket: &mut WebSocket,
-    tx: &broadcast::Sender<Arc<FanoutBatch>>,
-    rx: &mut broadcast::Receiver<Arc<FanoutBatch>>,
+    tx: &broadcast::Sender<FanoutMsg>,
+    rx: &mut broadcast::Receiver<FanoutMsg>,
     user_id: Uuid,
     device_id: Uuid,
 ) -> anyhow::Result<()> {
@@ -259,10 +276,15 @@ async fn relay_loop(
             }
             fanned = rx.recv() => {
                 match fanned {
-                    Ok(batch) => {
+                    Ok(FanoutMsg::Batch(batch)) => {
                         if batch.origin != device_id {
                             socket.send(Message::Text(batch.frame.clone())).await?;
                         }
+                    }
+                    // A batch landed on another instance: re-scan the journal from
+                    // our durable cursor to pick it up (issue #45). Idempotent.
+                    Ok(FanoutMsg::Rescan) => {
+                        deliver_backlog(state, socket, user_id, device_id).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         // Overflowed the channel: fall back to a journal scan
@@ -283,7 +305,7 @@ async fn relay_loop(
 /// kill the connection.
 async fn handle_incoming(
     state: &AppState,
-    tx: &broadcast::Sender<Arc<FanoutBatch>>,
+    tx: &broadcast::Sender<FanoutMsg>,
     user_id: Uuid,
     device_id: Uuid,
     text: &str,
@@ -331,10 +353,19 @@ async fn handle_incoming(
     let frame = changes_frame(changes.iter());
     // Ignore the error: no other device is connected right now; they will get
     // the batch from the journal when they connect.
-    let _ = tx.send(Arc::new(FanoutBatch {
+    let _ = tx.send(FanoutMsg::Batch(Arc::new(FanoutBatch {
         origin: device_id,
         frame,
-    }));
+    })));
+    // Tell sibling instances a batch landed so they wake this user's devices to
+    // re-scan the journal (issue #45). Our own listener ignores this by origin.
+    let _ = state
+        .store
+        .notify(
+            crate::bus::CH_SYNC_BATCH,
+            &format!("{}:{}", user_id, state.instance_id),
+        )
+        .await;
     Ok(())
 }
 

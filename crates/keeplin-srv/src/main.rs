@@ -41,14 +41,28 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new(config.clone(), pool));
 
-    if config.retention_days > 0 || config.lines_gc_days > 0 || config.resource_purge_days > 0 {
-        tokio::spawn(maintenance_loop(
-            state.clone(),
-            config.retention_days,
-            config.lines_gc_days,
-            config.resource_purge_days,
-        ));
+    // Clear any presence rows this instance left behind on a previous run before
+    // starting to listen (issue #45); instance ids are per-process, so also rely
+    // on the age-based sweep for other crashed instances.
+    if let Err(e) = state
+        .store
+        .delete_instance_presence(state.instance_id)
+        .await
+    {
+        tracing::warn!(error = %e, "startup presence cleanup failed");
     }
+    // Cross-instance bus: deliver collab ops/presence and relay wakes between
+    // replicas over Postgres LISTEN/NOTIFY (issue #45).
+    keeplin_srv::bus::spawn(state.clone());
+
+    // The maintenance loop also sweeps stale presence and prunes the collab
+    // outbox, which must run regardless of the retention settings.
+    tokio::spawn(maintenance_loop(
+        state.clone(),
+        config.retention_days,
+        config.lines_gc_days,
+        config.resource_purge_days,
+    ));
 
     let grace = config.shutdown_grace_secs;
     let app = router(state);
@@ -119,32 +133,72 @@ async fn maintenance_loop(
     lines_gc_days: u64,
     resource_purge_days: u64,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+    // Presence heartbeat/sweep runs on a shorter cadence than the hourly
+    // retention work so a crashed instance's ghost presence clears promptly
+    // (issue #45).
+    const PRESENCE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+    const PRESENCE_TTL_SECS: i64 = 150;
+    const COLLAB_EVENT_TTL_SECS: i64 = 300;
+    let mut presence_tick = tokio::time::interval(PRESENCE_TICK);
+    let mut retention_tick = tokio::time::interval(std::time::Duration::from_secs(3600));
     loop {
-        interval.tick().await;
-        if retention_days > 0 {
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
-            match state.store.prune_delivered_changes(cutoff).await {
-                Ok(0) => {}
-                Ok(rows) => tracing::info!(rows, "pruned delivered changes"),
-                Err(e) => tracing::warn!(error = %e, "prune failed"),
+        tokio::select! {
+            _ = presence_tick.tick() => {
+                // Keep this instance's own rows fresh, then drop rows no live
+                // instance is heartbeating, and prune the delivered outbox.
+                if let Err(e) = state.store.touch_instance_presence(state.instance_id).await {
+                    tracing::warn!(error = %e, "presence heartbeat failed");
+                }
+                let stale = chrono::Utc::now() - chrono::Duration::seconds(PRESENCE_TTL_SECS);
+                match state.store.sweep_presence(stale).await {
+                    Ok(0) => {}
+                    Ok(rows) => tracing::info!(rows, "swept stale presence"),
+                    Err(e) => tracing::warn!(error = %e, "presence sweep failed"),
+                }
+                let old = chrono::Utc::now() - chrono::Duration::seconds(COLLAB_EVENT_TTL_SECS);
+                match state.store.prune_collab_events(old).await {
+                    Ok(0) => {}
+                    Ok(rows) => tracing::debug!(rows, "pruned collab outbox"),
+                    Err(e) => tracing::warn!(error = %e, "collab outbox prune failed"),
+                }
+            }
+            _ = retention_tick.tick() => {
+                run_retention(&state, retention_days, lines_gc_days, resource_purge_days).await;
             }
         }
-        if lines_gc_days > 0 {
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(lines_gc_days as i64);
-            match state.store.gc_line_tombstones(cutoff).await {
-                Ok(0) => {}
-                Ok(rows) => tracing::info!(rows, "compacted line tombstones"),
-                Err(e) => tracing::warn!(error = %e, "line GC failed"),
-            }
+    }
+}
+
+/// The hourly retention pass, split out so the maintenance loop can also run the
+/// shorter presence/outbox cadence.
+async fn run_retention(
+    state: &Arc<AppState>,
+    retention_days: u64,
+    lines_gc_days: u64,
+    resource_purge_days: u64,
+) {
+    if retention_days > 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+        match state.store.prune_delivered_changes(cutoff).await {
+            Ok(0) => {}
+            Ok(rows) => tracing::info!(rows, "pruned delivered changes"),
+            Err(e) => tracing::warn!(error = %e, "prune failed"),
         }
-        if resource_purge_days > 0 {
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(resource_purge_days as i64);
-            match state.store.purge_deleted_resource_blobs(cutoff).await {
-                Ok(0) => {}
-                Ok(rows) => tracing::info!(rows, "purged deleted resource blobs"),
-                Err(e) => tracing::warn!(error = %e, "resource blob purge failed"),
-            }
+    }
+    if lines_gc_days > 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(lines_gc_days as i64);
+        match state.store.gc_line_tombstones(cutoff).await {
+            Ok(0) => {}
+            Ok(rows) => tracing::info!(rows, "compacted line tombstones"),
+            Err(e) => tracing::warn!(error = %e, "line GC failed"),
+        }
+    }
+    if resource_purge_days > 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(resource_purge_days as i64);
+        match state.store.purge_deleted_resource_blobs(cutoff).await {
+            Ok(0) => {}
+            Ok(rows) => tracing::info!(rows, "purged deleted resource blobs"),
+            Err(e) => tracing::warn!(error = %e, "resource blob purge failed"),
         }
     }
 }

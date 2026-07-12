@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bus;
 pub mod collab;
 pub mod config;
 pub mod error;
