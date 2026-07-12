@@ -31,6 +31,7 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        resource_purge_days: 0,
         db_max_connections: 5,
         db_acquire_timeout_secs: 10,
         db_idle_timeout_secs: 600,
@@ -413,4 +414,126 @@ async fn materialised_entities_survive_journal_pruning(pool: PgPool) {
     let notebooks = get_json(addr, &token, "/api/notebooks").await;
     assert_eq!(notebooks.as_array().unwrap().len(), 1);
     assert_eq!(notebooks[0]["title"], "Durable");
+}
+
+// ── Retention & storage hygiene (store level) ────────────────────────────────
+
+/// The same client `batch_id` used by two different users must NOT be deduplicated against
+/// each other — dedup is per-user (issue #26). A user's own batch retry still dedupes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn same_batch_id_across_users_is_not_deduplicated(pool: PgPool) {
+    let store = Store::new(pool);
+    let a = store.create_user("a@x.com", "h", "A").await.unwrap();
+    let b = store.create_user("b@x.com", "h", "B").await.unwrap();
+    let da = store.create_device(a.id, "da").await.unwrap();
+    let db = store.create_device(b.id, "db").await.unwrap();
+
+    let batch = Uuid::new_v4();
+    let payload = vec![serde_json::json!({ "op": "noop" })];
+
+    let sa = store
+        .append_changes(a.id, da.id, "da", batch, &payload)
+        .await
+        .unwrap();
+    let sb = store
+        .append_changes(b.id, db.id, "db", batch, &payload)
+        .await
+        .unwrap();
+    assert_eq!(sa.len(), 1);
+    assert_eq!(
+        sb.len(),
+        1,
+        "the same batch_id for a different user must not be treated as a duplicate"
+    );
+
+    // A true retry of A's own batch is still deduplicated.
+    let retry = store
+        .append_changes(a.id, da.id, "da", batch, &payload)
+        .await
+        .unwrap();
+    assert!(retry.is_empty(), "a user's own batch retry is deduped");
+}
+
+/// A device that logged in but never connected (no delivery cursor) must not block journal
+/// pruning forever (issue #23).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_never_connected_device_does_not_block_pruning(pool: PgPool) {
+    let store = Store::new(pool);
+    let u = store.create_user("a@x.com", "h", "A").await.unwrap();
+    let connected = store.create_device(u.id, "connected").await.unwrap();
+    let _phantom = store.create_device(u.id, "phantom").await.unwrap(); // never connects
+
+    let batch = Uuid::new_v4();
+    let seqs = store
+        .append_changes(
+            u.id,
+            connected.id,
+            "connected",
+            batch,
+            &[serde_json::json!({ "op": "noop" })],
+        )
+        .await
+        .unwrap();
+    let max = *seqs.last().unwrap();
+    store.advance_cursor(connected.id, max).await.unwrap();
+
+    let pruned = store
+        .prune_delivered_changes(Utc::now() + Duration::hours(1))
+        .await
+        .unwrap();
+    assert!(
+        pruned >= 1,
+        "a phantom device must not block pruning of rows every connected device has received"
+    );
+}
+
+/// A soft-deleted resource stops counting against the storage quota (so a user can free
+/// space), and its blob bytes are reclaimable by the purge pass (issue #24).
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
+    let store = Store::new(pool);
+    let u = store.create_user("a@x.com", "h", "A").await.unwrap();
+
+    let mut r = keeplin_core::models::Resource::new("f", "application/octet-stream", "f.bin", 3);
+    r.vv = VersionVector::from([("dev".to_string(), 1)]);
+    r.last_writer = "dev".into();
+    assert!(store.upsert_resource_meta(u.id, &r).await.unwrap());
+    store.put_resource_blob(r.id, &[1, 2, 3]).await.unwrap();
+
+    // The live resource counts against quota.
+    assert_eq!(
+        store
+            .user_blob_bytes_excluding(u.id, Uuid::nil())
+            .await
+            .unwrap(),
+        3
+    );
+
+    // Soft-delete it with a dominating version so the tombstone wins resolution.
+    let del_vv = VersionVector::from([("dev".to_string(), 2)]);
+    assert!(store
+        .delete_resource(r.id, Utc::now(), &del_vv, "dev")
+        .await
+        .unwrap());
+
+    // It no longer counts against quota…
+    assert_eq!(
+        store
+            .user_blob_bytes_excluding(u.id, Uuid::nil())
+            .await
+            .unwrap(),
+        0,
+        "a soft-deleted resource no longer counts against quota"
+    );
+
+    // …and the purge pass reclaims its blob (metadata tombstone stays).
+    let purged = store
+        .purge_deleted_resource_blobs(Utc::now() + Duration::hours(1))
+        .await
+        .unwrap();
+    assert_eq!(purged, 1);
+    assert!(
+        store.get_resource_blob(r.id).await.unwrap().is_none(),
+        "the blob was reclaimed"
+    );
 }

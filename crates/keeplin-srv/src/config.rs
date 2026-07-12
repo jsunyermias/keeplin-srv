@@ -13,6 +13,10 @@ pub struct Config {
     /// Compact line tombstones soft-deleted more than this many days ago
     /// (design §6.4). `0` disables the garbage collection.
     pub lines_gc_days: u64,
+    /// Reclaim the binary payloads of resources soft-deleted more than this many
+    /// days ago (the metadata tombstone is always kept). `0` disables it. Mirrors
+    /// the client's `resource_purge_days` (issue #24).
+    pub resource_purge_days: u64,
 
     // ── Operability ──────────────────────────────────────────────────────────
     /// Maximum PostgreSQL pool connections.
@@ -131,6 +135,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+            resource_purge_days: env_parse("RESOURCE_PURGE_DAYS", 0),
             db_max_connections: env_parse("DB_MAX_CONNECTIONS", 10),
             db_acquire_timeout_secs: env_parse("DB_ACQUIRE_TIMEOUT_SECS", 10),
             db_idle_timeout_secs: env_parse("DB_IDLE_TIMEOUT_SECS", 600),

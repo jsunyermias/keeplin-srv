@@ -24,6 +24,7 @@ fn test_config() -> Config {
         token_ttl_days: 1,
         retention_days: 0,
         lines_gc_days: 0,
+        resource_purge_days: 0,
         db_max_connections: 5,
         db_acquire_timeout_secs: 10,
         db_idle_timeout_secs: 600,

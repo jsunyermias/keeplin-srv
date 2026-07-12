@@ -41,11 +41,12 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new(config.clone(), pool));
 
-    if config.retention_days > 0 || config.lines_gc_days > 0 {
+    if config.retention_days > 0 || config.lines_gc_days > 0 || config.resource_purge_days > 0 {
         tokio::spawn(maintenance_loop(
             state.clone(),
             config.retention_days,
             config.lines_gc_days,
+            config.resource_purge_days,
         ));
     }
 
@@ -108,10 +109,16 @@ async fn shutdown_signal(grace: u64) {
     });
 }
 
-/// Hourly maintenance: prune relay journal rows already delivered to every
-/// device (when `retention_days > 0`) and compact old line tombstones
-/// (design §6.4, when `lines_gc_days > 0`).
-async fn maintenance_loop(state: Arc<AppState>, retention_days: u64, lines_gc_days: u64) {
+/// Hourly maintenance: prune relay journal rows already delivered to every connected
+/// device (when `retention_days > 0`), compact old line tombstones (design §6.4, when
+/// `lines_gc_days > 0`), and reclaim the payloads of long-deleted resources (when
+/// `resource_purge_days > 0`).
+async fn maintenance_loop(
+    state: Arc<AppState>,
+    retention_days: u64,
+    lines_gc_days: u64,
+    resource_purge_days: u64,
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
     loop {
         interval.tick().await;
@@ -129,6 +136,14 @@ async fn maintenance_loop(state: Arc<AppState>, retention_days: u64, lines_gc_da
                 Ok(0) => {}
                 Ok(rows) => tracing::info!(rows, "compacted line tombstones"),
                 Err(e) => tracing::warn!(error = %e, "line GC failed"),
+            }
+        }
+        if resource_purge_days > 0 {
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(resource_purge_days as i64);
+            match state.store.purge_deleted_resource_blobs(cutoff).await {
+                Ok(0) => {}
+                Ok(rows) => tracing::info!(rows, "purged deleted resource blobs"),
+                Err(e) => tracing::warn!(error = %e, "resource blob purge failed"),
             }
         }
     }

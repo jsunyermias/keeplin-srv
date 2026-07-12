@@ -18,6 +18,7 @@ helper.
 | `TOKEN_TTL_DAYS` | `token_ttl_days` | `365` | Device-token lifetime |
 | `CHANGES_RETENTION_DAYS` | `retention_days` | `0` (off) | Prune delivered relay-journal rows older than N days |
 | `LINES_GC_DAYS` | `lines_gc_days` | `30` | Compact line tombstones older than N days (design §6.4) |
+| `RESOURCE_PURGE_DAYS` | `resource_purge_days` | `0` (off) | Reclaim the blob bytes of resources soft-deleted more than N days ago; the metadata tombstone is kept (issue #24) |
 | `DB_MAX_CONNECTIONS` | `db_max_connections` | `10` | PostgreSQL pool size |
 | `DB_ACQUIRE_TIMEOUT_SECS` | `db_acquire_timeout_secs` | `10` | Fail a request instead of blocking forever when the pool is exhausted |
 | `DB_IDLE_TIMEOUT_SECS` | `db_idle_timeout_secs` | `600` | Reap idle pooled connections |

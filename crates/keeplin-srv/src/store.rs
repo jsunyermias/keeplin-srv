@@ -349,7 +349,7 @@ impl Store {
                 r#"INSERT INTO changes
                        (user_id, origin_device_id, batch_id, batch_index, sync_device_id, payload)
                    VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (batch_id, batch_index) DO NOTHING
+                   ON CONFLICT (user_id, batch_id, batch_index) DO NOTHING
                    RETURNING seq"#,
             )
             .bind(user_id)
@@ -494,11 +494,19 @@ impl Store {
 
     // ── Retention ────────────────────────────────────────────────────────────
 
-    /// Delete journal rows older than `older_than` that every device of the
-    /// owning user has already passed (seq <= the user's minimum cursor). A
-    /// device that has never connected holds the minimum at 0 and blocks
-    /// pruning for that user — the conservative choice: nothing is deleted
-    /// that some device may still need.
+    /// Delete journal rows older than `older_than` that every **connected** device of the
+    /// owning user has already passed (seq <= the minimum delivery cursor among devices that
+    /// have a cursor row).
+    ///
+    /// Only devices that have actually connected (and thus have a `device_cursors` row) count
+    /// toward the minimum — a device that was logged in but never connected no longer blocks
+    /// pruning forever (issue #23). This is safe because a fresh or long-absent device does
+    /// **not** replay the journal from seq 0: it cold-rehydrates the materialised entities
+    /// over REST (notebooks/tags/resources) and rebuilds note state from collaborative
+    /// snapshots, so pruned *delivered, aged-out* rows are never needed to reconstruct state
+    /// (see the `materialised_entities_survive_journal_pruning` test). Only rows older than
+    /// the retention window are eligible, so recent changes a new device might still want are
+    /// untouched. A user with no connected devices prunes nothing (MIN over no rows → 0).
     pub async fn prune_delivered_changes(
         &self,
         older_than: DateTime<Utc>,
@@ -507,11 +515,34 @@ impl Store {
             r#"DELETE FROM changes c
                WHERE c.received_at < $1
                  AND c.seq <= (
-                     SELECT COALESCE(MIN(COALESCE(dc.last_seq, 0)), 0)
+                     SELECT COALESCE(MIN(dc.last_seq), 0)
                      FROM user_devices d
-                     LEFT JOIN device_cursors dc ON dc.device_id = d.id
+                     JOIN device_cursors dc ON dc.device_id = d.id
                      WHERE d.user_id = c.user_id
                  )"#,
+        )
+        .bind(older_than)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Reclaim the binary payloads of resources soft-deleted before `older_than`, returning
+    /// how many blobs were freed. The resource **metadata tombstone is kept** (it must keep
+    /// competing in conflict resolution so the delete converges); only the dead bytes in
+    /// `resource_blobs` are released. Mirrors the client's `purge_deleted_resources`
+    /// (issue #24). A generous window avoids racing a concurrent revive on a peer that has
+    /// not synced yet.
+    pub async fn purge_deleted_resource_blobs(
+        &self,
+        older_than: DateTime<Utc>,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"DELETE FROM resource_blobs rb
+               USING resources r
+               WHERE rb.resource_id = r.id
+                 AND r.deleted_at IS NOT NULL
+                 AND r.deleted_at < $1"#,
         )
         .bind(older_than)
         .execute(&self.pool)
@@ -1496,9 +1527,11 @@ impl Store {
 
     // ── Per-user quotas ──────────────────────────────────────────────────────
 
-    /// Total bytes of the user's resource binaries, excluding one resource id.
-    /// Excluding the resource being written means an overwrite is measured by
-    /// its new size, not double-counted.
+    /// Total bytes of the user's **live** resource binaries, excluding one resource id.
+    /// Excluding the resource being written means an overwrite is measured by its new size,
+    /// not double-counted. Soft-deleted resources are excluded (`deleted_at IS NULL`) so a
+    /// user can recover quota by deleting attachments — their bytes are later reclaimed by
+    /// `purge_deleted_resource_blobs` (issue #24).
     pub async fn user_blob_bytes_excluding(
         &self,
         user_id: Uuid,
@@ -1508,7 +1541,7 @@ impl Store {
             r#"SELECT COALESCE(SUM(octet_length(rb.data)), 0)::bigint
                FROM resource_blobs rb
                JOIN resources r ON r.id = rb.resource_id
-               WHERE r.user_id = $1 AND rb.resource_id <> $2"#,
+               WHERE r.user_id = $1 AND r.deleted_at IS NULL AND rb.resource_id <> $2"#,
         )
         .bind(user_id)
         .bind(exclude)

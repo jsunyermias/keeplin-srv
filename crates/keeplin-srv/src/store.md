@@ -24,8 +24,8 @@ and the two WebSocket engines call `Store`; nothing else touches the database.
 **Users**: `create_user`, `get_user_by_email`, `get_user_by_id`.
 **Devices**: `create_device`, `get_device`, `list_devices_by_user`, `delete_device` (revokes a
 token), `touch_device` (last-seen).
-**Relay journal**: `append_changes` (dedupes by `(batch_id, batch_index)`), `changes_after`,
-`get_cursor`, `advance_cursor`, `prune_delivered_changes`.
+**Relay journal**: `append_changes` (dedupes per-user by `(user_id, batch_id, batch_index)` — issue #26), `changes_after`,
+`get_cursor`, `advance_cursor`, `prune_delivered_changes` (only devices that have connected — i.e. have a delivery cursor — block pruning; a never-connected device does not, issue #23).
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
 `list_notes_for_user` (owned + shared + filed in a notebook the user owns), `update_note_meta`, `soft_delete_note`.
 **Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, `set_note_owner`.
@@ -44,8 +44,8 @@ entity? }` (`entity` `None` = tombstone; `timestamp` from the payload, falling b
 `put_resource_blob` / `get_resource_blob` / `resource_owned_by`, and the reads `list_notebooks`,
 `list_tags`, `list_resources`, `list_note_tag_ids`. Each write resolves via `incoming_wins` under a
 `SELECT … FOR UPDATE` lock.
-**Quotas**: `user_blob_bytes_excluding` (total blob bytes minus one resource), `count_live_notes_for_user`.
-**Maintenance / metrics**: `gc_line_tombstones`, `counts`.
+**Quotas**: `user_blob_bytes_excluding` (total **live** blob bytes minus one resource — soft-deleted resources do not count, so deleting frees quota, issue #24), `count_live_notes_for_user`.
+**Maintenance / metrics**: `gc_line_tombstones`, `purge_deleted_resource_blobs` (reclaims blob bytes of long-deleted resources; metadata tombstone kept, issue #24), `counts`.
 
 ## Database schema
 
