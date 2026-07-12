@@ -437,3 +437,67 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
         .unwrap();
     assert!(other.as_array().unwrap().is_empty());
 }
+
+// ── Account management (issue #31) ───────────────────────────────────────────
+
+/// Self-service password change requires the current password; the new one then works and
+/// the old one stops. And "sign out everywhere" revokes every device token at once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn password_change_and_logout_everywhere(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    // Wrong current password is rejected.
+    let bad = client
+        .post(format!("http://{addr}/api/account/password"))
+        .bearer_auth(&token)
+        .json(&json!({ "current_password": "wrong-one", "new_password": "newpassword1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 401);
+
+    // Correct current password changes it.
+    let ok = client
+        .post(format!("http://{addr}/api/account/password"))
+        .bearer_auth(&token)
+        .json(&json!({ "current_password": "password123", "new_password": "newpassword1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // Old password no longer logs in; the new one does.
+    let old = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.status(), 401);
+    let new = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "a@example.com", "password": "newpassword1", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new.status(), 200);
+
+    // "Sign out everywhere" revokes the current token immediately.
+    let logout = client
+        .delete(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), 200);
+    let denied = client
+        .get(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401, "revoked token must stop working");
+}

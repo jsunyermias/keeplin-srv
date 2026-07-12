@@ -35,8 +35,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         // require a valid token rather than being world-readable (issue #22). Operators who
         // want stricter isolation should bind this behind an admin network/proxy.
         .route("/api/metrics", get(metrics))
-        .route("/api/devices", post(create_device).get(list_devices))
+        .route(
+            "/api/devices",
+            post(create_device)
+                .get(list_devices)
+                .delete(delete_all_devices),
+        )
         .route("/api/devices/:id", axum::routing::delete(delete_device))
+        .route("/api/account/password", post(change_password))
         .route("/api/notes", post(create_note).get(list_notes))
         .route(
             "/api/notes/:id",
@@ -286,6 +292,46 @@ async fn list_devices(
 ) -> Result<Json<Vec<UserDevice>>, AppError> {
     let devices = state.store.list_devices_by_user(user.user_id).await?;
     Ok(Json(devices))
+}
+
+/// Revoke **all** of the caller's devices — "sign out everywhere" (issue #31). Every token,
+/// including the caller's current one, stops working immediately.
+async fn delete_all_devices(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.store.delete_all_devices(user.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "revoked": removed })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+/// `POST /api/account/password` — change the caller's password (issue #31). Requires the
+/// current password. Existing device tokens remain valid (they are JWTs); call
+/// `DELETE /api/devices` afterwards to also sign out everywhere.
+async fn change_password(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if body.new_password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.current_password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    let hash = auth::hash_password(&body.new_password)?;
+    state.store.update_password(user.user_id, &hash).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── Domain entities (server = source of truth; client DB is a cache) ─────────

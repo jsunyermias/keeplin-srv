@@ -264,6 +264,16 @@ impl Store {
         Ok(user)
     }
 
+    /// Replace a user's password hash (issue #31 — self-service password change).
+    pub async fn update_password(&self, id: Uuid, password_hash: &str) -> Result<(), AppError> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(password_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ── Devices ──────────────────────────────────────────────────────────────
 
     pub async fn create_device(
@@ -316,6 +326,16 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete every device of `user_id`, revoking all their tokens at once — a
+    /// "sign out everywhere" (issue #31). Returns how many devices were removed.
+    pub async fn delete_all_devices(&self, user_id: Uuid) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM user_devices WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn touch_device(&self, device_id: Uuid) -> Result<(), AppError> {

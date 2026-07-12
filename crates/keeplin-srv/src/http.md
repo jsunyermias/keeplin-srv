@@ -16,8 +16,9 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/login                      (post)  — returns { token, device_id }
 ── everything below also requires auth_mw (Bearer token + live device) ──
 /api/metrics                    (get)   — aggregate counters (auth required, issue #22)
-/api/devices                    (post|get)
-/api/devices/:id                (delete)          — revoke a device
+/api/devices                    (post|get|delete) — add / list / revoke ALL (sign out everywhere)
+/api/devices/:id                (delete)          — revoke one device
+/api/account/password           (post)            — change password (needs current)
 /api/notes                      (post|get)
 /api/notes/:id                  (get|patch|delete)
 /api/notes/:id/share            (post|get)        — grant / list shares
@@ -52,6 +53,8 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `login` | `POST /api/login` | verifies password, creates a device, returns a token |
 | `create_device` / `list_devices` | `/api/devices` | add a device (returns its token) / list |
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
+| `delete_all_devices` | `DELETE /api/devices` | revoke **all** the caller's devices — sign out everywhere (issue #31) |
+| `change_password` | `POST /api/account/password` | `{current_password, new_password}`; verifies current, min 8-char new (issue #31). Existing JWTs stay valid — follow with `DELETE /api/devices` to also sign out everywhere |
 | `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared |
 | `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
 | `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`; a move into a notebook additionally needs `write` on the **destination** notebook, since the note adopts its grants; a `notebook_id` of `null` **or the nil UUID** is a move to the Inbox — keeplin-core models the Inbox as the nil uuid — with no destination check and no cascade) / owner-only soft delete |
