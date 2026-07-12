@@ -847,6 +847,31 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     assert_eq!(order.order.len(), 1);
 }
 
+/// `/health` is a cheap liveness stub; `/ready` does a real DB round-trip. Both are
+/// unauthenticated and not rate-limited (issue #36).
+#[sqlx::test(migrations = "../../migrations")]
+async fn health_and_readiness_probes(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+
+    let health = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    assert_eq!(health.text().await.unwrap(), "ok");
+
+    // The database is up, so readiness passes with a DB round-trip.
+    let ready = client
+        .get(format!("http://{addr}/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 200);
+    assert_eq!(ready.text().await.unwrap(), "ready");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn metrics_reports_counts(pool: PgPool) {
     let addr = spawn_server(pool).await;

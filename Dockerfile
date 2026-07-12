@@ -17,12 +17,17 @@ RUN cargo build --release -p keeplin-srv
 # The database migrations are embedded into the binary at compile time
 # (sqlx::migrate!), so the runtime image needs only the binary and CA roots.
 FROM debian:bookworm-slim AS runtime
+# `curl` is included only for the container HEALTHCHECK below.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home keeplin
 COPY --from=builder /build/target/release/keeplin-srv /usr/local/bin/keeplin-srv
 USER keeplin
 ENV PORT=3000
 EXPOSE 3000
+# Readiness probe: `/ready` does a DB round-trip and returns 503 if Postgres is unreachable,
+# so an orchestrator does not route traffic to an instance that can only error (issue #36).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://localhost:${PORT}/ready" || exit 1
 ENTRYPOINT ["/usr/local/bin/keeplin-srv"]

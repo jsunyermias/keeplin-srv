@@ -609,6 +609,13 @@ impl Store {
         Ok(rows.len() as u64)
     }
 
+    /// Lightweight database round-trip for the readiness probe (issue #36): succeeds only if
+    /// a pooled connection can be acquired and the database answers.
+    pub async fn ping(&self) -> Result<(), AppError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Aggregate row counts for `/api/metrics`.
     pub async fn counts(&self) -> Result<(i64, i64, i64, i64), AppError> {
         let row = sqlx::query(

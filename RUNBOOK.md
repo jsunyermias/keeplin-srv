@@ -66,7 +66,7 @@ pg_restore --dbname="postgres://keeplin:PASSWORD@db-host:5432/keeplin_restore" \
 
 # 4. Point DATABASE_URL at the restored database and start keeplin-srv.
 #    Startup re-runs migrations (a no-op on an already-migrated database).
-# 5. Smoke-test: GET /health -> 200, then log in and list notes.
+# 5. Smoke-test: GET /health -> 200, GET /ready -> 200 (DB reachable), then log in and list notes.
 ```
 
 ### From physical backup / PITR
@@ -77,7 +77,7 @@ just connects and serves.
 
 ### After any restore
 
-- Confirm `GET /health` returns `200` and `GET /api/metrics` shows sane row counts.
+- Confirm `GET /health` returns `200`, `GET /ready` returns `200` (DB reachable), and (authenticated) `GET /api/metrics` shows sane row counts.
 - Clients reconnect on their own (the daemon retries with backoff). Because the client database is a
   **cache**, devices re-hydrate notes/notebooks/tags/resources from the restored server; you do **not**
   restore anything on the clients.
@@ -116,7 +116,8 @@ Neither affects backups beyond keeping the database smaller.
 
 | Symptom | First checks |
 |---------|--------------|
-| `/health` down | process up? `DATABASE_URL` reachable? Postgres accepting connections? |
+| `/health` down | process up? |
+| `/ready` 503 | `DATABASE_URL` reachable? Postgres accepting connections? pool exhausted? |
 | Clients can't sync | proxy/TLS up? `wss://`/`https://` reachable? tokens still valid (was `JWT_SECRET` rotated)? |
 | DB growing fast | attachment volume (`resource_blobs`) or an un-pruned journal — set `CHANGES_RETENTION_DAYS`, review quotas |
 | Slow queries | pool exhausted (`DB_MAX_CONNECTIONS`, `DB_ACQUIRE_TIMEOUT_SECS`)? Postgres healthy / not swapping? |

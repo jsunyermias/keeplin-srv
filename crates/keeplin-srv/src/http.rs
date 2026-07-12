@@ -88,12 +88,31 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .merge(limited)
         .with_state(state)
 }
 
+/// Liveness: the process is up. Cheap and dependency-free, so an orchestrator never
+/// restarts a healthy process just because the database blipped. Never rate-limited.
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Readiness: the process can actually serve requests — it does a lightweight database
+/// round-trip and returns `503` if the database is unreachable, so a load balancer stops
+/// routing traffic to an instance that would only error (issue #36). Never rate-limited.
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.ping().await {
+        Ok(()) => (axum::http::StatusCode::OK, "ready"),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "database unavailable",
+            )
+        }
+    }
 }
 
 /// Aggregate operational counters: row counts plus live session/connection

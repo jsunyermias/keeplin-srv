@@ -3,13 +3,14 @@
 ## Purpose
 
 Builds the axum `Router` and implements every REST/JSON handler: accounts, devices, notes
-CRUD, sharing, and import/export, plus `/health` and `/api/metrics`. Wires the auth middleware
+CRUD, sharing, and import/export, plus `/health`, `/ready`, and `/api/metrics`. Wires the auth middleware
 onto protected routes and the rate limiter onto everything except `/health`.
 
 ## Router shape
 
 ```
-/health                         (get)   — unauthenticated, NOT rate-limited
+/health                         (get)   — liveness (unauthenticated, NOT rate-limited)
+/ready                          (get)   — readiness: DB round-trip, 503 if down (unauthenticated)
 ── everything below is rate-limited (per-IP) ──
 /api/register                   (post)
 /api/login                      (post)  — returns { token, device_id }
@@ -44,7 +45,8 @@ onto protected routes and the rate limiter onto everything except `/health`.
 
 | Handler | Route | Notes |
 |---------|-------|-------|
-| `health` | `GET /health` | returns `"ok"`; never rate-limited |
+| `health` | `GET /health` | liveness: returns `"ok"`; never rate-limited |
+| `ready` | `GET /ready` | readiness: DB round-trip; `200 ready` or `503` if the database is unreachable (issue #36); never rate-limited |
 | `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
 | `register` | `POST /api/register` | `{email, password, display_name?}`; 409 on dup email; min 8-char password |
 | `login` | `POST /api/login` | verifies password, creates a device, returns a token |
@@ -82,8 +84,8 @@ the server keeps the collaborative line model underneath.
 
 ## Design notes
 
-- `/health` is deliberately outside the rate-limited sub-router so orchestrator liveness
-  probes are never throttled.
+- `/health` and `/ready` sit outside the rate-limited sub-router so orchestrator probes are
+  never throttled. `/health` is liveness (no dependencies); `/ready` is readiness (DB round-trip).
 - `update_note`'s `PATCH` body deserialises present-but-null fields as "clear" and absent
   fields as "unchanged" (`present` deserializer → `NotePatch`).
 - Import seeds each line's version vector with the importer's **device** component, consistent
@@ -94,4 +96,4 @@ the server keeps the collaborative line model underneath.
 - `auth.md` — the middleware and token issuance.
 - `permissions.md` — the capability model + `resolve_note_access` used by note/share handlers.
 - `store.md` — every query these handlers run.
-- `ratelimit.md` — the layer applied to all routes but `/health`.
+- `ratelimit.md` — the layer applied to all routes but `/health` and `/ready`.
