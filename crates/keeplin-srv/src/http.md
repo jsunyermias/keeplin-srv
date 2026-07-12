@@ -24,7 +24,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/notes/:id/share            (post|get)        — grant / list shares
 /api/notes/:id/share/:user_id   (delete)
 /api/notes/:id/transfer         (post)            — hand ownership to another user
-/api/notes/:id/history          (get)             — past versions from the caller's journal
+/api/notes/:id/history          (get)             — per-entity history for all with access (#27)
 /api/notes/:id/export           (get)
 /api/import                     (post)
 ── domain entities the server materialises from the relay (read side) ──
@@ -32,7 +32,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 /api/notebooks/:id/share        (post|get)   — grant / list; grant cascades onto child notes
 /api/notebooks/:id/share/:user  (delete)     — revoke; re-cascades onto child notes
 /api/notebooks/:id/transfer     (post)       — hand notebook ownership to another user
-/api/notebooks/:id/history      (get)        — past versions from the caller's journal
+/api/notebooks/:id/history      (get)        — per-entity history for all with access (#27)
 /api/tags                       (get)   — live tags
 /api/resources                  (get)   — live resource metadata
 /api/notes/:id/tags             (get)   — live tag ids on a note
