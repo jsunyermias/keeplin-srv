@@ -133,6 +133,11 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Json<RegisterResponse>, AppError> {
+    // A private/single-tenant deployment can close signups (issue #21); the open endpoint
+    // would otherwise let anyone create unlimited accounts.
+    if !state.config.registration_enabled {
+        return Err(AppError::Forbidden);
+    }
     if body.password.len() < 8 {
         return Err(AppError::BadRequest("password too short".into()));
     }

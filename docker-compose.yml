@@ -3,11 +3,14 @@ services:
     image: postgres:16-alpine
     container_name: keeplin-srv-postgres
     environment:
-      POSTGRES_USER: keeplin
-      POSTGRES_PASSWORD: keeplin
-      POSTGRES_DB: keeplin
+      POSTGRES_USER: ${POSTGRES_USER:-keeplin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keeplin}
+      POSTGRES_DB: ${POSTGRES_DB:-keeplin}
+    # Bound to loopback so the database is reachable for local `cargo run` but NOT
+    # exposed on the host's LAN interface (issue #38). Drop this block entirely in
+    # production — the server reaches Postgres over the internal compose network.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - keeplin-srv-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +20,7 @@ services:
       retries: 5
 
   # Builds the server image (Dockerfile) and runs it against the Postgres above.
-  # Dev/demo defaults — override JWT_SECRET (and put TLS in front) for real use.
+  # Demo topology only — put a TLS reverse proxy in front for real use.
   server:
     build: .
     container_name: keeplin-srv
@@ -25,8 +28,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://keeplin:keeplin@postgres:5432/keeplin
-      JWT_SECRET: change_this_to_a_long_random_secret
+      DATABASE_URL: postgres://${POSTGRES_USER:-keeplin}:${POSTGRES_PASSWORD:-keeplin}@postgres:5432/${POSTGRES_DB:-keeplin}
+      # No default: compose refuses to start without a real secret in `.env`
+      # (`cp .env.example .env` then `openssl rand -hex 32`). The server itself
+      # also rejects a weak/placeholder value (issue #19), so there is no path to
+      # running with a guessable token-signing key (issues #19, #38).
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — generate one with: openssl rand -hex 32}
       LOG_JSON: "true"
       RUST_LOG: info
     ports:

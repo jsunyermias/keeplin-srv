@@ -28,6 +28,7 @@ helper.
 | `MAX_UPLOAD_BYTES` | `max_upload_bytes` | `104857600` (100 MiB) | Max size of a resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
 | `MAX_USER_STORAGE_BYTES` | `max_user_storage_bytes` | `0` (off) | Total resource-blob bytes per user; a blob upload over it → `507` |
 | `MAX_NOTES_PER_USER` | `max_notes_per_user` | `0` (off) | Max live notes a user may own; creating past it → `507` |
+| `REGISTRATION_ENABLED` | `registration_enabled` | `true` | When `false`, `POST /api/register` returns `403` — close open signups on a private deployment (issue #21) |
 
 ## Notes & gotchas
 

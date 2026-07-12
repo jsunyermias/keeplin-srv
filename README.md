@@ -115,7 +115,7 @@ auth_token = "<token from step 2>"
 docker compose up -d postgres
 
 # 2. Copy environment variables
-cp .env.example .env   # change JWT_SECRET in production
+cp .env.example .env   # then set JWT_SECRET (required): openssl rand -hex 32
 
 # 3. Build and run
 cargo run
@@ -131,7 +131,9 @@ The `keeplin-core` git dependency is **pinned by commit** in `Cargo.toml` for
 reproducible builds — bump that `rev` to adopt newer keeplin.
 
 ```bash
-# Whole stack (Postgres + server) for a local/demo run:
+# Whole stack (Postgres + server) for a local/demo run.
+# JWT_SECRET is REQUIRED — compose refuses to start without it:
+cp .env.example .env && printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 docker compose up --build
 
 # Or just the image:
@@ -142,8 +144,7 @@ docker run --rm -p 3000:3000 \
   keeplin-srv
 ```
 
-The Compose defaults are dev/demo only — override `JWT_SECRET`, use real Postgres
-credentials, and put a TLS reverse proxy in front for production.
+The Compose topology is dev/demo only: Postgres is bound to loopback (not the LAN), and `JWT_SECRET` must be supplied via `.env` (no working default). For production use real Postgres credentials, put a TLS reverse proxy in front, and consider `REGISTRATION_ENABLED=false`.
 
 ## Environment variables
 

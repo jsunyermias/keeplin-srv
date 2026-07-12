@@ -34,6 +34,7 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
         max_upload_bytes: 100 * 1024 * 1024,
         max_user_storage_bytes,
         max_notes_per_user,
+        registration_enabled: true,
     }
 }
 
@@ -125,6 +126,25 @@ async fn put_blob(addr: SocketAddr, token: &str, id: Uuid, len: usize) -> u16 {
         .unwrap()
         .status()
         .as_u16()
+}
+
+/// With `registration_enabled = false`, the open signup endpoint is closed (issue #21):
+/// `POST /api/register` returns 403 while login for existing accounts still works.
+#[sqlx::test(migrations = "../../migrations")]
+async fn registration_can_be_disabled(pool: PgPool) {
+    let mut config = quota_config(0, 0);
+    config.registration_enabled = false;
+    let addr = spawn(pool, config).await;
+
+    let code = reqwest::Client::new()
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "a@example.com", "password": "password123" }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(code, 403, "registration must be closed when disabled");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

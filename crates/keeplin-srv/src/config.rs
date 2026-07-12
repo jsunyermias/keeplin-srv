@@ -45,6 +45,13 @@ pub struct Config {
     /// Maximum number of live notes a single user may own. Creating one past
     /// this is rejected with `507`.
     pub max_notes_per_user: i64,
+
+    // ── Access ────────────────────────────────────────────────────────────────
+    /// Whether `POST /api/register` accepts new signups. Defaults to `true` for
+    /// backward compatibility; set `false` on a private/single-tenant deployment
+    /// so the open endpoint cannot be used to create accounts (issue #21). When
+    /// `false`, registration returns `403`.
+    pub registration_enabled: bool,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -134,6 +141,7 @@ impl Config {
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 100 * 1024 * 1024),
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
+            registration_enabled: env_parse("REGISTRATION_ENABLED", true),
         }
     }
 }

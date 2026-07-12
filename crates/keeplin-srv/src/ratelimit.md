@@ -43,3 +43,7 @@ space a single server sees; a future improvement could evict idle buckets).
 - `http.md` — where the middleware is layered onto all routes but `/health`.
 - `config.md` — `RATE_LIMIT_PER_MIN`.
 - `state.md` — holds the shared `RateLimiter`.
+
+## Memory
+
+Idle buckets are swept out of the map on a periodic pass (every ~60s, triggered lazily on the next `check`): a bucket that has refilled to capacity is indistinguishable from a fresh one, so dropping it is behaviour-preserving and keeps the map bounded under IP churn (issue #33).
