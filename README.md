@@ -197,3 +197,7 @@ cargo test
   (keeplin-core's `DbBackend`).
 
 CI (GitHub Actions) runs fmt, check, the tests against Postgres 16 and clippy.
+
+## License
+
+Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
