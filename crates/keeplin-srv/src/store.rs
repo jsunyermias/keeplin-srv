@@ -6,6 +6,48 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
+/// Opaque keyset-pagination cursor: the ordering timestamp of the last row a
+/// caller received plus its id as a tiebreaker (issue #29). Serialised as
+/// `"<micros>_<uuid>"` — URL-safe and dependency-free — so clients treat it as a
+/// token they echo back rather than parse. Keyset paging (not `OFFSET`) keeps
+/// the cost of deep pages flat and is stable under concurrent inserts.
+#[derive(Debug, Clone, Copy)]
+pub struct PageCursor {
+    pub ts: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+impl PageCursor {
+    pub fn new(ts: DateTime<Utc>, id: Uuid) -> Self {
+        Self { ts, id }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}_{}", self.ts.timestamp_micros(), self.id)
+    }
+
+    /// Parse a cursor previously produced by [`encode`]. Returns `None` for any
+    /// malformed token so the handler can answer `400` rather than trust it.
+    pub fn decode(token: &str) -> Option<Self> {
+        let (micros, id) = token.split_once('_')?;
+        let ts = DateTime::from_timestamp_micros(micros.parse().ok()?)?;
+        Some(Self {
+            ts,
+            id: id.parse().ok()?,
+        })
+    }
+}
+
+/// Split an optional cursor into the `(timestamp, id)` binds the paginated
+/// queries expect. `None` maps to `(NULL, NULL)`, which the `$3 IS NULL`
+/// guard turns into "no keyset filter" — i.e. start from the first page.
+fn split_cursor(cursor: Option<PageCursor>) -> (Option<DateTime<Utc>>, Option<Uuid>) {
+    match cursor {
+        Some(c) => (Some(c.ts), Some(c.id)),
+        None => (None, None),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
@@ -272,6 +314,21 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Delete a user and everything they own (issue #31 — account deletion).
+    ///
+    /// Every foreign key back to `users` (devices, cursors, the change journal,
+    /// notes and their lines/order/shares, notebooks, tags, resources and their
+    /// blobs, note_tags) is declared `ON DELETE CASCADE`, so removing the row
+    /// tears down the whole account in one statement. Returns `false` if the
+    /// user did not exist.
+    pub async fn delete_user(&self, id: Uuid) -> Result<bool, AppError> {
+        let result = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // ── Devices ──────────────────────────────────────────────────────────────
@@ -711,7 +768,17 @@ impl Store {
 
     /// Notes the user owns, notes shared with them, plus notes filed in notebooks they own
     /// (the notebook owner's implicit `manage` — see `permissions::resolve_note_access`).
-    pub async fn list_notes_for_user(&self, user_id: Uuid) -> Result<Vec<Note>, AppError> {
+    /// Notes visible to `user_id` (owned, shared, or filed in a notebook they
+    /// own), newest first. Paginated by keyset on `(updated_at, id)` (issue #29):
+    /// `limit` of `None` returns everything (back-compatible); a `cursor` returns
+    /// the page strictly older than it.
+    pub async fn list_notes_for_user(
+        &self,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Note>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
         let notes = sqlx::query_as::<_, Note>(
             r#"SELECT n.id, n.title, n.owner_id, n.notebook_id, n.is_todo, n.todo_due,
                       n.todo_completed, n.created_at, n.updated_at, n.deleted_at
@@ -721,9 +788,14 @@ impl Store {
                       ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
                WHERE n.deleted_at IS NULL
                  AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL)
-               ORDER BY n.updated_at DESC"#,
+                 AND ($3::timestamptz IS NULL OR (n.updated_at, n.id) < ($3, $4))
+               ORDER BY n.updated_at DESC, n.id DESC
+               LIMIT $2"#,
         )
         .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(notes)
@@ -1521,32 +1593,71 @@ impl Store {
 
     // ── Domain entity reads (cold rehydration / queries) ─────────────────────
 
-    pub async fn list_notebooks(&self, user_id: Uuid) -> Result<Vec<Notebook>, AppError> {
+    pub async fn list_notebooks(
+        &self,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Notebook>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Notebook>(
             "SELECT id, title, alias, created_at, updated_at, deleted_at
-             FROM notebooks WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+             FROM notebooks
+             WHERE user_id = $1 AND deleted_at IS NULL
+               AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
+             ORDER BY created_at, id
+             LIMIT $2",
         )
         .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
         .fetch_all(&self.pool)
         .await?)
     }
 
-    pub async fn list_tags(&self, user_id: Uuid) -> Result<Vec<Tag>, AppError> {
+    pub async fn list_tags(
+        &self,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Tag>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
             "SELECT id, title, created_at, updated_at, deleted_at
-             FROM tags WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+             FROM tags
+             WHERE user_id = $1 AND deleted_at IS NULL
+               AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
+             ORDER BY created_at, id
+             LIMIT $2",
         )
         .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
         .fetch_all(&self.pool)
         .await?)
     }
 
-    pub async fn list_resources(&self, user_id: Uuid) -> Result<Vec<ResourceMeta>, AppError> {
+    pub async fn list_resources(
+        &self,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<ResourceMeta>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, ResourceMeta>(
             "SELECT id, title, mime_type, file_name, size, created_at, deleted_at
-             FROM resources WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+             FROM resources
+             WHERE user_id = $1 AND deleted_at IS NULL
+               AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
+             ORDER BY created_at, id
+             LIMIT $2",
         )
         .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
         .fetch_all(&self.pool)
         .await?)
     }

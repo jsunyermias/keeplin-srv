@@ -848,6 +848,24 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     assert_eq!(order.order.len(), 1);
 }
 
+/// `/version` is an unauthenticated capability/version handshake (issues #39/#114).
+#[sqlx::test(migrations = "../../migrations")]
+async fn version_endpoint_advertises_capabilities(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let v: Value = reqwest::Client::new()
+        .get(format!("http://{addr}/version"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["name"], "keeplin-srv");
+    assert!(v["protocol_version"].as_u64().unwrap() >= 1);
+    let caps = v["capabilities"].as_array().unwrap();
+    assert!(caps.iter().any(|c| c == "history"), "advertises history");
+}
+
 /// `/health` is a cheap liveness stub; `/ready` does a real DB round-trip. Both are
 /// unauthenticated and not rate-limited (issue #36).
 #[sqlx::test(migrations = "../../migrations")]

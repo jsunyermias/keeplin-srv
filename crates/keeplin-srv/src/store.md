@@ -44,7 +44,9 @@ restricts to one account (a relay-only entity with no server owner/share model).
 `upsert_tag` / `delete_tag`, `upsert_note_tag` (add/remove), `upsert_resource_meta` / `delete_resource`,
 `put_resource_blob` / `get_resource_blob` / `resource_owned_by`, and the reads `list_notebooks`,
 `list_tags`, `list_resources`, `list_note_tag_ids`. Each write resolves via `incoming_wins` under a
-`SELECT … FOR UPDATE` lock.
+`SELECT … FOR UPDATE` lock. The list reads (and `list_notes_for_user`) take `(limit, cursor)` for
+keyset pagination (`PageCursor` on `(created_at, id)`, or `(updated_at, id)` for notes); `None` limit
+returns every row (issue #29).
 **Quotas**: `user_blob_bytes_excluding` (total **live** blob bytes minus one resource — soft-deleted resources do not count, so deleting frees quota, issue #24), `count_live_notes_for_user`.
 **Maintenance / metrics**: `gc_line_tombstones` (reads-modifies-writes each note's order under `SELECT … FOR UPDATE` so a concurrent collaborative order write is not clobbered, issue #25), `purge_deleted_resource_blobs` (reclaims blob bytes of long-deleted resources; metadata tombstone kept, issue #24), `counts`.
 

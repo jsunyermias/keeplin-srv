@@ -353,7 +353,7 @@ async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     // Apply in one order…
     assert!(store.upsert_notebook(user.id, &nb_a).await.unwrap());
     assert!(store.upsert_notebook(user.id, &nb_b).await.unwrap());
-    let winner1 = store.list_notebooks(user.id).await.unwrap();
+    let winner1 = store.list_notebooks(user.id, None, None).await.unwrap();
     assert_eq!(winner1[0].title, "from-b");
 
     // …and the reverse order converges to the same winner (b still wins; the
@@ -367,7 +367,7 @@ async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     assert!(store2.upsert_notebook(user.id, &nb_b2).await.unwrap());
     assert!(!store2.upsert_notebook(user.id, &nb_a2).await.unwrap()); // a loses → not written
     let winner2 = store2
-        .list_notebooks(user.id)
+        .list_notebooks(user.id, None, None)
         .await
         .unwrap()
         .into_iter()
