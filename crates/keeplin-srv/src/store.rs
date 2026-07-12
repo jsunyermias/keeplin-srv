@@ -420,43 +420,50 @@ impl Store {
             .collect())
     }
 
-    /// An entity's past versions from the caller's journal, newest first — the server-side
-    /// counterpart of the client's `HistoryRepository` (the client's local `entity_changes`
-    /// holds only changes that originated on that device; the server journal holds every
-    /// device's).
+    /// An entity's past versions, newest first — the server-side counterpart of the client's
+    /// `HistoryRepository` (the client's local `entity_changes` holds only changes that
+    /// originated on that device; the server journal holds every device's, across every user).
     ///
-    /// Scoped to `user_id`'s own journal rows, so no cross-user access is possible by
-    /// construction. `not_before` applies the retention age bound (`None` = no age bound);
-    /// what is available is in any case limited by journal pruning. The payloads stay
-    /// opaque: only the envelope (`op`, snapshot key, `deleted_at`) is inspected, and the
-    /// snapshot is returned verbatim (client-encrypted fields remain ciphertext).
+    /// History is **per-entity**, not per-user: a note edited by several collaborators has one
+    /// timeline, so every user with read access sees every editor's versions (issue #27). The
+    /// caller's read authorization is enforced by the HTTP handler *before* this is called;
+    /// this query matches by entity id across all users' journal rows. `not_before` bounds the
+    /// visible window — the HTTP layer sets it to the later of the retention age bound and, when
+    /// the admin selects the `access` visibility policy, the caller's access-grant time. The
+    /// payloads stay opaque: only the envelope (`op`, snapshot key, `deleted_at`) is inspected,
+    /// and the snapshot is returned verbatim (client-encrypted fields remain ciphertext).
+    /// `user_scope`: `None` reads the entity's history across **all** users' journal rows
+    /// (per-entity history for a server-materialised, potentially shared entity — the HTTP
+    /// handler has already authorised read access). `Some(user_id)` restricts to that user's
+    /// own rows (a relay-only entity with no server-side owner/share model is private to the
+    /// account, so it is read per-user).
     pub async fn entity_history(
         &self,
-        user_id: Uuid,
         kind: HistoryKind,
         entity_id: Uuid,
         limit: i64,
         not_before: Option<DateTime<Utc>>,
+        user_scope: Option<Uuid>,
     ) -> Result<Vec<EntityVersionRow>, AppError> {
         let upsert_ops: Vec<String> = kind.upsert_ops().iter().map(|s| s.to_string()).collect();
         let delete_ops: Vec<String> = kind.delete_ops().iter().map(|s| s.to_string()).collect();
         let rows = sqlx::query(&format!(
             r#"SELECT payload, sync_device_id, received_at
                FROM changes
-               WHERE user_id = $1
-                 AND ((payload->>'op' = ANY($3) AND payload->'{key}'->>'id' = $2)
-                   OR (payload->>'op' = ANY($4) AND payload->>'id' = $2))
-                 AND ($5::timestamptz IS NULL OR received_at >= $5)
+               WHERE ((payload->>'op' = ANY($2) AND payload->'{key}'->>'id' = $1)
+                   OR (payload->>'op' = ANY($3) AND payload->>'id' = $1))
+                 AND ($4::timestamptz IS NULL OR received_at >= $4)
+                 AND ($6::uuid IS NULL OR user_id = $6)
                ORDER BY seq DESC
-               LIMIT $6"#,
+               LIMIT $5"#,
             key = kind.snapshot_key(),
         ))
-        .bind(user_id)
         .bind(entity_id.to_string())
         .bind(&upsert_ops)
         .bind(&delete_ops)
         .bind(not_before)
         .bind(limit)
+        .bind(user_scope)
         .fetch_all(&self.pool)
         .await?;
 

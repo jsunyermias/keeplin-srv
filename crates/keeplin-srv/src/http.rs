@@ -837,14 +837,16 @@ async fn transfer_notebook(
     ))
 }
 
-// ── History (Front D stage 2) ────────────────────────────────────────────────
+// ── History (Front D stage 2; per-note, issue #27) ───────────────────────────
 //
 // The server journal is the durable, cross-device change record; these endpoints expose it
 // as version history so a fresh device (whose local journal is empty) can still show and
-// revert through past versions. Scoped to the **caller's own journal** — that is where every
-// change of their devices lands, and it makes the endpoints safe by construction (no
-// cross-user reads). Snapshots are returned exactly as pushed: client-encrypted fields stay
-// ciphertext and are decrypted client-side.
+// revert through past versions. History is **per-entity**: a note has one timeline, so every
+// user with read access sees every collaborator's edits (issue #27). The caller's read
+// authorization is checked here before any history is read. The admin-selected
+// `HISTORY_VISIBILITY` policy optionally windows a *collaborator's* view to versions from when
+// they were granted access (the owner always sees the full history). Snapshots are returned
+// exactly as pushed: client-encrypted fields stay ciphertext and are decrypted client-side.
 
 /// `?limit=` — version-count cap. Defaults to 100, hard-capped at 10 000 (the client's
 /// revert scan bound).
@@ -856,65 +858,139 @@ struct HistoryQuery {
 const HISTORY_DEFAULT_LIMIT: u32 = 100;
 const HISTORY_MAX_LIMIT: u32 = 10_000;
 
-async fn entity_history(
+/// Combine the retention age bound with an optional access-grant cutoff, then read the
+/// history. `access_cutoff` is `Some(instant)` only when the `access` visibility policy
+/// applies to this caller; the effective lower bound is the **later** (more recent) of the
+/// two. `user_scope` is `None` for a server-materialised (authorised, possibly shared) entity
+/// — per-entity history across all users — and `Some(caller)` for a relay-only entity that is
+/// private to the account.
+async fn history_versions(
     state: &AppState,
-    user_id: Uuid,
     kind: crate::store::HistoryKind,
     id: Uuid,
     q: &HistoryQuery,
+    access_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    user_scope: Option<Uuid>,
 ) -> Result<Vec<crate::store::EntityVersionRow>, AppError> {
     let limit = q
         .limit
         .filter(|l| *l > 0)
         .unwrap_or(HISTORY_DEFAULT_LIMIT)
         .min(HISTORY_MAX_LIMIT);
-    // The age dimension of retention: even where pruning has not caught up yet, do not
-    // serve history older than the configured journal retention window.
-    let not_before = (state.config.retention_days > 0)
+    let retention_cutoff = (state.config.retention_days > 0)
         .then(|| chrono::Utc::now() - chrono::Duration::days(state.config.retention_days as i64));
+    let not_before = match (retention_cutoff, access_cutoff) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, None) => a,
+        (None, b) => b,
+    };
     state
         .store
-        .entity_history(user_id, kind, id, limit as i64, not_before)
+        .entity_history(kind, id, limit as i64, not_before, user_scope)
         .await
 }
 
-/// `GET /api/notes/:id/history` — past versions of a note from the caller's journal,
-/// newest first. `entity` is the opaque snapshot the device pushed; `null` for a tombstone.
+/// The visibility cutoff for a collaborator under the `access` policy: `Some(share.created_at)`
+/// when the policy is on and the caller is a non-owner grantee, else `None` (full history).
+fn access_cutoff(
+    state: &AppState,
+    access: &crate::permissions::Access,
+    share_created_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if state.config.history_since_access && !access.is_owner {
+        share_created_at
+    } else {
+        None
+    }
+}
+
+/// `GET /api/notes/:id/history` — past versions of a note, newest first. For a
+/// server-materialised note this is **per-note**: every user with read access sees every
+/// collaborator's edits (issue #27). A relay-only note (no server-side `notes` row, hence no
+/// owner/share model) is private to the account and read from the caller's own journal.
 async fn note_history(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
     Path(id): Path<Uuid>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
-    Ok(Json(
-        entity_history(
-            &state,
-            user.user_id,
-            crate::store::HistoryKind::Note,
-            id,
-            &q,
-        )
-        .await?,
-    ))
+    match state.store.get_note(id).await? {
+        Some(note) => {
+            let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+            if !access.can_read() {
+                return Err(AppError::Forbidden);
+            }
+            let share = state.store.get_share(id, user.user_id).await?;
+            let cutoff = access_cutoff(&state, &access, share.map(|s| s.created_at));
+            Ok(Json(
+                history_versions(
+                    &state,
+                    crate::store::HistoryKind::Note,
+                    id,
+                    &q,
+                    cutoff,
+                    None,
+                )
+                .await?,
+            ))
+        }
+        // No server-side note entity: private to this account, read per-user.
+        None => Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Note,
+                id,
+                &q,
+                None,
+                Some(user.user_id),
+            )
+            .await?,
+        )),
+    }
 }
 
-/// `GET /api/notebooks/:id/history` — past versions of a notebook. See [`note_history`].
+/// `GET /api/notebooks/:id/history` — past versions of a notebook. Per-notebook for a
+/// materialised notebook (all users with access see every edit); per-user otherwise. See
+/// [`note_history`].
 async fn notebook_history(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
     Path(id): Path<Uuid>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
-    Ok(Json(
-        entity_history(
-            &state,
-            user.user_id,
-            crate::store::HistoryKind::Notebook,
-            id,
-            &q,
-        )
-        .await?,
-    ))
+    // A materialised notebook has an owner row; resolve access against it. If it is not
+    // materialised, fall back to the caller's own journal (private, per-user).
+    if state.store.notebook_owner(id).await?.is_some() {
+        let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+        if !access.can_read() {
+            return Err(AppError::Forbidden);
+        }
+        let share = state.store.get_notebook_share(id, user.user_id).await?;
+        let cutoff = access_cutoff(&state, &access, share.map(|s| s.created_at));
+        Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Notebook,
+                id,
+                &q,
+                cutoff,
+                None,
+            )
+            .await?,
+        ))
+    } else {
+        Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Notebook,
+                id,
+                &q,
+                None,
+                Some(user.user_id),
+            )
+            .await?,
+        ))
+    }
 }
 
 // ── Import / export (design §10) ─────────────────────────────────────────────

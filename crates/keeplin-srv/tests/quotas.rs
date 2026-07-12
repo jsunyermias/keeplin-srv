@@ -36,6 +36,7 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
         max_user_storage_bytes,
         max_notes_per_user,
         registration_enabled: true,
+        history_since_access: false,
     }
 }
 

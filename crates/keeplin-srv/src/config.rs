@@ -56,6 +56,11 @@ pub struct Config {
     /// so the open endpoint cannot be used to create accounts (issue #21). When
     /// `false`, registration returns `403`.
     pub registration_enabled: bool,
+    /// History visibility for shared notes/notebooks (issue #27). `false` (default,
+    /// `HISTORY_VISIBILITY=creation`): everyone with read access sees the entity's full
+    /// history from creation. `true` (`HISTORY_VISIBILITY=access`): a **collaborator** sees
+    /// only versions from when they were granted access; the owner always sees everything.
+    pub history_since_access: bool,
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -147,6 +152,9 @@ impl Config {
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
             registration_enabled: env_parse("REGISTRATION_ENABLED", true),
+            history_since_access: std::env::var("HISTORY_VISIBILITY")
+                .map(|v| v.eq_ignore_ascii_case("access"))
+                .unwrap_or(false),
         }
     }
 }
