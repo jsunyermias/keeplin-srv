@@ -127,6 +127,26 @@ pub struct NoteOrder {
     pub last_writer: String,
 }
 
+/// One row of the cross-instance op fan-out outbox (issue #45).
+#[derive(Debug, Clone)]
+pub struct CollabEvent {
+    pub seq: i64,
+    pub note_id: Uuid,
+    pub origin_instance: Uuid,
+    pub origin_conn: i64,
+    pub user_id: Uuid,
+    pub ops: serde_json::Value,
+}
+
+/// One merged presence entry across instances (issue #45); `cursor` is the
+/// opaque `protocol::Cursor` as stored JSON.
+#[derive(Debug, Clone)]
+pub struct PresenceRow {
+    pub user_id: Uuid,
+    pub display_name: String,
+    pub cursor: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct UserDevice {
     pub id: Uuid,
@@ -1049,12 +1069,20 @@ impl Store {
     // ── Lines ────────────────────────────────────────────────────────────────
 
     pub async fn get_line(&self, id: Uuid) -> Result<Option<Line>, AppError> {
+        self.get_line_on(&self.pool, id).await
+    }
+
+    /// As [`get_line`], on a caller-supplied executor (issue #45).
+    pub async fn get_line_on<'e, E>(&self, exec: E, id: Uuid) -> Result<Option<Line>, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let line = sqlx::query_as::<_, Line>(
             r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
                FROM lines WHERE id = $1"#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(exec)
         .await?;
         Ok(line)
     }
@@ -1080,6 +1108,33 @@ impl Store {
         last_writer: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<Line, AppError> {
+        self.insert_line_on(
+            &self.pool,
+            id,
+            note_id,
+            content,
+            vv,
+            last_writer,
+            updated_at,
+        )
+        .await
+    }
+
+    /// As [`insert_line`], on a caller-supplied executor (issue #45).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_line_on<'e, E>(
+        &self,
+        exec: E,
+        id: Uuid,
+        note_id: Uuid,
+        content: &str,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Line, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let line = sqlx::query_as::<_, Line>(
             r#"INSERT INTO lines (id, note_id, content, created_at, updated_at, vv, last_writer)
                VALUES ($1, $2, $3, now(), $4, $5, $6)
@@ -1091,7 +1146,7 @@ impl Store {
         .bind(updated_at)
         .bind(Json(vv))
         .bind(last_writer)
-        .fetch_one(&self.pool)
+        .fetch_one(exec)
         .await?;
         Ok(line)
     }
@@ -1107,6 +1162,23 @@ impl Store {
         last_writer: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<Option<Line>, AppError> {
+        self.update_line_on(&self.pool, id, content, vv, last_writer, updated_at)
+            .await
+    }
+
+    /// As [`update_line`], on a caller-supplied executor (issue #45).
+    pub async fn update_line_on<'e, E>(
+        &self,
+        exec: E,
+        id: Uuid,
+        content: &str,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Option<Line>, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let line = sqlx::query_as::<_, Line>(
             r#"UPDATE lines
                SET content = $2, vv = $3, last_writer = $4, updated_at = $5, deleted_at = NULL
@@ -1118,7 +1190,7 @@ impl Store {
         .bind(Json(vv))
         .bind(last_writer)
         .bind(updated_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(exec)
         .await?;
         Ok(line)
     }
@@ -1133,6 +1205,23 @@ impl Store {
         last_writer: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<Option<Line>, AppError> {
+        self.soft_delete_line_on(&self.pool, id, deleted_at, vv, last_writer, updated_at)
+            .await
+    }
+
+    /// As [`soft_delete_line`], on a caller-supplied executor (issue #45).
+    pub async fn soft_delete_line_on<'e, E>(
+        &self,
+        exec: E,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Option<Line>, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let line = sqlx::query_as::<_, Line>(
             r#"UPDATE lines
                SET deleted_at = $2, vv = $3, last_writer = $4, updated_at = $5
@@ -1144,7 +1233,7 @@ impl Store {
         .bind(Json(vv))
         .bind(last_writer)
         .bind(updated_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(exec)
         .await?;
         Ok(line)
     }
@@ -1152,12 +1241,26 @@ impl Store {
     // ── Line order (the NoteLines entity) ────────────────────────────────────
 
     pub async fn get_note_order(&self, note_id: Uuid) -> Result<Option<NoteOrder>, AppError> {
+        self.get_note_order_on(&self.pool, note_id).await
+    }
+
+    /// As [`get_note_order`], on a caller-supplied executor so the collaborative
+    /// op batch can read the order on the same connection that holds its advisory
+    /// lock (issue #45) rather than a separate pooled one.
+    pub async fn get_note_order_on<'e, E>(
+        &self,
+        exec: E,
+        note_id: Uuid,
+    ) -> Result<Option<NoteOrder>, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let row = sqlx::query(
             r#"SELECT note_id, order_json, updated_at, vv, last_writer
                FROM note_line_order WHERE note_id = $1"#,
         )
         .bind(note_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(exec)
         .await?;
         Ok(row.map(|r| NoteOrder {
             note_id: r.get("note_id"),
@@ -1176,6 +1279,23 @@ impl Store {
         last_writer: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<(), AppError> {
+        self.set_note_order_on(&self.pool, note_id, order, vv, last_writer, updated_at)
+            .await
+    }
+
+    /// As [`set_note_order`], on a caller-supplied executor (issue #45).
+    pub async fn set_note_order_on<'e, E>(
+        &self,
+        exec: E,
+        note_id: Uuid,
+        order: &[Uuid],
+        vv: &VersionVector,
+        last_writer: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         sqlx::query(
             r#"UPDATE note_line_order
                SET order_json = $2, vv = $3, last_writer = $4, updated_at = $5
@@ -1186,9 +1306,198 @@ impl Store {
         .bind(Json(vv))
         .bind(last_writer)
         .bind(updated_at)
+        .execute(exec)
+        .await?;
+        Ok(())
+    }
+
+    // ── Cross-instance collaboration bus (issue #45) ─────────────────────────
+
+    /// The connection pool, so the bus can open a dedicated `PgListener`.
+    pub fn pool(&self) -> &Pool<Postgres> {
+        &self.pool
+    }
+
+    /// Fire a `LISTEN/NOTIFY` signal on `channel` with `payload`. Used to tell
+    /// other instances that a collab op/presence change or a relay batch landed.
+    pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), AppError> {
+        // `pg_notify` is the function form of NOTIFY and takes the payload as a
+        // bind parameter (the statement form would require interpolation).
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(channel)
+            .bind(payload)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Hold a Postgres advisory lock keyed by `note_id` for the returned
+    /// transaction's lifetime, serialising a note's order read-modify-write
+    /// across instances (issue #45). The caller does its per-op writes on the
+    /// pool and then `commit()`s this transaction to release the lock; dropping
+    /// it (on error) rolls back and releases too.
+    pub async fn lock_note_order(
+        &self,
+        note_id: Uuid,
+    ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(note_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+
+    /// Append an applied op batch to the fan-out outbox and return its `seq`
+    /// (the note's server sequence number). Emitted with `pg_notify` by the
+    /// caller so every instance delivers it to its local subscribers.
+    pub async fn insert_collab_event(
+        &self,
+        note_id: Uuid,
+        origin_instance: Uuid,
+        origin_conn: i64,
+        user_id: Uuid,
+        ops: &serde_json::Value,
+    ) -> Result<i64, AppError> {
+        let seq: i64 = sqlx::query_scalar(
+            r#"INSERT INTO collab_events (note_id, origin_instance, origin_conn, user_id, ops)
+               VALUES ($1, $2, $3, $4, $5) RETURNING seq"#,
+        )
+        .bind(note_id)
+        .bind(origin_instance)
+        .bind(origin_conn)
+        .bind(user_id)
+        .bind(Json(ops))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(seq)
+    }
+
+    /// Load an outbox row by `seq` for delivery to local subscribers.
+    pub async fn get_collab_event(&self, seq: i64) -> Result<Option<CollabEvent>, AppError> {
+        let row = sqlx::query(
+            r#"SELECT note_id, origin_instance, origin_conn, user_id, ops
+               FROM collab_events WHERE seq = $1"#,
+        )
+        .bind(seq)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| CollabEvent {
+            seq,
+            note_id: r.get("note_id"),
+            origin_instance: r.get("origin_instance"),
+            origin_conn: r.get("origin_conn"),
+            user_id: r.get("user_id"),
+            ops: r.get::<Json<serde_json::Value>, _>("ops").0,
+        }))
+    }
+
+    /// Delete outbox rows older than `older_than` (delivery buffer, not history).
+    pub async fn prune_collab_events(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
+        let r = sqlx::query("DELETE FROM collab_events WHERE created_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Record (or refresh) this connection's presence on a note.
+    pub async fn upsert_presence(
+        &self,
+        note_id: Uuid,
+        instance_id: Uuid,
+        conn_id: i64,
+        user_id: Uuid,
+        display_name: &str,
+        cursor: Option<&serde_json::Value>,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"INSERT INTO collab_presence
+                   (note_id, instance_id, conn_id, user_id, display_name, cursor, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, now())
+               ON CONFLICT (note_id, instance_id, conn_id)
+               DO UPDATE SET cursor = EXCLUDED.cursor,
+                             display_name = EXCLUDED.display_name,
+                             updated_at = now()"#,
+        )
+        .bind(note_id)
+        .bind(instance_id)
+        .bind(conn_id)
+        .bind(user_id)
+        .bind(display_name)
+        .bind(cursor.map(|c| Json(c.clone())))
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Remove one connection's presence from one note (leave).
+    pub async fn delete_presence(
+        &self,
+        note_id: Uuid,
+        instance_id: Uuid,
+        conn_id: i64,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "DELETE FROM collab_presence WHERE note_id = $1 AND instance_id = $2 AND conn_id = $3",
+        )
+        .bind(note_id)
+        .bind(instance_id)
+        .bind(conn_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The merged presence for a note across all instances: one row per live
+    /// subscriber connection (the caller dedups per user).
+    pub async fn list_presence(&self, note_id: Uuid) -> Result<Vec<PresenceRow>, AppError> {
+        let rows = sqlx::query(
+            r#"SELECT user_id, display_name, cursor
+               FROM collab_presence WHERE note_id = $1"#,
+        )
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PresenceRow {
+                user_id: r.get("user_id"),
+                display_name: r.get("display_name"),
+                cursor: r
+                    .get::<Option<Json<serde_json::Value>>, _>("cursor")
+                    .map(|c| c.0),
+            })
+            .collect())
+    }
+
+    /// Heartbeat: bump `updated_at` on all of this instance's presence rows so a
+    /// live instance's rows are never swept as stale.
+    pub async fn touch_instance_presence(&self, instance_id: Uuid) -> Result<(), AppError> {
+        sqlx::query("UPDATE collab_presence SET updated_at = now() WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Drop presence rows not heartbeated since `older_than` — i.e. left behind
+    /// by a crashed/stopped instance.
+    pub async fn sweep_presence(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
+        let r = sqlx::query("DELETE FROM collab_presence WHERE updated_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Remove every presence row owned by an instance (startup/shutdown cleanup).
+    pub async fn delete_instance_presence(&self, instance_id: Uuid) -> Result<u64, AppError> {
+        let r = sqlx::query("DELETE FROM collab_presence WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
     }
 
     // ── Domain entities materialised from the relay ──────────────────────────

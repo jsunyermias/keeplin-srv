@@ -63,6 +63,25 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
+/// Spawn a server instance with the cross-instance bus running, for the
+/// multi-instance relay test (issue #45).
+async fn spawn_instance(pool: PgPool) -> SocketAddr {
+    let state = Arc::new(AppState::new(test_config(), pool));
+    keeplin_srv::bus::spawn(state.clone());
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
 async fn register(addr: SocketAddr, email: &str) {
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/api/register"))
@@ -150,6 +169,28 @@ async fn note_syncs_live_between_two_devices(pool: PgPool) {
     let read = b.read_note(id).await.unwrap();
     assert_eq!(read.title, "Shared");
     assert_eq!(read.body, "over the wire");
+}
+
+/// A batch pushed to one instance is delivered live to a device connected to a
+/// *different* instance, via the cross-instance relay wake over the bus (issue
+/// #45) — not just on the next reconnect.
+#[sqlx::test(migrations = "../../migrations")]
+async fn relay_batch_propagates_across_instances(pool: PgPool) {
+    let addr_a = spawn_instance(pool.clone()).await;
+    let addr_b = spawn_instance(pool.clone()).await;
+    register(addr_a, "a@example.com").await;
+    let a = device(addr_a, &login(addr_a, "a@example.com", "laptop").await).await;
+    let b = device(addr_b, &login(addr_b, "a@example.com", "phone").await).await;
+
+    let note = Note::new("Cross", "over two instances");
+    let id = note.id;
+    a.create_note(note).await.unwrap();
+    push(&a).await;
+
+    assert!(
+        sync_until(&b, id, None).await,
+        "device B on the other instance must receive A's note live"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
