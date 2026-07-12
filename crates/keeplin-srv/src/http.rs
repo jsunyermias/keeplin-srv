@@ -219,6 +219,30 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
+/// Canonicalise an email for storage and lookup: trim surrounding whitespace and
+/// lowercase it, so `John@X.com`, `john@x.com` and `  john@x.com ` are one account
+/// and login is not case-sensitive (issue #43).
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+/// Minimal structural check — exactly one `@`, a non-empty local part, and a
+/// dotted domain. Deliberately not RFC-complete: it only rejects input that is
+/// obviously not an email so the `email` column actually holds addresses.
+fn is_valid_email(email: &str) -> bool {
+    let mut parts = email.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) => {
+            !local.is_empty()
+                && domain.len() >= 3
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
     email: String,
@@ -245,14 +269,18 @@ async fn register(
     if body.password.len() < 8 {
         return Err(AppError::BadRequest("password too short".into()));
     }
+    let email = normalize_email(&body.email);
+    if !is_valid_email(&email) {
+        return Err(AppError::BadRequest("invalid email".into()));
+    }
     let display_name = body
         .display_name
         .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| body.email.split('@').next().unwrap_or_default().to_string());
+        .unwrap_or_else(|| email.split('@').next().unwrap_or_default().to_string());
     let hash = auth::hash_password(&body.password)?;
     let user = state
         .store
-        .create_user(&body.email, &hash, &display_name)
+        .create_user(&email, &hash, &display_name)
         .await?;
     Ok(Json(RegisterResponse { user }))
 }
@@ -277,7 +305,11 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let user = match state.store.get_user_by_email(&body.email).await? {
+    // Normalize the same way registration does so login is case-insensitive (issue #43).
+    // Do not reject a malformed email here: an unknown address must still run the dummy
+    // hash below, or the format check would itself become an enumeration oracle (issue #32).
+    let email = normalize_email(&body.email);
+    let user = match state.store.get_user_by_email(&email).await? {
         Some(user) => user,
         None => {
             // Verify against a fixed dummy hash so a missing account costs the same Argon2
@@ -559,15 +591,29 @@ async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, App
         .ok_or(AppError::NotFound)?;
     let lines = state.store.list_lines(note_id).await?;
     let by_id: std::collections::HashMap<Uuid, _> = lines.into_iter().map(|l| (l.id, l)).collect();
-    let body = order
+    let live: Vec<&str> = order
         .order
         .iter()
         .filter_map(|id| by_id.get(id))
         .filter(|line| line.deleted_at.is_none())
         .map(|line| line.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(body)
+        .collect();
+
+    // Refuse to build a pathologically large body in memory (issue #44). The
+    // collab line limits permit a note up to ~1 GB; measure the joined size
+    // first and bail with 413 rather than allocating it. `0` disables the cap.
+    let cap = state.config.max_note_body_bytes;
+    if cap > 0 {
+        let separators = live.len().saturating_sub(1);
+        let total = live.iter().map(|s| s.len()).sum::<usize>() + separators;
+        if total > cap {
+            return Err(AppError::PayloadTooLarge(format!(
+                "note body is {total} bytes, exceeds the {cap}-byte limit"
+            )));
+        }
+    }
+
+    Ok(live.join("\n"))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -770,7 +816,12 @@ async fn create_share(
     }
     let target = match (body.user_id, &body.user_email) {
         (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
-        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
         (None, None) => {
             return Err(AppError::BadRequest(
                 "user_id or user_email required".into(),
@@ -843,7 +894,12 @@ async fn transfer_ownership(
     }
     let target = match (body.user_id, &body.user_email) {
         (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
-        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
         (None, None) => {
             return Err(AppError::BadRequest(
                 "user_id or user_email required".into(),
@@ -871,7 +927,12 @@ async fn resolve_target(
 ) -> Result<User, AppError> {
     match (user_id, user_email) {
         (Some(uid), _) => state.store.get_user_by_id(uid).await?,
-        (None, Some(email)) => state.store.get_user_by_email(email).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
         (None, None) => {
             return Err(AppError::BadRequest(
                 "user_id or user_email required".into(),

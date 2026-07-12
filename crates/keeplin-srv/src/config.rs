@@ -41,6 +41,13 @@ pub struct Config {
     /// Maximum size in bytes of a resource binary upload
     /// (`PUT /api/resources/:id/data`). Larger bodies are rejected with `413`.
     pub max_upload_bytes: usize,
+    /// Maximum size in bytes of a materialised note body (`GET /api/notes/:id`,
+    /// `…/export`). A note whose joined lines exceed this is refused with `413`
+    /// instead of being built in memory, bounding the read-path allocation
+    /// (issue #44). `0` disables the cap. The collab line limits allow a note
+    /// up to ~1 GB, so the default keeps a generous ceiling well above any real
+    /// text note while refusing the pathological case.
+    pub max_note_body_bytes: usize,
 
     // ── Per-user quotas (`0` disables each) ──────────────────────────────────
     /// Total bytes of resource binaries a single user may store. A blob upload
@@ -149,6 +156,7 @@ impl Config {
             shutdown_grace_secs: env_parse("SHUTDOWN_GRACE_SECS", 20),
             log_json: env_parse("LOG_JSON", false),
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 100 * 1024 * 1024),
+            max_note_body_bytes: env_parse("MAX_NOTE_BODY_BYTES", 25 * 1024 * 1024),
             max_user_storage_bytes: env_parse("MAX_USER_STORAGE_BYTES", 0),
             max_notes_per_user: env_parse("MAX_NOTES_PER_USER", 0),
             registration_enabled: env_parse("REGISTRATION_ENABLED", true),

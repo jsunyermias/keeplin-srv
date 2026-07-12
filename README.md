@@ -164,6 +164,7 @@ The Compose topology is dev/demo only: Postgres is bound to loopback (not the LA
 | `SHUTDOWN_GRACE_SECS` | `20` | Drain window on SIGTERM/Ctrl-C before force-exit |
 | `LOG_JSON` | `false` | Emit JSON logs (one object/line) for aggregation |
 | `MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Max size of a resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
+| `MAX_NOTE_BODY_BYTES` | `26214400` (25 MiB) | Max size of a materialised note body (`GET /api/notes/:id`, export); `413` over it. `0` disables |
 | `MAX_USER_STORAGE_BYTES` | `0` (disabled) | Per-user resource-blob storage cap; `507` when a blob upload would exceed it |
 | `MAX_NOTES_PER_USER` | `0` (disabled) | Per-user live-note cap; `507` when creating past it |
 | `RUST_LOG` | `info` | Log level |
