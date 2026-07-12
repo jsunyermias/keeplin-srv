@@ -50,6 +50,10 @@ const CHUNK_SIZE: i64 = 200;
 /// the connection.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often the relay pings an idle connection to keep it alive and surface a dead peer
+/// through a failed write (issue #35).
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Capacity of each per-user broadcast channel. A receiver that lags behind
 /// (slow consumer) falls back to a journal backlog scan, so overflow degrades
 /// to duplicate delivery, never to loss.
@@ -234,6 +238,10 @@ async fn relay_loop(
     user_id: Uuid,
     device_id: Uuid,
 ) -> anyhow::Result<()> {
+    // Periodic pings keep NAT/proxy paths open and surface a dead peer via a failed write,
+    // so a silently-dropped connection is reaped instead of lingering (issue #35).
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.reset();
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -245,6 +253,9 @@ async fn relay_loop(
                     Some(Ok(_)) => {} // ping/pong/binary — ignore
                     Some(Err(e)) => return Err(e.into()),
                 }
+            }
+            _ = ping.tick() => {
+                socket.send(Message::Ping(Vec::new())).await?;
             }
             fanned = rx.recv() => {
                 match fanned {

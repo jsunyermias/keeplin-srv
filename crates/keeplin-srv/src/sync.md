@@ -64,3 +64,7 @@ binary has it stored to `resource_blobs` (backward compatibility). Failures are 
 - `../../../migrations/0004_domain_entities.md` — the tables `materialize` writes into.
 - `collab.md` — the sibling WebSocket surface for notes.
 - `keeplin/keeplin-core/src/storage/db.md` — the client end of this protocol.
+
+## Keepalive
+
+The relay loop pings each connection every `PING_INTERVAL`; a failed write surfaces a dead peer promptly and the pings keep NAT/proxy paths open (issue #35).

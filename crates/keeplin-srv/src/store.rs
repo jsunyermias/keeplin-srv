@@ -576,9 +576,23 @@ impl Store {
                 .push(row.get("id"));
         }
         for (note_id, dead) in by_note {
-            if let Some(order) = self.get_note_order(note_id).await? {
-                let kept: Vec<Uuid> = order
-                    .order
+            // Read-modify-write the order under a row lock so a concurrent collaborative
+            // `Insert`/`Move` (which rewrites the whole order via `set_note_order`) cannot be
+            // clobbered by this compaction (issue #25). `SELECT … FOR UPDATE` holds the lock
+            // from read to write; a concurrent order UPDATE blocks until this commits and then
+            // lands on top, so its change survives. Compaction only removes dead ids, so a
+            // membership drop the concurrent write does not know about is re-applied by the
+            // next GC pass — never a lost edit.
+            let mut tx = self.pool.begin().await?;
+            let existing: Option<(Json<Vec<Uuid>>,)> = sqlx::query_as(
+                "SELECT order_json FROM note_line_order WHERE note_id = $1 FOR UPDATE",
+            )
+            .bind(note_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((order_json,)) = existing {
+                let kept: Vec<Uuid> = order_json
+                    .0
                     .into_iter()
                     .filter(|id| !dead.contains(id))
                     .collect();
@@ -587,9 +601,10 @@ impl Store {
                 sqlx::query("UPDATE note_line_order SET order_json = $2 WHERE note_id = $1")
                     .bind(note_id)
                     .bind(Json(kept))
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await?;
             }
+            tx.commit().await?;
         }
         Ok(rows.len() as u64)
     }

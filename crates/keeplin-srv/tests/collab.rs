@@ -483,6 +483,50 @@ async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     assert_eq!(export_body(addr, &token_b, &note_id).await, "");
 }
 
+/// Revoking a collaborator's share takes effect immediately on the live channel: a further
+/// edit is rejected without waiting for a reconnect (issue #30).
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid_a, _did_a, token_a) = user(addr, "a@example.com").await;
+    let (uid_b, did_b, token_b) = user(addr, "b@example.com").await;
+    let note_id = create_note(addr, &token_a, "Colaborativa").await;
+    share(addr, &token_a, &note_id, "b@example.com", "editor").await;
+
+    let mut ws_b = ws_connect(addr, &token_b).await;
+    send(&mut ws_b, join(&note_id)).await;
+    recv_until(&mut ws_b, "Welcome", |v| v["type"] == "Welcome").await;
+
+    // B edits successfully while shared.
+    let l1 = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_b,
+        insert_op(&note_id, &l1, None, "primera", &did_b, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token_a, &note_id, "primera").await;
+
+    // A revokes B's share while B stays connected.
+    let code = reqwest::Client::new()
+        .delete(format!("http://{addr}/api/notes/{note_id}/share/{uid_b}"))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(code, 200);
+
+    // B's next edit is rejected immediately (no reconnect needed).
+    let l2 = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws_b,
+        insert_op(&note_id, &l2, Some(&l1), "segunda", &did_b, 2, T2),
+    )
+    .await;
+    let err = recv_until(&mut ws_b, "Error", |v| v["type"] == "Error").await;
+    assert_eq!(err["code"], "forbidden");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn outsider_cannot_join(pool: PgPool) {
     let addr = spawn_server(pool).await;

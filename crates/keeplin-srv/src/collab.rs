@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{
@@ -37,7 +38,7 @@ use uuid::Uuid;
 use crate::{
     auth,
     error::AppError,
-    permissions::{resolve_note_access, Access},
+    permissions::resolve_note_access,
     protocol::{
         CollabClientMsg, CollabServerMsg, Cursor, LineOp, LineSnapshot, NoteLinesSnapshot,
         PresenceInfo,
@@ -51,13 +52,24 @@ const MAX_LINE_LEN: usize = 10_000;
 const MAX_LINES_PER_NOTE: usize = 100_000;
 const MAX_WS_MESSAGE: usize = 1024 * 1024;
 
+/// Bounded outbound queue per connection: a slow/stalled consumer is dropped rather than
+/// buffering without limit (issue #34). A stateful client rebuilds from the next `Welcome`
+/// snapshot on reconnect, so dropping it is safe.
+const OUTBOUND_CAPACITY: usize = 256;
+/// How often the server pings an idle connection to keep NAT/proxy paths open and to detect a
+/// dead peer promptly (issue #35).
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// If no frame at all (not even a pong to our ping) arrives within this window, the peer is
+/// treated as dead and the connection is closed (issue #35).
+const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
+
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
 struct Subscriber {
     user_id: Uuid,
     display_name: String,
     cursor: Option<Cursor>,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
 }
 
 /// One live collaborative session per note with at least one subscriber
@@ -120,14 +132,29 @@ impl CollabRegistry {
 impl CollabSession {
     /// Send `msg` to every subscriber, optionally skipping one connection
     /// (the originator of an op already has it applied locally).
+    ///
+    /// A subscriber whose bounded outbound queue is full (a slow/stalled consumer) is dropped
+    /// rather than allowed to buffer without bound (issue #34); it reconnects and rebuilds
+    /// from a fresh snapshot.
     async fn broadcast(&self, msg: &CollabServerMsg, skip_conn: Option<u64>) {
         let text = serde_json::to_string(msg).expect("serializable server msg");
-        let subscribers = self.subscribers.read().await;
-        for (conn_id, sub) in subscribers.iter() {
-            if Some(*conn_id) == skip_conn {
-                continue;
+        let mut slow = Vec::new();
+        {
+            let subscribers = self.subscribers.read().await;
+            for (conn_id, sub) in subscribers.iter() {
+                if Some(*conn_id) == skip_conn {
+                    continue;
+                }
+                if sub.tx.try_send(text.clone()).is_err() {
+                    slow.push(*conn_id);
+                }
             }
-            let _ = sub.tx.send(text.clone());
+        }
+        if !slow.is_empty() {
+            let mut subscribers = self.subscribers.write().await;
+            for conn_id in slow {
+                subscribers.remove(&conn_id);
+            }
         }
     }
 
@@ -217,21 +244,45 @@ async fn run_connection(
     let conn_id = state.collab.next_conn_id.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
 
-    // All outbound traffic (welcomes, fan-out, presence, errors) funnels
-    // through one channel so a single task owns the sink.
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // All outbound traffic (welcomes, fan-out, presence, errors) funnels through one bounded
+    // channel so a single task owns the sink (issue #34). The writer also emits periodic pings
+    // to keep the connection alive and surface a dead peer via a failed write (issue #35).
+    let (tx, mut rx) = mpsc::channel::<String>(OUTBOUND_CAPACITY);
     let writer = tokio::spawn(async move {
-        while let Some(text) = rx.recv().await {
-            if sink.send(Message::Text(text)).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(PING_INTERVAL);
+        ping.reset(); // first tick after PING_INTERVAL, not immediately
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Some(text) => {
+                        if sink.send(Message::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
 
-    // Notes this connection has joined: session + the user's role in it.
-    let mut joined: HashMap<Uuid, (Arc<CollabSession>, Access)> = HashMap::new();
+    // Notes this connection has joined. Access is re-resolved per operation (issue #30), not
+    // cached here, so a revoked share takes effect without waiting for a reconnect.
+    let mut joined: HashMap<Uuid, Arc<CollabSession>> = HashMap::new();
 
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        // Bound the wait so a peer that has gone silent — not even answering our pings — is
+        // dropped instead of leaking a subscriber slot forever (issue #35). Any frame,
+        // including a pong, counts as activity and resets the window.
+        let msg = match tokio::time::timeout(ACTIVITY_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            // Timeout, stream end, or transport error: close the connection.
+            _ => break,
+        };
         let text = match msg {
             Message::Text(text) => text,
             Message::Close(_) => break,
@@ -262,7 +313,7 @@ async fn run_connection(
     }
 
     // Disconnect: leave every joined session.
-    for (note_id, (session, _)) in joined {
+    for (note_id, session) in joined {
         session.subscribers.write().await.remove(&conn_id);
         session.broadcast_presence().await;
         state.collab.drop_if_empty(note_id).await;
@@ -270,23 +321,23 @@ async fn run_connection(
     writer.abort();
 }
 
-fn send_error(tx: &mpsc::UnboundedSender<String>, code: &str, message: &str) {
+fn send_error(tx: &mpsc::Sender<String>, code: &str, message: &str) {
     let msg = CollabServerMsg::Error {
         code: code.into(),
         message: message.into(),
     };
-    let _ = tx.send(serde_json::to_string(&msg).expect("serializable error"));
+    let _ = tx.try_send(serde_json::to_string(&msg).expect("serializable error"));
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_msg(
     state: &Arc<AppState>,
-    tx: &mpsc::UnboundedSender<String>,
+    tx: &mpsc::Sender<String>,
     conn_id: u64,
     user_id: Uuid,
     device_id: Uuid,
     display_name: &str,
-    joined: &mut HashMap<Uuid, (Arc<CollabSession>, Access)>,
+    joined: &mut HashMap<Uuid, Arc<CollabSession>>,
     msg: CollabClientMsg,
 ) -> Result<(), AppError> {
     match msg {
@@ -324,15 +375,18 @@ async fn handle_msg(
                 );
                 snapshot
             };
-            joined.insert(note_id, (session.clone(), access));
+            // `access` was only needed to gate the join (read check); it is intentionally not
+            // stored — writes re-resolve access on every op batch (issue #30).
+            let _ = access;
+            joined.insert(note_id, session.clone());
 
             let welcome = CollabServerMsg::Welcome { note_id, snapshot };
-            let _ = tx.send(serde_json::to_string(&welcome).expect("serializable welcome"));
+            let _ = tx.try_send(serde_json::to_string(&welcome).expect("serializable welcome"));
             session.broadcast_presence().await;
         }
 
         CollabClientMsg::Leave { note_id } => {
-            if let Some((session, _)) = joined.remove(&note_id) {
+            if let Some(session) = joined.remove(&note_id) {
                 session.subscribers.write().await.remove(&conn_id);
                 session.broadcast_presence().await;
                 state.collab.drop_if_empty(note_id).await;
@@ -340,12 +394,29 @@ async fn handle_msg(
         }
 
         CollabClientMsg::Op { note_id, ops } => {
-            let (session, access) = match joined.get(&note_id) {
-                Some(entry) => entry,
+            let session = match joined.get(&note_id) {
+                Some(session) => session.clone(),
                 None => {
                     send_error(tx, "not_joined", "join the note before sending ops");
                     return Ok(());
                 }
+            };
+            // Re-resolve access on every op batch so a share revoked mid-session takes effect
+            // immediately, rather than persisting for the life of the connection (issue #30).
+            let note = match state.store.get_note(note_id).await? {
+                Some(note) => note,
+                None => {
+                    send_error(tx, "not_found", "note not found");
+                    return Ok(());
+                }
+            };
+            let access = match resolve_note_access(&state.store, &note, user_id).await {
+                Ok(access) => access,
+                Err(AppError::Forbidden) => {
+                    send_error(tx, "forbidden", "access to this note was revoked");
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
             };
             if !access.can_write() {
                 send_error(tx, "forbidden", "no write access to this note");
@@ -384,7 +455,7 @@ async fn handle_msg(
         }
 
         CollabClientMsg::Cursor { note_id, cursor } => {
-            if let Some((session, _)) = joined.get(&note_id) {
+            if let Some(session) = joined.get(&note_id) {
                 if let Some(sub) = session.subscribers.write().await.get_mut(&conn_id) {
                     sub.cursor = Some(cursor);
                 }

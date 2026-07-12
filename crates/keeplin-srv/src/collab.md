@@ -54,8 +54,16 @@ Only `Applied` ops are persisted and fanned out. `Invalid` sends the sender an `
 - `CollabSession::apply_lock` (a `Mutex`) serialises op application **and** the join snapshot:
   a joiner reads the snapshot and subscribes under the lock, so no op can slip between the two
   (which would leave it missing from both). Two ops never interleave their read-modify-write.
-- Outbound frames per connection funnel through one `mpsc` channel owned by a single writer
-  task, so the socket has exactly one writer.
+- **Access is re-resolved on every op batch** (not cached at join), so a share revoked
+  mid-session is enforced on the next edit rather than persisting for the life of the
+  connection (issue #30).
+- Outbound frames per connection funnel through one **bounded** `mpsc` channel
+  (`OUTBOUND_CAPACITY`) owned by a single writer task, so the socket has exactly one writer. A
+  subscriber whose queue is full (a slow/stalled consumer) is dropped from the session rather
+  than buffering without bound (issue #34); it reconnects and rebuilds from a fresh snapshot.
+- The writer task also emits periodic **pings** (`PING_INTERVAL`), and the read loop closes the
+  connection if no frame — not even a pong — arrives within `ACTIVITY_TIMEOUT`, so a silently
+  dropped peer is reaped instead of leaking a subscriber slot (issue #35).
 - Sessions are created on demand and dropped when the last subscriber leaves; on a server
   restart clients reconnect and get a fresh snapshot — sessions hold no durable state.
 

@@ -45,7 +45,7 @@ entity? }` (`entity` `None` = tombstone; `timestamp` from the payload, falling b
 `list_tags`, `list_resources`, `list_note_tag_ids`. Each write resolves via `incoming_wins` under a
 `SELECT … FOR UPDATE` lock.
 **Quotas**: `user_blob_bytes_excluding` (total **live** blob bytes minus one resource — soft-deleted resources do not count, so deleting frees quota, issue #24), `count_live_notes_for_user`.
-**Maintenance / metrics**: `gc_line_tombstones`, `purge_deleted_resource_blobs` (reclaims blob bytes of long-deleted resources; metadata tombstone kept, issue #24), `counts`.
+**Maintenance / metrics**: `gc_line_tombstones` (reads-modifies-writes each note's order under `SELECT … FOR UPDATE` so a concurrent collaborative order write is not clobbered, issue #25), `purge_deleted_resource_blobs` (reclaims blob bytes of long-deleted resources; metadata tombstone kept, issue #24), `counts`.
 
 ## Database schema
 
