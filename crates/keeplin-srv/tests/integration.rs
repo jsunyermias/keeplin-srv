@@ -39,6 +39,7 @@ fn test_config() -> Config {
         shutdown_grace_secs: 5,
         log_json: false,
         max_upload_bytes: 100 * 1024 * 1024,
+        max_note_body_bytes: 0,
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,
@@ -669,6 +670,109 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+// ── Email normalization (issue #43) ──────────────────────────────────────────
+
+/// Registration lowercases/trims the email, so login is case-insensitive and a
+/// case-variant re-registration collides; malformed emails are rejected.
+#[sqlx::test(migrations = "../../migrations")]
+async fn email_is_normalized_and_validated(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+
+    // Register with mixed case and surrounding whitespace.
+    let reg = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "  John.Doe@Example.COM ", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg.status(), 200);
+
+    // Login with the lowercased form works (case-insensitive).
+    let login = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "john.doe@example.com", "password": "password123", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200, "login must be case-insensitive");
+
+    // A case-variant re-registration is the same account → conflict.
+    let dup = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "JOHN.DOE@EXAMPLE.com", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), 409, "case-variant email must collide");
+
+    // A malformed email is rejected up front.
+    let bad = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": "not-an-email", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+}
+
+// ── Note body size cap (issue #44) ───────────────────────────────────────────
+
+/// A note whose materialised body exceeds `max_note_body_bytes` is refused with
+/// `413` rather than built in memory; a small note is unaffected.
+#[sqlx::test(migrations = "../../migrations")]
+async fn oversized_note_body_is_refused(pool: PgPool) {
+    let mut config = test_config();
+    config.max_note_body_bytes = 32; // tiny cap for the test
+    let addr = spawn_server_with_config(pool, config).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    // A small note is fine.
+    let small = client
+        .post(format!("http://{addr}/api/import"))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "small", "body": "under the cap" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(small.status(), 200);
+    let small_id = small.json::<Value>().await.unwrap()["note_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let got = client
+        .get(format!("http://{addr}/api/notes/{small_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.status(), 200);
+
+    // A note whose body exceeds the cap is refused on read.
+    let big_body = "x".repeat(100);
+    let big = client
+        .post(format!("http://{addr}/api/import"))
+        .bearer_auth(&token)
+        .json(&json!({ "title": "big", "body": big_body }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(big.status(), 200);
+    let big_id = big.json::<Value>().await.unwrap()["note_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let refused = client
+        .get(format!("http://{addr}/api/notes/{big_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 413, "oversized body must be 413");
 }
 
 // ── Per-entity history + visibility window (issue #27) ───────────────────────

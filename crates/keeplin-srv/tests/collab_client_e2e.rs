@@ -41,6 +41,7 @@ fn test_config() -> Config {
         shutdown_grace_secs: 5,
         log_json: false,
         max_upload_bytes: 100 * 1024 * 1024,
+        max_note_body_bytes: 0,
         max_user_storage_bytes: 0,
         max_notes_per_user: 0,
         registration_enabled: true,

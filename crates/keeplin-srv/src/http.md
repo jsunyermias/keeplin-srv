@@ -52,15 +52,15 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `ready` | `GET /ready` | readiness: DB round-trip; `200 ready` or `503` if the database is unreachable (issue #36); never rate-limited |
 | `version` | `GET /version` | `{ name, version, protocol_version, capabilities[] }` — a client negotiates behaviour instead of guessing (issues #39/#114); never rate-limited |
 | `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
-| `register` | `POST /api/register` | `{email, password, display_name?}`; 409 on dup email; min 8-char password |
-| `login` | `POST /api/login` | verifies password, creates a device, returns a token |
+| `register` | `POST /api/register` | `{email, password, display_name?}`; email is normalized (lowercased/trimmed) and structurally validated (issue #43); 409 on dup email; min 8-char password |
+| `login` | `POST /api/login` | normalizes the email the same way (case-insensitive), verifies password, creates a device, returns a token |
 | `create_device` / `list_devices` | `/api/devices` | add a device (returns its token) / list |
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
 | `delete_all_devices` | `DELETE /api/devices` | revoke **all** the caller's devices — sign out everywhere (issue #31) |
 | `change_password` | `POST /api/account/password` | `{current_password, new_password}`; verifies current, min 8-char new (issue #31). Existing JWTs stay valid — follow with `DELETE /api/devices` to also sign out everywhere |
 | `delete_account` | `DELETE /api/account` | `{password}`; verifies the current password, then deletes the user row. Every owned entity (devices, notes, notebooks, tags, resources, shares, journal) cascades away — irreversible (issue #31) |
 | `create_note` / `list_notes` | `/api/notes` | create (Inbox by default) / owned + shared. `GET` takes optional `?limit=&cursor=` (issue #29): a bare array as before, plus an `X-Next-Cursor` response header when a full page is returned — follow it to page. Omitting `limit` returns everything (back-compatible); `limit` is capped at 500 |
-| `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body** |
+| `get_note` | `GET /api/notes/:id` | returns metadata **plus the materialised body**; a body over `MAX_NOTE_BODY_BYTES` is refused with `413` (issue #44) |
 | `update_note` / `delete_note` | `PATCH`/`DELETE` | metadata patch (needs `write`; a move into a notebook additionally needs `write` on the **destination** notebook, since the note adopts its grants; a `notebook_id` of `null` **or the nil UUID** is a move to the Inbox — keeplin-core models the Inbox as the nil uuid — with no destination check and no cascade) / owner-only soft delete |
 | `create_share` / `list_shares` / `delete_share` | `/api/notes/:id/share…` | grant `{user_id\|user_email, capabilities}` (needs `share_write`, capped to the granter's own caps); list (needs `share_read`); revoke (needs `share_write`, or self) |
 | `transfer_ownership` | `/api/notes/:id/transfer` | owner-only; `{user_id\|user_email}` — moves `owner_id`, drops any share row for the new owner |

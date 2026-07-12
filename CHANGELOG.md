@@ -11,6 +11,10 @@ shapes independently of the crate version.
 ## [Unreleased]
 
 ### Security
+- Normalize (lowercase/trim) and validate the email on register/login, share and
+  transfer, so login is case-insensitive and an address maps to one account (#43).
+- Collapse database/internal errors to a generic `500` body (full detail logged
+  server-side) instead of returning the raw error text (#46).
 - Refuse to start on a missing/weak/placeholder `JWT_SECRET`; `KEEPLIN_DEV_INSECURE=1`
   allows a weak secret for local dev only (#19).
 - Revoke a deleted device's token on the collaborative WebSocket, not just REST (#20).
@@ -19,6 +23,8 @@ shapes independently of the crate version.
 - Harden the example `docker-compose` (loopback Postgres, required `JWT_SECRET`) (#38).
 
 ### Added
+- `MAX_NOTE_BODY_BYTES` (default 25 MiB, `0` disables): refuse to materialise a
+  note body larger than the cap with `413` instead of building it in memory (#44).
 - `REGISTRATION_ENABLED` to close open signups (#21).
 - `RESOURCE_PURGE_DAYS`: server-side purge of deleted resource blobs (#24).
 - `GET /ready` readiness probe (DB round-trip, `503` when down) + Dockerfile HEALTHCHECK (#36).

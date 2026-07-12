@@ -33,6 +33,7 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
         shutdown_grace_secs: 5,
         log_json: false,
         max_upload_bytes: 100 * 1024 * 1024,
+        max_note_body_bytes: 0,
         max_user_storage_bytes,
         max_notes_per_user,
         registration_enabled: true,
