@@ -567,7 +567,11 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         .send()
         .await
         .unwrap();
-    assert_eq!(denied.status(), 401, "deleted account's token must stop working");
+    assert_eq!(
+        denied.status(),
+        401,
+        "deleted account's token must stop working"
+    );
 
     // The email is free again — the user row (and its unique email) is gone.
     let reused = client
@@ -576,7 +580,11 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         .send()
         .await
         .unwrap();
-    assert_eq!(reused.status(), 200, "email must be reusable after deletion");
+    assert_eq!(
+        reused.status(),
+        200,
+        "email must be reusable after deletion"
+    );
 }
 
 // ── Per-entity history + visibility window (issue #27) ───────────────────────
