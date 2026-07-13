@@ -11,6 +11,10 @@ shapes independently of the crate version.
 ## [Unreleased]
 
 ### Added
+- Multi-instance soak/load drill (`tests/soak.rs`, run with `--ignored`): N concurrent
+  editors across two bus-connected instances + a mid-session replica kill, asserting
+  cross-instance byte-identical convergence and survivor writability.
+### Added
 - Prometheus text format on `GET /api/metrics?format=prometheus` (JSON stays the
   default); RUNBOOK gains monitoring/alerting guidance and a scripted, verified
   disaster-recovery drill (`scripts/dr-drill.sh`); new `SECURITY.md` documents the
