@@ -213,4 +213,10 @@ async fn run_retention(
         Ok(rows) => tracing::debug!(rows, "pruned stale login attempts"),
         Err(e) => tracing::warn!(error = %e, "login attempt prune failed"),
     }
+    // Email-flow tokens expired a day ago are dead weight (used or not).
+    match state.store.prune_email_tokens(stale).await {
+        Ok(0) => {}
+        Ok(rows) => tracing::debug!(rows, "pruned expired email tokens"),
+        Err(e) => tracing::warn!(error = %e, "email token prune failed"),
+    }
 }

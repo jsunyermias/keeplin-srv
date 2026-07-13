@@ -18,6 +18,9 @@ pub struct AppState {
     /// fan-out events and presence rows so an instance can tell its own writes
     /// apart from a sibling's over the cross-instance bus (issue #45).
     pub instance_id: Uuid,
+    /// Delegated email delivery via the operator's mail webhook (issue #49);
+    /// disabled (flows answer 501) when `MAIL_WEBHOOK_URL` is unset.
+    pub mailer: crate::mail::Mailer,
 }
 
 impl AppState {
@@ -27,6 +30,10 @@ impl AppState {
         // it at startup (main also checks it, so this never fires in practice).
         let cipher = crate::crypto::Cipher::from_key(config.at_rest_key.as_deref())
             .expect("valid AT_REST_KEY (validated at startup)");
+        let mailer = crate::mail::Mailer::new(
+            config.mail_webhook_url.clone(),
+            config.mail_webhook_token.clone(),
+        );
         Self {
             config,
             store: Store::with_cipher(pool, cipher),
@@ -34,6 +41,7 @@ impl AppState {
             collab: CollabRegistry::default(),
             rate_limiter,
             instance_id: Uuid::new_v4(),
+            mailer,
         }
     }
 }
