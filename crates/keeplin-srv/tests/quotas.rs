@@ -38,6 +38,8 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
         max_notes_per_user,
         registration_enabled: true,
         at_rest_key: None,
+        login_max_failures: 0,
+        login_lockout_secs: 300,
         history_since_access: false,
     }
 }

@@ -31,6 +31,9 @@ pub enum AppError {
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
 
+    #[error("too many attempts; try again later")]
+    TooManyAttempts,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -48,6 +51,7 @@ impl AppError {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::TooManyAttempts => StatusCode::TOO_MANY_REQUESTS,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

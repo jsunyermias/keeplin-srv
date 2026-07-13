@@ -11,6 +11,10 @@ shapes independently of the crate version.
 ## [Unreleased]
 
 ### Security
+- Login brute-force lockout: `LOGIN_MAX_FAILURES` recent failures for an email
+  answer `429` for `LOGIN_LOCKOUT_SECS` (defaults 10 / 300s; `0` disables).
+  Database-backed (migration `0011`) so the counter is shared across replicas;
+  uniform for existing and unknown emails (no account-existence oracle).
 - Optional at-rest encryption of note titles and line content (`AT_REST_KEY`,
   AES-256-GCM), so a database dump/backup shows ciphertext, not note contents
   (keeplin#110). Opt-in and backward compatible: unset stores plaintext, and

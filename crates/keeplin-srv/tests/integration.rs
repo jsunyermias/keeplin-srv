@@ -44,6 +44,8 @@ fn test_config() -> Config {
         max_notes_per_user: 0,
         registration_enabled: true,
         at_rest_key: None,
+        login_max_failures: 0,
+        login_lockout_secs: 300,
         history_since_access: false,
     }
 }
@@ -712,6 +714,60 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+// ── Login brute-force lockout ─────────────────────────────────────────────────
+
+/// After `LOGIN_MAX_FAILURES` wrong passwords the email is locked: even the
+/// correct password gets `429` until the window passes; a successful login
+/// clears the counter; an unknown email behaves identically (no oracle).
+#[sqlx::test(migrations = "../../migrations")]
+async fn login_lockout_blocks_brute_force(pool: PgPool) {
+    let mut config = test_config();
+    config.login_max_failures = 3;
+    config.login_lockout_secs = 2; // short, so the test can outlive the lock
+    let addr = spawn_server_with_config(pool, config).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+
+    let try_login = |email: &'static str, password: &'static str| {
+        let client = client.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/api/login"))
+                .json(&json!({ "email": email, "password": password, "device_name": "x" }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    // Three wrong passwords: 401, 401, 401 — and the third arms the lock.
+    for _ in 0..3 {
+        assert_eq!(try_login("a@example.com", "wrong-password").await, 401);
+    }
+    // Locked: even the CORRECT password is refused with 429.
+    assert_eq!(
+        try_login("a@example.com", "password123").await,
+        429,
+        "locked account must refuse even the correct password"
+    );
+
+    // The lockout expires; the correct password works and clears the history.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(try_login("a@example.com", "password123").await, 200);
+    // A single new failure is just a 401 again (counter restarted by success).
+    assert_eq!(try_login("a@example.com", "wrong-password").await, 401);
+    assert_eq!(try_login("a@example.com", "password123").await, 200);
+
+    // Unknown email accumulates identically — same 401s, same 429 — so lockout
+    // behaviour is not an account-existence oracle.
+    for _ in 0..3 {
+        assert_eq!(try_login("ghost@example.com", "whatever123").await, 401);
+    }
+    assert_eq!(try_login("ghost@example.com", "whatever123").await, 429);
 }
 
 // ── Email normalization (issue #43) ──────────────────────────────────────────

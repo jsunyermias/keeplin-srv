@@ -67,6 +67,13 @@ pub struct Config {
     /// titles (issue keeplin#110), from `AT_REST_KEY`. `None` (unset) disables
     /// encryption and stores those fields as plaintext (backward compatible).
     pub at_rest_key: Option<String>,
+    /// Failed logins for one email before the account is temporarily locked
+    /// (brute-force lockout; DB-backed so it holds across replicas). `0`
+    /// disables the lockout.
+    pub login_max_failures: i32,
+    /// How long a lockout lasts, in seconds. Also the staleness window: a
+    /// failure older than this restarts the counter instead of extending it.
+    pub login_lockout_secs: u64,
     /// History visibility for shared notes/notebooks (issue #27). `false` (default,
     /// `HISTORY_VISIBILITY=creation`): everyone with read access sees the entity's full
     /// history from creation. `true` (`HISTORY_VISIBILITY=access`): a **collaborator** sees
@@ -166,6 +173,8 @@ impl Config {
             at_rest_key: std::env::var("AT_REST_KEY")
                 .ok()
                 .filter(|k| !k.trim().is_empty()),
+            login_max_failures: env_parse("LOGIN_MAX_FAILURES", 10),
+            login_lockout_secs: env_parse("LOGIN_LOCKOUT_SECS", 300),
             registration_enabled: env_parse("REGISTRATION_ENABLED", true),
             history_since_access: std::env::var("HISTORY_VISIBILITY")
                 .map(|v| v.eq_ignore_ascii_case("access"))

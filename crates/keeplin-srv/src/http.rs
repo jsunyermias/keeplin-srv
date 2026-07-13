@@ -309,6 +309,29 @@ async fn login(
     // Do not reject a malformed email here: an unknown address must still run the dummy
     // hash below, or the format check would itself become an enumeration oracle (issue #32).
     let email = normalize_email(&body.email);
+
+    // Brute-force lockout: refuse before touching the password once the email has
+    // accumulated too many recent failures. DB-backed (shared across replicas) and
+    // keyed by the submitted email whether or not an account exists, so the 429 is
+    // uniform and reveals nothing about account existence.
+    let lockout_enabled = state.config.login_max_failures > 0;
+    if lockout_enabled && state.store.login_locked(&email).await? {
+        return Err(AppError::TooManyAttempts);
+    }
+    let record_failure = || async {
+        if lockout_enabled {
+            state
+                .store
+                .record_login_failure(
+                    &email,
+                    state.config.login_max_failures,
+                    state.config.login_lockout_secs,
+                )
+                .await?;
+        }
+        Ok::<(), AppError>(())
+    };
+
     let user = match state.store.get_user_by_email(&email).await? {
         Some(user) => user,
         None => {
@@ -316,12 +339,19 @@ async fn login(
             // work as a wrong password — otherwise response timing reveals which emails have
             // accounts (issue #32). The result is discarded; the outcome is identical.
             let _ = auth::verify_password(&body.password, auth::dummy_password_hash());
+            record_failure().await?;
             return Err(AppError::InvalidToken);
         }
     };
 
     if !auth::verify_password(&body.password, &user.password_hash)? {
+        record_failure().await?;
         return Err(AppError::InvalidToken);
+    }
+
+    // A legitimate login resets the email's failure history.
+    if lockout_enabled {
+        state.store.clear_login_failures(&email).await?;
     }
 
     let device = state
