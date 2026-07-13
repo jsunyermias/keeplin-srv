@@ -208,12 +208,56 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct MetricsQuery {
+    format: Option<String>,
+}
+
 /// Aggregate operational counters: row counts plus live session/connection
-/// numbers. No per-user data.
-async fn metrics(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, AppError> {
+/// numbers. No per-user data. JSON by default; `?format=prometheus` renders
+/// the Prometheus text exposition format so a scraper can consume it directly
+/// (configure the scrape job with the bearer token, e.g. `authorization:
+/// credentials` in the Prometheus scrape config).
+///
+/// Note for multi-replica deployments (issue #45): the `users`/`notes`/`lines`/
+/// `line_tombstones` gauges come from the shared database and are identical on
+/// every replica; `collab_*` and `relay_live_users` are **per-instance** live
+/// gauges — scrape every replica and sum them.
+async fn metrics(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Response, AppError> {
     let (users, notes, lines, tombstones) = state.store.counts().await?;
     let (collab_sessions, collab_connections) = state.collab.stats().await;
     let relay_users = state.hub.live_users().await;
+
+    if q.format.as_deref() == Some("prometheus") {
+        let body = format!(
+            "# HELP keeplin_users Registered accounts (shared across replicas).\n\
+             # TYPE keeplin_users gauge\n\
+             keeplin_users {users}\n\
+             # HELP keeplin_notes Live notes (shared across replicas).\n\
+             # TYPE keeplin_notes gauge\n\
+             keeplin_notes {notes}\n\
+             # HELP keeplin_lines Live note lines (shared across replicas).\n\
+             # TYPE keeplin_lines gauge\n\
+             keeplin_lines {lines}\n\
+             # HELP keeplin_line_tombstones Soft-deleted lines awaiting GC (shared across replicas).\n\
+             # TYPE keeplin_line_tombstones gauge\n\
+             keeplin_line_tombstones {tombstones}\n\
+             # HELP keeplin_collab_sessions Live collaborative note sessions on this instance.\n\
+             # TYPE keeplin_collab_sessions gauge\n\
+             keeplin_collab_sessions {collab_sessions}\n\
+             # HELP keeplin_collab_connections Live collaborative connections on this instance.\n\
+             # TYPE keeplin_collab_connections gauge\n\
+             keeplin_collab_connections {collab_connections}\n\
+             # HELP keeplin_relay_live_users Users with a live relay connection on this instance.\n\
+             # TYPE keeplin_relay_live_users gauge\n\
+             keeplin_relay_live_users {relay_users}\n"
+        );
+        return Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "users": users,
         "notes": notes,
@@ -222,7 +266,8 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::
         "collab_sessions": collab_sessions,
         "collab_connections": collab_connections,
         "relay_live_users": relay_users,
-    })))
+    }))
+    .into_response())
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────

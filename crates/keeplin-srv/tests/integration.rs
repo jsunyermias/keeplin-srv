@@ -720,6 +720,53 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
     assert_eq!(bad.status(), 400);
 }
 
+// ── Metrics: Prometheus exposition ────────────────────────────────────────────
+
+/// `?format=prometheus` renders the text exposition format with the expected
+/// gauges; the default stays JSON.
+#[sqlx::test(migrations = "../../migrations")]
+async fn metrics_render_prometheus_format(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    let prom = client
+        .get(format!("http://{addr}/api/metrics?format=prometheus"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prom.status(), 200);
+    let ct = prom
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.starts_with("text/plain"), "prometheus format is text");
+    let body = prom.text().await.unwrap();
+    assert!(body.contains("# TYPE keeplin_users gauge"));
+    assert!(
+        body.contains("keeplin_users 1"),
+        "one registered user: {body}"
+    );
+    assert!(body.contains("keeplin_collab_sessions"));
+
+    // Default stays JSON (back-compatible).
+    let json_resp: Value = client
+        .get(format!("http://{addr}/api/metrics"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(json_resp["users"], 1);
+}
+
 // ── Email flows: verification + password reset (issue #49) ───────────────────
 
 /// A mock of the operator's mail webhook: captures every payload the server

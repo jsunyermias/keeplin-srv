@@ -112,6 +112,42 @@ Neither affects backups beyond keeping the database smaller.
 3. Rolling restarts are safe: the server drains in-flight work on `SIGTERM` up to
    `SHUTDOWN_GRACE_SECS`, and clients reconnect automatically.
 
+## Disaster-recovery drill
+
+A backup that has never been restored is a hope, not a backup. `scripts/dr-drill.sh`
+proves restorability end to end without touching the live database: it dumps the
+source, restores into a throwaway database on the same server, verifies that the
+row counts of every core table match, and drops the throwaway.
+
+```bash
+./scripts/dr-drill.sh "postgres://user:pass@host:5432/keeplin"
+# … DR DRILL: PASS — dump restored and row counts match.
+```
+
+Run it on a schedule (monthly is a reasonable floor) and after any Postgres
+upgrade. A non-zero exit is a paging-severity finding: your backups do not work.
+
+## Monitoring & alerting
+
+`GET /api/metrics` (auth required) serves JSON by default and the Prometheus
+text format with `?format=prometheus` — point a scrape job at it with the
+bearer token in the scrape config. On multi-replica deployments the
+`keeplin_users/notes/lines/line_tombstones` gauges come from the shared
+database (identical everywhere); `keeplin_collab_*` and
+`keeplin_relay_live_users` are per-instance — scrape every replica and sum.
+
+Minimum alert set:
+
+| Alert | Condition | Why |
+|-------|-----------|-----|
+| Server down | `/health` non-200 | process died |
+| Not ready | `/ready` non-200 for > 1 min | database unreachable — clients cannot work |
+| Tombstone runaway | `keeplin_line_tombstones` growing without bound | `LINES_GC_DAYS` off or GC failing |
+| Journal runaway | `changes` table size growing without bound | `CHANGES_RETENTION_DAYS` off, or a phantom device blocking pruning |
+| Disk | Postgres volume > 80 % | attachments/journal growth |
+| Login abuse | spike in `429` on `/api/login` (proxy logs) | credential-stuffing attempt hitting the lockout |
+| Mail webhook failing | `mail webhook` errors in server logs | resets/verifications silently not delivered |
+
 ## Incident quick reference
 
 | Symptom | First checks |

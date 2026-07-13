@@ -447,6 +447,11 @@ impl Store {
     /// Mint a single-use token for `kind`, valid `ttl_secs`. The raw token is
     /// returned (to hand to the mail webhook, once); only its SHA-256 is stored,
     /// so a database dump cannot be replayed into a takeover.
+    ///
+    /// Anti mail-bombing: refuses (`429`) once a user already has
+    /// [`MAX_LIVE_EMAIL_TOKENS`] unexpired, unused tokens of this kind, so
+    /// repeatedly hammering a request endpoint cannot flood someone's inbox
+    /// (the reset flow hides even this behind its uniform `200`).
     pub async fn create_email_token(
         &self,
         user_id: Uuid,
@@ -455,6 +460,18 @@ impl Store {
     ) -> Result<(String, DateTime<Utc>), AppError> {
         use aes_gcm::aead::rand_core::RngCore;
         use base64::Engine as _;
+        const MAX_LIVE_EMAIL_TOKENS: i64 = 5;
+        let live: i64 = sqlx::query_scalar(
+            r#"SELECT count(*) FROM email_tokens
+               WHERE user_id = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now()"#,
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        if live >= MAX_LIVE_EMAIL_TOKENS {
+            return Err(AppError::TooManyAttempts);
+        }
         let mut raw = [0u8; 32];
         aes_gcm::aead::OsRng.fill_bytes(&mut raw);
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
