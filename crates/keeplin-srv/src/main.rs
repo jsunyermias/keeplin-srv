@@ -205,4 +205,12 @@ async fn run_retention(
             Err(e) => tracing::warn!(error = %e, "resource blob purge failed"),
         }
     }
+    // Login-failure rows a day old are long past any lockout window; drop them
+    // so the table stays bounded by recent activity.
+    let stale = chrono::Utc::now() - chrono::Duration::hours(24);
+    match state.store.prune_login_attempts(stale).await {
+        Ok(0) => {}
+        Ok(rows) => tracing::debug!(rows, "pruned stale login attempts"),
+        Err(e) => tracing::warn!(error = %e, "login attempt prune failed"),
+    }
 }

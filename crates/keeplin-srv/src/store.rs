@@ -364,6 +364,74 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    // ── Login lockout (brute-force protection) ───────────────────────────────
+
+    /// Whether login attempts for `email` are currently locked out.
+    pub async fn login_locked(&self, email: &str) -> Result<bool, AppError> {
+        // COALESCE: a row whose lock was never armed has locked_until NULL, and
+        // NULL > now() is NULL, which must read as "not locked".
+        let locked: Option<bool> = sqlx::query_scalar(
+            "SELECT COALESCE(locked_until > now(), false) FROM login_attempts WHERE email = $1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(locked.unwrap_or(false))
+    }
+
+    /// Record one failed login for `email` (whether or not an account exists —
+    /// uniform behaviour, no existence oracle). Restarts the counter when the
+    /// previous failure is older than the lockout window; arms `locked_until`
+    /// when the counter reaches `max_failures`. One atomic upsert, so
+    /// concurrent failures across replicas never lose a count (#45).
+    pub async fn record_login_failure(
+        &self,
+        email: &str,
+        max_failures: i32,
+        lockout_secs: u64,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"INSERT INTO login_attempts (email, failed_count, last_failed_at, locked_until)
+               VALUES ($1, 1, now(),
+                       CASE WHEN 1 >= $2 THEN now() + $3 * interval '1 second' END)
+               ON CONFLICT (email) DO UPDATE SET
+                   failed_count = CASE
+                       WHEN login_attempts.last_failed_at < now() - $3 * interval '1 second' THEN 1
+                       ELSE login_attempts.failed_count + 1 END,
+                   last_failed_at = now(),
+                   locked_until = CASE
+                       WHEN (CASE
+                           WHEN login_attempts.last_failed_at < now() - $3 * interval '1 second' THEN 1
+                           ELSE login_attempts.failed_count + 1 END) >= $2
+                       THEN now() + $3 * interval '1 second' END"#,
+        )
+        .bind(email)
+        .bind(max_failures)
+        .bind(lockout_secs as f64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A successful login clears the email's failure history.
+    pub async fn clear_login_failures(&self, email: &str) -> Result<(), AppError> {
+        sqlx::query("DELETE FROM login_attempts WHERE email = $1")
+            .bind(email)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Drop failure rows whose last activity predates `older_than` (their lock,
+    /// if any, has long expired). Called from the maintenance loop.
+    pub async fn prune_login_attempts(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
+        let r = sqlx::query("DELETE FROM login_attempts WHERE last_failed_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
     // ── Devices ──────────────────────────────────────────────────────────────
 
     pub async fn create_device(

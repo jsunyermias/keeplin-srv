@@ -168,6 +168,8 @@ The Compose topology is dev/demo only: Postgres is bound to loopback (not the LA
 | `MAX_USER_STORAGE_BYTES` | `0` (disabled) | Per-user resource-blob storage cap; `507` when a blob upload would exceed it |
 | `MAX_NOTES_PER_USER` | `0` (disabled) | Per-user live-note cap; `507` when creating past it |
 | `AT_REST_KEY` | — (disabled) | base64 32-byte key; when set, encrypts note **title and line content** at rest (AES-256-GCM) so a DB dump/backup shows ciphertext (keeplin#110). Unset = plaintext. Generate with `openssl rand -base64 32`. Losing the key makes existing notes unreadable |
+| `LOGIN_MAX_FAILURES` | `10` | Failed logins per email before a temporary lockout (`429`, even with the right password). DB-backed, so it holds across replicas. `0` disables |
+| `LOGIN_LOCKOUT_SECS` | `300` | Lockout duration; also the window after which the failure counter restarts |
 | `RUST_LOG` | `info` | Log level |
 
 The server drains in-flight requests on `SIGTERM`/`Ctrl-C` (bounded by

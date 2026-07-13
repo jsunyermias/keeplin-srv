@@ -45,6 +45,8 @@ fn test_config() -> Config {
         max_notes_per_user: 0,
         registration_enabled: true,
         at_rest_key: None,
+        login_max_failures: 0,
+        login_lockout_secs: 300,
         history_since_access: false,
     }
 }

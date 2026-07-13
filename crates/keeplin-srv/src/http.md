@@ -53,7 +53,7 @@ onto protected routes and the rate limiter onto everything except `/health`.
 | `version` | `GET /version` | `{ name, version, protocol_version, capabilities[] }` — a client negotiates behaviour instead of guessing (issues #39/#114); never rate-limited |
 | `metrics` | `GET /api/metrics` | row counts + live session/connection numbers (**requires a valid token** — issue #22) |
 | `register` | `POST /api/register` | `{email, password, display_name?}`; email is normalized (lowercased/trimmed) and structurally validated (issue #43); 409 on dup email; min 8-char password |
-| `login` | `POST /api/login` | normalizes the email the same way (case-insensitive), verifies password, creates a device, returns a token |
+| `login` | `POST /api/login` | normalizes the email the same way (case-insensitive), verifies password, creates a device, returns a token. Brute-force lockout: after `LOGIN_MAX_FAILURES` recent failures for an email (existing or not — no oracle), attempts get `429` for `LOGIN_LOCKOUT_SECS`; a successful login clears the counter (migration `0011`) |
 | `create_device` / `list_devices` | `/api/devices` | add a device (returns its token) / list |
 | `delete_device` | `DELETE /api/devices/:id` | revokes that device's token immediately |
 | `delete_all_devices` | `DELETE /api/devices` | revoke **all** the caller's devices — sign out everywhere (issue #31) |
