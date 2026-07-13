@@ -11,6 +11,12 @@ shapes independently of the crate version.
 ## [Unreleased]
 
 ### Added
+- Prometheus text format on `GET /api/metrics?format=prometheus` (JSON stays the
+  default); RUNBOOK gains monitoring/alerting guidance and a scripted, verified
+  disaster-recovery drill (`scripts/dr-drill.sh`); new `SECURITY.md` documents the
+  threat model, hardening checklist, and review status.
+- Anti mail-bombing cap: at most 5 live (unexpired, unused) email-flow tokens per
+  user and kind; excess requests are refused without flooding the inbox.
 - Email flows (#49): **email verification** (`POST /api/account/verify/{request,confirm}`,
   auto-sent on registration; `EMAIL_VERIFICATION_REQUIRED` gates login) and
   **password reset** (`POST /api/account/reset/{request,confirm}`; single-use

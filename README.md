@@ -201,7 +201,12 @@ key** separately from the database — losing it makes encrypted notes unrecover
 
 keeplin-srv is stateless — all durable state lives in PostgreSQL — so operating it is mostly
 operating its database. See **[`RUNBOOK.md`](RUNBOOK.md)** for backup/restore (pg_dump and PITR),
-upgrades, routine maintenance, capacity/quotas, and an incident quick reference.
+the scripted disaster-recovery drill (`scripts/dr-drill.sh`), monitoring/alerting guidance,
+upgrades, routine maintenance, capacity/quotas, and an incident quick reference. The security
+posture and hardening checklist live in **[`SECURITY.md`](SECURITY.md)**.
+
+`GET /api/metrics` serves JSON by default and the Prometheus text format with
+`?format=prometheus` for a scrape job (auth required; put the bearer token in the scrape config).
 
 ### Running multiple replicas
 
