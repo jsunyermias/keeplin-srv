@@ -163,3 +163,21 @@ Minimum alert set:
 - `README.md` — configuration and quick start.
 - `ARCHITECTURE.md` — the data model that lives in PostgreSQL.
 - `.env.example` — every operational knob referenced above.
+
+## Load / soak drill
+
+`tests/soak.rs` (ignored in CI; run explicitly) drives N concurrent editors —
+half against each of two bus-connected instances sharing one database — then
+kills one instance mid-session:
+
+```bash
+DATABASE_URL=postgres://… cargo test --release --test soak -- --ignored --nocapture
+# knobs: SOAK_EDITORS (default 8), SOAK_OPS (default 25)
+```
+
+It asserts the #45 guarantees: both instances settle on a byte-identical body,
+and the survivor keeps accepting writes after a replica death. Reference run
+(16 editors × 50 ops): 690 ops/s ingest, identical on both instances < 0.5 s
+after the last send, replica-death survived. Note: causally-concurrent inserts
+at the same position that lose the deterministic tiebreak are dropped by design
+(the client re-diffs and self-heals); the soak reports that ratio.
