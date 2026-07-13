@@ -38,6 +38,14 @@ impl PageCursor {
     }
 }
 
+/// SHA-256 hex of an email-flow token — the only form that is ever stored.
+fn token_hash(raw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Split an optional cursor into the `(timestamp, id)` binds the paginated
 /// queries expect. `None` maps to `(NULL, NULL)`, which the `$3 IS NULL`
 /// guard turns into "no keyset filter" — i.e. start from the first page.
@@ -56,6 +64,8 @@ pub struct User {
     pub password_hash: String,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
+    /// When the user proved ownership of their email (issue #49); `None` = never.
+    pub email_verified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -302,7 +312,7 @@ impl Store {
         let user = sqlx::query_as::<_, User>(
             r#"INSERT INTO users (id, email, password_hash, display_name)
                VALUES ($1, $2, $3, $4)
-               RETURNING id, email, password_hash, display_name, created_at"#,
+               RETURNING id, email, password_hash, display_name, created_at, email_verified_at"#,
         )
         .bind(Uuid::new_v4())
         .bind(email)
@@ -319,7 +329,7 @@ impl Store {
 
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
-            r#"SELECT id, email, password_hash, display_name, created_at
+            r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE email = $1"#,
         )
         .bind(email)
@@ -330,7 +340,7 @@ impl Store {
 
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
-            r#"SELECT id, email, password_hash, display_name, created_at
+            r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE id = $1"#,
         )
         .bind(id)
@@ -426,6 +436,79 @@ impl Store {
     /// if any, has long expired). Called from the maintenance loop.
     pub async fn prune_login_attempts(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM login_attempts WHERE last_failed_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    // ── Email-flow tokens (verification + password reset, issue #49) ─────────
+
+    /// Mint a single-use token for `kind`, valid `ttl_secs`. The raw token is
+    /// returned (to hand to the mail webhook, once); only its SHA-256 is stored,
+    /// so a database dump cannot be replayed into a takeover.
+    pub async fn create_email_token(
+        &self,
+        user_id: Uuid,
+        kind: crate::mail::MailKind,
+        ttl_secs: u64,
+    ) -> Result<(String, DateTime<Utc>), AppError> {
+        use aes_gcm::aead::rand_core::RngCore;
+        use base64::Engine as _;
+        let mut raw = [0u8; 32];
+        aes_gcm::aead::OsRng.fill_bytes(&mut raw);
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        let expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
+        sqlx::query(
+            r#"INSERT INTO email_tokens (id, user_id, kind, token_hash, expires_at)
+               VALUES ($1, $2, $3, $4, $5)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(kind.as_str())
+        .bind(token_hash(&token))
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok((token, expires_at))
+    }
+
+    /// Consume a token: single-use and unexpired, atomically (`used_at` is set
+    /// in the same statement that checks it, so a token races itself safely
+    /// across replicas). Returns the owning user, or `None` for an unknown,
+    /// expired, or already-used token.
+    pub async fn consume_email_token(
+        &self,
+        kind: crate::mail::MailKind,
+        raw_token: &str,
+    ) -> Result<Option<Uuid>, AppError> {
+        let user_id: Option<Uuid> = sqlx::query_scalar(
+            r#"UPDATE email_tokens SET used_at = now()
+               WHERE token_hash = $1 AND kind = $2
+                 AND used_at IS NULL AND expires_at > now()
+               RETURNING user_id"#,
+        )
+        .bind(token_hash(raw_token))
+        .bind(kind.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(user_id)
+    }
+
+    /// Stamp the user's email as verified (idempotent; keeps the first time).
+    pub async fn mark_email_verified(&self, user_id: Uuid) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop tokens that expired before `older_than` (used or not). Maintenance.
+    pub async fn prune_email_tokens(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
+        let r = sqlx::query("DELETE FROM email_tokens WHERE expires_at < $1")
             .bind(older_than)
             .execute(&self.pool)
             .await?;

@@ -95,6 +95,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/devices/:id", axum::routing::delete(delete_device))
         .route("/api/account/password", post(change_password))
         .route("/api/account", axum::routing::delete(delete_account))
+        .route("/api/account/verify/request", post(verify_request))
         .route("/api/notes", post(create_note).get(list_notes))
         .route(
             "/api/notes/:id",
@@ -133,6 +134,12 @@ pub fn router(state: Arc<AppState>) -> Router {
     let limited = Router::new()
         .route("/api/register", post(register))
         .route("/api/login", post(login))
+        // Email flows (issue #49): confirmations and the reset request are
+        // unauthenticated by nature (the caller has no valid session), but
+        // rate-limited like everything else.
+        .route("/api/account/verify/confirm", post(verify_confirm))
+        .route("/api/account/reset/request", post(reset_request))
+        .route("/api/account/reset/confirm", post(reset_confirm))
         .merge(protected)
         // Collaborative editing channel (design §7): token in the
         // Authorization header (preferred) or `?token=` (fallback).
@@ -165,6 +172,7 @@ const CAPABILITIES: &[&str] = &[
     "readiness",          // GET /ready (issue #36)
     "account_management", // password change + sign-out-everywhere + deletion (issue #31)
     "pagination",         // ?limit=&cursor= on list endpoints + X-Next-Cursor (issue #29)
+    "email_flows", // verification + password reset via the mail webhook (issue #49); 501 when unconfigured
 ];
 
 /// `GET /version` — unauthenticated capability/version handshake so a client can negotiate
@@ -282,6 +290,14 @@ async fn register(
         .store
         .create_user(&email, &hash, &display_name)
         .await?;
+    // Kick off email verification when delivery is configured (issue #49).
+    // Best-effort: a webhook hiccup must not fail the registration — the user
+    // can re-request via POST /api/account/verify/request.
+    if state.mailer.enabled() {
+        if let Err(e) = send_flow_mail(&state, &user, crate::mail::MailKind::VerifyEmail).await {
+            tracing::error!(error = %e, "verification mail on register failed");
+        }
+    }
     Ok(Json(RegisterResponse { user }))
 }
 
@@ -347,6 +363,13 @@ async fn login(
     if !auth::verify_password(&body.password, &user.password_hash)? {
         record_failure().await?;
         return Err(AppError::InvalidToken);
+    }
+
+    // With EMAIL_VERIFICATION_REQUIRED, an unverified account cannot log in.
+    // Checked only after the password succeeded, so this reveals nothing to a
+    // caller who does not already hold the credentials (issue #49).
+    if state.config.email_verification_required && user.email_verified_at.is_none() {
+        return Err(AppError::BadRequest("email not verified".into()));
     }
 
     // A legitimate login resets the email's failure history.
@@ -498,6 +521,130 @@ async fn delete_account(
         return Err(AppError::InvalidToken);
     }
     state.store.delete_user(user.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Email flows: verification + password reset (issue #49) ───────────────────
+//
+// Delivery is delegated to the operator's mail webhook (`mail.rs`) — keeplin
+// never speaks SMTP. Without MAIL_WEBHOOK_URL the request endpoints answer 501.
+
+/// Mint a token for `user` and hand it to the mail webhook.
+async fn send_flow_mail(
+    state: &AppState,
+    user: &User,
+    kind: crate::mail::MailKind,
+) -> Result<(), AppError> {
+    let (token, expires_at) = state
+        .store
+        .create_email_token(user.id, kind, state.config.email_token_ttl_secs)
+        .await?;
+    state
+        .mailer
+        .send(kind, &user.email, &user.display_name, &token, expires_at)
+        .await
+        .map_err(AppError::Internal)
+}
+
+/// `POST /api/account/verify/request` — (re)send the caller's verification
+/// email. `501` when no mail webhook is configured.
+async fn verify_request(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.mailer.enabled() {
+        return Err(AppError::NotImplemented(
+            "mail webhook not configured".into(),
+        ));
+    }
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if stored.email_verified_at.is_some() {
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "already_verified": true }),
+        ));
+    }
+    send_flow_mail(&state, &stored, crate::mail::MailKind::VerifyEmail).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenBody {
+    token: String,
+}
+
+/// `POST /api/account/verify/confirm` — unauthenticated: the token *is* the
+/// proof. Stamps `email_verified_at`; `400` for an unknown/expired/used token.
+async fn verify_confirm(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TokenBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user_id = state
+        .store
+        .consume_email_token(crate::mail::MailKind::VerifyEmail, &body.token)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+    state.store.mark_email_verified(user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetRequestBody {
+    email: String,
+}
+
+/// `POST /api/account/reset/request` — start a password reset. Answers a
+/// uniform `200` whether or not the account exists (no existence oracle, #32);
+/// even a webhook delivery failure is logged, not surfaced, for the same
+/// reason. `501` when no mail webhook is configured.
+async fn reset_request(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResetRequestBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.mailer.enabled() {
+        return Err(AppError::NotImplemented(
+            "mail webhook not configured".into(),
+        ));
+    }
+    let email = normalize_email(&body.email);
+    if let Some(user) = state.store.get_user_by_email(&email).await? {
+        if let Err(e) = send_flow_mail(&state, &user, crate::mail::MailKind::PasswordReset).await {
+            tracing::error!(error = %e, "password reset mail failed");
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetConfirmBody {
+    token: String,
+    new_password: String,
+}
+
+/// `POST /api/account/reset/confirm` — finish a password reset: set the new
+/// password, revoke **every** device (sign out everywhere — the reset may mean
+/// the old credential was compromised), and clear the login-lockout counter.
+async fn reset_confirm(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResetConfirmBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if body.new_password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let user_id = state
+        .store
+        .consume_email_token(crate::mail::MailKind::PasswordReset, &body.token)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+    let hash = auth::hash_password(&body.new_password)?;
+    state.store.update_password(user_id, &hash).await?;
+    state.store.delete_all_devices(user_id).await?;
+    if let Some(user) = state.store.get_user_by_id(user_id).await? {
+        state.store.clear_login_failures(&user.email).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

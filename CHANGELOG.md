@@ -10,6 +10,15 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### Added
+- Email flows (#49): **email verification** (`POST /api/account/verify/{request,confirm}`,
+  auto-sent on registration; `EMAIL_VERIFICATION_REQUIRED` gates login) and
+  **password reset** (`POST /api/account/reset/{request,confirm}`; single-use
+  hashed expiring tokens, uniform responses, revokes every device on reset).
+  Delivery is **delegated to the operator's mail webhook** (`MAIL_WEBHOOK_URL`)
+  — keeplin never speaks SMTP; without a webhook the flows answer `501`
+  (migration `0012`; new capability `email_flows`).
+
 ### Security
 - Login brute-force lockout: `LOGIN_MAX_FAILURES` recent failures for an email
   answer `429` for `LOGIN_LOCKOUT_SECS` (defaults 10 / 300s; `0` disables).

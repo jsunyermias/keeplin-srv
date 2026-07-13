@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{Json, Router};
 use keeplin_core::{
     models::Note,
     storage::{db::DbBackend, NoteRepository, NotebookRepository, SyncBackend},
@@ -44,6 +44,10 @@ fn test_config() -> Config {
         max_notes_per_user: 0,
         registration_enabled: true,
         at_rest_key: None,
+        mail_webhook_url: None,
+        mail_webhook_token: None,
+        email_token_ttl_secs: 3600,
+        email_verification_required: false,
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
@@ -714,6 +718,183 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+// ── Email flows: verification + password reset (issue #49) ───────────────────
+
+/// A mock of the operator's mail webhook: captures every payload the server
+/// posts, standing in for the external mail service keeplin delegates to.
+async fn spawn_mail_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+    let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
+    let captured = inbox.clone();
+    let app = Router::new().route(
+        "/mail",
+        axum::routing::post(move |Json(payload): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().await.push(payload);
+                "ok"
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, inbox)
+}
+
+/// Pull the most recent captured token of `kind`, waiting for delivery.
+async fn webhook_token(inbox: &Arc<tokio::sync::Mutex<Vec<Value>>>, kind: &str) -> String {
+    for _ in 0..50 {
+        if let Some(t) = inbox
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|p| p["kind"] == kind)
+            .and_then(|p| p["token"].as_str())
+        {
+            return t.to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("no {kind} payload reached the mail webhook");
+}
+
+/// Full delegated-mail lifecycle: registration triggers a verification mail,
+/// unverified login is refused under EMAIL_VERIFICATION_REQUIRED, confirming
+/// the token unlocks login; a password reset delivers a token that sets a new
+/// password, signs out every device, and cannot be replayed. An unknown email
+/// gets the same uniform 200 with no mail sent (no oracle).
+#[sqlx::test(migrations = "../../migrations")]
+async fn email_verification_and_password_reset_flows(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_mail_webhook().await;
+    let mut config = test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    config.email_verification_required = true;
+    let addr = spawn_server_with_config(pool, config).await;
+    let client = reqwest::Client::new();
+
+    // Registration fires the verification mail through the webhook.
+    register(addr, "a@example.com").await;
+    let verify_token = webhook_token(&inbox, "verify_email").await;
+
+    // Unverified: login is refused even with the right password.
+    let denied = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 400, "unverified account must not log in");
+
+    // Confirm (unauthenticated: the token is the proof) → login works.
+    let confirmed = client
+        .post(format!("http://{addr}/api/account/verify/confirm"))
+        .json(&json!({ "token": verify_token }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), 200);
+    let token1 = login(addr, "a@example.com", "laptop").await;
+
+    // Password reset: request → uniform 200; the webhook receives the token.
+    let requested = client
+        .post(format!("http://{addr}/api/account/reset/request"))
+        .json(&json!({ "email": "a@example.com" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(requested.status(), 200);
+    let reset_token = webhook_token(&inbox, "password_reset").await;
+
+    // Confirm with a new password.
+    let reset = client
+        .post(format!("http://{addr}/api/account/reset/confirm"))
+        .json(&json!({ "token": reset_token, "new_password": "brand-new-pass1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset.status(), 200);
+
+    // The reset revoked every device: the pre-reset token stops working.
+    let revoked = client
+        .get(format!("http://{addr}/api/devices"))
+        .bearer_auth(&token1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), 401, "reset must sign out everywhere");
+
+    // Old password fails; the new one logs in.
+    let old = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.status(), 401);
+    let new = client
+        .post(format!("http://{addr}/api/login"))
+        .json(
+            &json!({ "email": "a@example.com", "password": "brand-new-pass1", "device_name": "x" }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new.status(), 200);
+
+    // A consumed token cannot be replayed.
+    let replay = client
+        .post(format!("http://{addr}/api/account/reset/confirm"))
+        .json(&json!({ "token": reset_token, "new_password": "another-pass-123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 400, "single-use token must not replay");
+
+    // Unknown email: same uniform 200, and nothing new reaches the webhook.
+    let before = inbox.lock().await.len();
+    let ghost = client
+        .post(format!("http://{addr}/api/account/reset/request"))
+        .json(&json!({ "email": "ghost@example.com" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ghost.status(), 200, "reset request must be uniform");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        inbox.lock().await.len(),
+        before,
+        "no mail for unknown email"
+    );
+}
+
+/// Without MAIL_WEBHOOK_URL the flows answer 501 — an explicit deferral.
+#[sqlx::test(migrations = "../../migrations")]
+async fn email_flows_answer_501_when_unconfigured(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let client = reqwest::Client::new();
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "laptop").await;
+
+    let reset = client
+        .post(format!("http://{addr}/api/account/reset/request"))
+        .json(&json!({ "email": "a@example.com" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset.status(), 501);
+
+    let verify = client
+        .post(format!("http://{addr}/api/account/verify/request"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), 501);
 }
 
 // ── Login brute-force lockout ─────────────────────────────────────────────────

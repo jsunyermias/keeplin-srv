@@ -67,6 +67,19 @@ pub struct Config {
     /// titles (issue keeplin#110), from `AT_REST_KEY`. `None` (unset) disables
     /// encryption and stores those fields as plaintext (backward compatible).
     pub at_rest_key: Option<String>,
+    /// Where email delivery is delegated (issue #49): the server POSTs
+    /// `{ kind, to, display_name, token, expires_at }` here and the operator's
+    /// mail service composes and sends the message — keeplin never speaks SMTP.
+    /// `None` disables the email flows (their endpoints answer `501`).
+    pub mail_webhook_url: Option<String>,
+    /// Optional bearer token sent in `Authorization` on webhook posts.
+    pub mail_webhook_token: Option<String>,
+    /// Lifetime of a verification/reset token, in seconds.
+    pub email_token_ttl_secs: u64,
+    /// When `true`, login refuses accounts that have not verified their email
+    /// (`403`). Leave `false` unless the mail webhook is configured, or nobody
+    /// can complete a login.
+    pub email_verification_required: bool,
     /// Failed logins for one email before the account is temporarily locked
     /// (brute-force lockout; DB-backed so it holds across replicas). `0`
     /// disables the lockout.
@@ -173,6 +186,14 @@ impl Config {
             at_rest_key: std::env::var("AT_REST_KEY")
                 .ok()
                 .filter(|k| !k.trim().is_empty()),
+            mail_webhook_url: std::env::var("MAIL_WEBHOOK_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty()),
+            mail_webhook_token: std::env::var("MAIL_WEBHOOK_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
+            email_token_ttl_secs: env_parse("EMAIL_TOKEN_TTL_SECS", 3600),
+            email_verification_required: env_parse("EMAIL_VERIFICATION_REQUIRED", false),
             login_max_failures: env_parse("LOGIN_MAX_FAILURES", 10),
             login_lockout_secs: env_parse("LOGIN_LOCKOUT_SECS", 300),
             registration_enabled: env_parse("REGISTRATION_ENABLED", true),

@@ -17,6 +17,7 @@ only `pub mod` declarations, one per source file.
 | `crypto` | yes | at-rest AES-256-GCM encryption of note title/content (`AT_REST_KEY`, keeplin#110) |
 | `error` | yes | `AppError` and its HTTP status mapping |
 | `http` | yes | the axum router and every REST handler |
+| `mail` | yes | delegated email delivery via the operator's mail webhook (issue #49; no SMTP in keeplin) |
 | `permissions` | yes | `Role` (owner/editor/viewer) and `resolve_role` |
 | `protocol` | yes | wire types of the collaborative channel |
 | `ratelimit` | yes | per-IP token-bucket rate limiter + middleware |

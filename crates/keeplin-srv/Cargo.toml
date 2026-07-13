@@ -39,6 +39,10 @@ password-hash = "0.5"
 # a per-value random nonce; key from the AT_REST_KEY env var.
 aes-gcm = "0.10"
 base64 = "0.22"
+# Email-flow tokens are stored hashed (issue #49); reqwest posts the payload to
+# the operator's mail webhook (keeplin never speaks SMTP).
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"

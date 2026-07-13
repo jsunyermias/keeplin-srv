@@ -170,6 +170,10 @@ The Compose topology is dev/demo only: Postgres is bound to loopback (not the LA
 | `AT_REST_KEY` | — (disabled) | base64 32-byte key; when set, encrypts note **title and line content** at rest (AES-256-GCM) so a DB dump/backup shows ciphertext (keeplin#110). Unset = plaintext. Generate with `openssl rand -base64 32`. Losing the key makes existing notes unreadable |
 | `LOGIN_MAX_FAILURES` | `10` | Failed logins per email before a temporary lockout (`429`, even with the right password). DB-backed, so it holds across replicas. `0` disables |
 | `LOGIN_LOCKOUT_SECS` | `300` | Lockout duration; also the window after which the failure counter restarts |
+| `MAIL_WEBHOOK_URL` | — (disabled) | Where email delivery is delegated: the server POSTs `{kind, to, display_name, token, expires_at}` and **your** mail service composes/sends the message (keeplin never speaks SMTP). Unset → the email flows answer `501` |
+| `MAIL_WEBHOOK_TOKEN` | — | Optional bearer sent on webhook posts so your mail service can authenticate the server |
+| `EMAIL_TOKEN_TTL_SECS` | `3600` | Lifetime of a verification/reset token |
+| `EMAIL_VERIFICATION_REQUIRED` | `false` | Refuse login for accounts that never verified their email. Only enable with the mail webhook configured |
 | `RUST_LOG` | `info` | Log level |
 
 The server drains in-flight requests on `SIGTERM`/`Ctrl-C` (bounded by
