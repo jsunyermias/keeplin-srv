@@ -87,11 +87,21 @@ in production. On a breaking wire change, bump `PROTOCOL_VERSION` in both repos 
 ## Device sync relay (`GET /api/sync`)
 
 Besides the collaborative channel, the server implements the WebSocket relay
-that keeplin-core's current `DbBackend` speaks (`{"type":"auth","token"}`
-handshake + `{"type":"changes",…}` envelopes), with a persistent journal,
-deferred catch-up via per-device cursors and retry deduplication. It syncs one
-user's devices while collaborative mode lands in the daemon. One login (one
+that keeplin-core's `DbBackend` speaks (`{"type":"auth","token"}` handshake +
+`{"type":"changes",…}` envelopes), with a persistent journal, deferred
+catch-up via per-device cursors and retry deduplication. One login (one
 token) per device.
+
+Collaborative mode has landed in the daemon (`collab/mod.rs`, `CollabBackend`,
+`collab_api_url` in `config.toml`), and the two channels split the work: with
+`collab_api_url` set, **note bodies are edited over `/api/ws`** (line ops
+against the server's materialised note state) and stop flowing through the
+relay — the client filters note `Change`s out of `/api/sync` — while
+**notebooks, tags and resource metadata keep syncing over the relay**.
+Resource *binaries* travel neither channel: they are uploaded out-of-band
+(`PUT /api/resources/:id/data`) and downloaded on demand. Without
+`collab_api_url` (relay-only mode), everything — notes included — syncs over
+`/api/sync` with end-to-end client-encrypted payloads.
 
 ### Connecting a keeplin-daemon
 

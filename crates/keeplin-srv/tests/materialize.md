@@ -34,9 +34,12 @@ entities pushed over the relay become durable, queryable, version-vector-resolve
 
 ## Coverage gaps
 
-- The client-side change (uploading blobs out-of-band and stripping `data` from the relay) is
-  keeplin's; here the current client still ships the binary in the `Change`, exercising the server's
-  backward-compat path alongside the direct `PUT`/`GET` blob endpoints.
+- These tests drive the **relay-mode** client (`DbBackend` alone), whose `ResourceCreate` still
+  carries the binary inline — deliberately exercising the server's backward-compat path. The
+  **collab-mode** client (`CollabBackend`) uploads out-of-band (`upload_blob` →
+  `PUT /api/resources/:id/data`) and strips `data` from the relayed change; that path is driven
+  through the real client in `tests/collab_client_resources_e2e.rs` (blob served, journal
+  blob-free, second device downloads from the server).
 
 ## Related files
 
