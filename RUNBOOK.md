@@ -97,6 +97,55 @@ These run inside the server (the hourly `maintenance_loop`), tuned by env vars �
 
 Neither affects backups beyond keeping the database smaller.
 
+## Key rotation & re-encryption (`AT_REST_KEY`)
+
+`AT_REST_KEY` encrypts `notes.title` and `lines.content` at rest (AES-256-GCM, values tagged
+`enc:v1:`). Untagged rows are plaintext and stay readable, so the key can be enabled at any
+time — but old rows remain plaintext until migrated.
+
+### Enabling the key on an existing deployment (one-off re-encrypt pass)
+
+```bash
+# 1. Generate and set the key, restart the server (new writes are now encrypted).
+openssl rand -base64 32          # -> AT_REST_KEY
+
+# 2. Preview: how many pre-key plaintext rows are left?
+keeplin-reencrypt --dry-run      # same env as the server (DATABASE_URL, AT_REST_KEY)
+
+# 3. Migrate them. Safe against the live server; idempotent; resumable.
+keeplin-reencrypt                # optionally --batch-size N (default 500)
+
+# 4. Verify: a re-run finds nothing.
+keeplin-reencrypt --dry-run      # -> 0 plaintext rows found
+```
+
+The pass processes bounded batches (one transaction each), logs progress per batch, skips any
+row the live server rewrites concurrently (the server holds the same key, so that write is
+already encrypted), and can be interrupted and re-run freely — finished batches stay done.
+
+### Rotating the key
+
+There is **no live key rotation**: the server reads exactly one key, and `keeplin-reencrypt`
+encrypts to that same key — it cannot re-encrypt rows from an old key to a new one. The current
+procedure is a maintenance-window swap:
+
+1. Take a backup (as for any upgrade).
+2. **With the old key still configured**, decrypt is possible; plan the swap as: stop writes
+   (maintenance window), dump the affected columns decrypted (a small script using the old
+   key), switch `AT_REST_KEY` to the new key, restart, rewrite the columns (they re-encrypt
+   under the new key on write), run `keeplin-reencrypt` to catch anything left, verify, reopen.
+3. Never delete the old key until every `enc:v1:` row verifiably decrypts under the new one.
+
+Treat a suspected key compromise as a data breach first and a rotation second: rotating the
+at-rest key does not un-leak whatever the compromised key already decrypted.
+
+### Key backup — separate from database backups
+
+Back `AT_REST_KEY` up in your **secret store, never next to the database dumps**. A backup
+bundle containing both the dump and the key is plaintext for whoever steals it — the exact
+threat at-rest encryption exists to stop. Conversely, **losing the key makes every `enc:v1:`
+row permanently unreadable**; there is no recovery path.
+
 ## Capacity & quotas
 
 - Resource binaries live in Postgres, so **database size tracks attachment volume**. Watch disk and

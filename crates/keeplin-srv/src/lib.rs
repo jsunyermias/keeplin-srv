@@ -9,6 +9,7 @@ pub mod mail;
 pub mod permissions;
 pub mod protocol;
 pub mod ratelimit;
+pub mod reencrypt;
 pub mod state;
 pub mod store;
 pub mod sync;

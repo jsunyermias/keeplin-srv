@@ -23,7 +23,13 @@ oversight. Mitigations, in order of strength:
 2. **`AT_REST_KEY`**: encrypt titles and line content at rest, so database
    dumps, stolen backups, and SQL access see ciphertext. Does **not** protect
    against a compromised running server or the operator (both hold the key).
-   Back the key up separately from the database.
+   Back the key up separately from the database — a backup bundle holding both
+   the dump and the key is plaintext for whoever steals it. Rows written before
+   the key was enabled stay plaintext until the one-off `keeplin-reencrypt`
+   pass migrates them (see `RUNBOOK.md`, "Key rotation & re-encryption").
+   There is **no live key rotation**: rotating means a maintenance-window
+   re-encrypt under the new key with the old key still readable, as described
+   in the runbook.
 
 ## Operational hardening checklist
 

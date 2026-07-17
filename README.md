@@ -194,8 +194,10 @@ rest** in PostgreSQL with AES-256-GCM, so a database dump, stolen backup, or SQL
 read access sees ciphertext instead of note contents — it does **not** defend
 against a compromised running server. Enabling the key on an existing database is
 safe: rows written before it stay readable (they are plaintext) and new writes
-are encrypted; a one-off re-encrypt pass can migrate the old rows. **Back up the
-key** separately from the database — losing it makes encrypted notes unrecoverable.
+are encrypted; the one-off `keeplin-reencrypt` binary migrates the old rows
+(idempotent, resumable, `--dry-run` — see `RUNBOOK.md`, "Key rotation &
+re-encryption"). **Back up the key** separately from the database — losing it
+makes encrypted notes unrecoverable.
 
 ## Operating in production
 
