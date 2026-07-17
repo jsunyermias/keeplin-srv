@@ -20,6 +20,7 @@ the steps run.
 
 | Step | What it enforces |
 |------|------------------|
+| `./scripts/check-docs.sh` | every `.rs` has a companion `.md`, and every companion carries a `## Graph context` section (the two-layer navigation model; see README "Navigating this repo") |
 | `cargo fmt --check --all` | formatting is committed |
 | `cargo check --workspace` | the workspace compiles |
 | `cargo test --workspace` | unit + integration tests pass (against the PG service) |

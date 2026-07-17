@@ -20,3 +20,13 @@ Thumbs.db
 
 # Local clone of the Keeplin client (used for reference)
 keeplin/
+# Graphify knowledge graph: the queryable artifacts (graph.json, GRAPH_REPORT.md)
+# are committed; caches, visualisations and snapshots are regenerable.
+graphify-out/cache/
+graphify-out/graph.html
+graphify-out/manifest.json
+graphify-out/20*/
+# Local Claude Code settings (copy .claude/settings.example.json here to enable
+# the Graphify hooks locally).
+.claude/settings.local.json
+.claude/settings.json

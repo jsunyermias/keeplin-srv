@@ -30,6 +30,37 @@ lucky batch.
 | `raw_values` | raw `SELECT title/content` — asserts on stored bytes, not decrypted views |
 | `test_key()` | fixed base64 32-byte key |
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `test_config()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_server()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `test_key()` — defined here (EXTRACTED; file-local)
+- `seed_note()` — defined here (EXTRACTED; file-local)
+- `raw_values()` — defined here (EXTRACTED; file-local)
+- `reencrypts_pre_key_rows_and_server_still_serves_plaintext()` — defined here (EXTRACTED; file-local)
+- `dry_run_reports_but_does_not_modify()` — defined here (EXTRACTED; file-local)
+- `refuses_to_run_without_a_key()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Seeding goes through a REAL keyless server instance (genuine pre-key plaintext), assertions on raw column bytes plus a keyed server's decrypted reads.
+- The dry-run test must assert byte-identical rows before/after.
+- `batch_size: 1` in the main test intentionally exercises multi-batch pagination/resume behaviour.
+
 ## Related files
 
 - `../src/reencrypt.rs` — the pass under test (idempotence/batching/guard invariants).

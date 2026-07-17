@@ -32,6 +32,30 @@ failure is safe: completed batches are committed, and re-running resumes where i
   that change under it (see `src/reencrypt.md`).
 - Idempotent: run-to-completion twice → the second run reports 0 rows found.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `parse_args()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `main()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/reencrypt.rs` — one-off at-rest re-encrypt pass (EXTRACTED: references×1; e.g. `Options`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Thin wrapper only: all pass logic lives in `src/reencrypt.rs` so tests drive it in-process.
+- Loads the same `Config` as the server (same `.env`); requires a valid `AT_REST_KEY` and refuses to run without one.
+- Exit code is non-zero on any failure; completed batches stay committed and a re-run resumes safely.
+
 ## Related files
 
 - `src/reencrypt.rs` — the actual pass (batching/resume/guard semantics documented there).

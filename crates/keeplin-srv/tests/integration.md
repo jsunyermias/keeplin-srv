@@ -53,6 +53,39 @@ authentication, persistence, and offline catch-up. Also covers the REST auth sur
   in that crate, not here — these tests exercise the *relay*, using `DbBackend` as a faithful
   client.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `spawn_server_with_config()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `test_config()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_server()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_instance()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `register()` — defined here (EXTRACTED; file-local)
+- `login()` — defined here (EXTRACTED; file-local)
+- `device()` — defined here (EXTRACTED; file-local)
+- `epoch()` — defined here (EXTRACTED; file-local)
+- `push()` — defined here (EXTRACTED; file-local)
+- `sync_until()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×2; e.g. `Config`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×3; e.g. `router()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Always the REAL keeplin-core `DbBackend` over the genuine wire protocol — never a mock (repo convention #4).
+- Throwaway `#[sqlx::test]` database per test; tests must not depend on each other's state.
+- The access-visibility test must keep covering the reinstall/re-push scenario (journal re-delivery must not leak pre-access versions).
+
 ## Related files
 
 - `../src/sync.rs` — the relay under test.

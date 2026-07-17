@@ -30,6 +30,29 @@ Shared harness `collab_e2e_common/mod.rs`: `spawn_server`, `register`/`login`, `
 (a `DbBackend` on `/api/sync` wrapped in `CollabBackend` on `/api/ws`, `start`ed with itself as
 stack top), `CONVERGE_TRIES` (generous polling bound for real-client convergence).
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `resource_blob_travels_out_of_band_through_the_real_client()` — defined here (EXTRACTED; 1 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×1; e.g. `collab_device()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Drives the out-of-band blob path through the REAL client stack; the relay journal must stay blob-free (asserted on raw `changes.payload`).
+- Own test binary (issue #51); throwaway `#[sqlx::test]` database.
+- The second-device read must obtain the bytes from the server download fallback, not the relay.
+
 ## Related files
 
 - keeplin `keeplin-core/src/collab/mod.rs` — `create_resource`/`upload_blob`/`read_resource`, the client half of this contract.

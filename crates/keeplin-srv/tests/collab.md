@@ -60,6 +60,40 @@ with the login's `device_id` (the vv actor).
 - The GC test polls the store's line set (not the exported body) for the settled state, because
   the body is transiently ambiguous — see the comment on `gc_compacts_old_tombstones`.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `spawn_server_with_state()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `test_config()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_instance()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_rate_limited()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_server()` — defined here (EXTRACTED; file-local)
+- `user()` — defined here (EXTRACTED; file-local)
+- `create_note()` — defined here (EXTRACTED; file-local)
+- `share()` — defined here (EXTRACTED; file-local)
+- `ws_connect()` — defined here (EXTRACTED; file-local)
+- `send()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×3; e.g. `router()`)
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Exercises the collaborative wire protocol end to end over real WebSockets: resolution determinism, replay-ignoring, roles, and forged-`last_writer` rejection must stay covered.
+- Throwaway `#[sqlx::test]` database per test.
+- Viewer/outsider denial paths are part of the contract, not incidental coverage.
+
 ## Related files
 
 - `../src/collab.rs` — the code under test.

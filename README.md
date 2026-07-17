@@ -222,6 +222,27 @@ are encrypted; the one-off `keeplin-reencrypt` binary migrates the old rows
 re-encryption"). **Back up the key** separately from the database — losing it
 makes encrypted notes unrecoverable.
 
+## Navigating this repo (for humans and AI agents)
+
+Two navigation layers, checked in:
+
+1. **LAYER 1 — discovery: the Graphify knowledge graph.** `graphify-out/graph.json` (and the
+   readable `graphify-out/GRAPH_REPORT.md`) is a queryable graph of every symbol, file and
+   relationship. Ask it before reading code: `graphify query "which files depend on
+   store.rs?"`, `graphify path "Store" "router"`, `graphify explain "entity_history"`. After
+   large refactors, refresh it with `graphify update .` (AST-only, no API key needed).
+2. **LAYER 2 — work: the companion `.md` files.** Every `foo.rs` has a contractual `foo.md`
+   next to it, written to be **hyper self-contained**: purpose, API, invariants, and a
+   `## Graph context` section (dependencies/dependents with one-line inline summaries,
+   sourced from the graph; redundancy across companions is intentional). Agents should query
+   the graph first, then read the companion `.md` — not the raw `.rs` — whenever possible.
+
+CI enforces the contract (`scripts/check-docs.sh`): every `.rs` has a companion `.md` and
+every companion carries `## Graph context`. Doc templates live in `docs/templates/`
+(mirrored from keeplin). To enable the optional Graphify Claude Code hooks locally, copy
+`.claude/settings.example.json` to `.claude/settings.local.json` — the example is guarded so
+it no-ops for contributors without Graphify installed (`pip install graphifyy`).
+
 ## Operating in production
 
 keeplin-srv is stateless — all durable state lives in PostgreSQL — so operating it is mostly

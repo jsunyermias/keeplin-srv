@@ -75,6 +75,45 @@ Only `Applied` ops are persisted and fanned out. `Invalid` sends the sender an `
 - `Move` extracts the moved block then reinserts it after the target, guarding against making a
   moved line its own anchor.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `handle_msg()` — defined here (EXTRACTED; 4 cross-file edge(s))
+- `touch_presence()` — defined here (EXTRACTED; 3 cross-file edge(s))
+- `read_snapshot()` — defined here (EXTRACTED; 3 cross-file edge(s))
+- `apply_op()` — defined here (EXTRACTED; 3 cross-file edge(s))
+- `clear_presence()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `deliver_event()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `handler()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `line_snapshot()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `winner()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `line_winner()` — defined here (EXTRACTED; 2 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×6; e.g. `AppError`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×2; e.g. `.resolve()`)
+- `crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: calls×1; e.g. `resolve_note_access()`)
+- `crates/keeplin-srv/src/protocol.rs` — collaborative wire types (EXTRACTED: references×7; e.g. `CollabServerMsg`, `Cursor`, `CollabClientMsg`)
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×10; e.g. `AppState`)
+- `crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×4; e.g. `CollabEvent`, `Line`, `NoteOrder`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- The unit of concurrency is the line; the order of lines is its own versioned entity; resolution is always `note_log::resolve`, never a lock.
+- `last_writer` must equal the authenticated device and the vector must advance the writer's component — forged ops are rejected.
+- Viewers can join and watch but never write; access is re-resolved against the share tables, not cached from join time.
+- Per-note line order updates are serialised across replicas with a Postgres advisory lock; peer instances are reached only via the bus.
+- Limits (line length, lines per note, message size) are enforced before persisting.
+
 ## Related files
 
 - `protocol.md` — the message/op types on the wire.

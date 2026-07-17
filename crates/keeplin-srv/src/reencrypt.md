@@ -60,6 +60,37 @@ sites in `run` — never from input.
 - Optimistic per-row guard instead of `SELECT … FOR UPDATE`: the pass must not hold locks that
   stall a live server; losing a race is fine because the winner's write is already encrypted.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `run()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `reencrypt_column()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `Options` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `.default()` — defined here (EXTRACTED; file-local)
+- `TableStats` — defined here (EXTRACTED; file-local)
+- `Stats` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/crypto.rs` — at-rest encryption of note titles and line content (EXTRACTED: references×2; e.g. `Cipher`)
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×2; e.g. `AppError`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper (EXTRACTED: references×1; e.g. `parse_args()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Idempotent: rows already tagged `enc:v1:` are never selected; a completed pass re-run is a no-op.
+- Bounded transactions (`batch_size` rows per commit) — never a whole-table transaction or lock.
+- Live-server safe: every UPDATE is guarded by `AND <col> = <the plaintext read>`; losing a race skips the row (the server's concurrent write is already encrypted).
+- `dry_run` issues no UPDATE at all.
+- Refuses to run with a disabled cipher — a keyless 'success' would be a silent misfire.
+
 ## Related files
 
 - `src/crypto.rs` — the `Cipher` and the `enc:v1:` (`ENC_PREFIX`) tag format this pass targets.

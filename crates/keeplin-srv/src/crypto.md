@@ -45,6 +45,40 @@ plaintext in server memory, so the server necessarily holds the key.
   nonces would leak equality of contents.
 - Opt-in via env (unset = disabled) keeps existing deployments working with zero migration.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `Cipher` — defined here (EXTRACTED; 4 cross-file edge(s))
+- `.encrypt()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `.decrypt()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `.from_key()` — defined here (EXTRACTED; file-local)
+- `.enabled()` — defined here (EXTRACTED; file-local)
+- `test_key()` — defined here (EXTRACTED; file-local)
+- `disabled_is_passthrough()` — defined here (EXTRACTED; file-local)
+- `round_trips_and_tags()` — defined here (EXTRACTED; file-local)
+- `nonce_is_random_per_value()` — defined here (EXTRACTED; file-local)
+- `reads_legacy_plaintext_when_enabled()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×2; e.g. `AppError`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/reencrypt.rs` — one-off at-rest re-encrypt pass (EXTRACTED: references×2; e.g. `reencrypt_column()`, `run()`)
+- `crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×2; e.g. `Store`, `.with_cipher()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- A stored value is either plaintext (untagged) or `enc:v1:<base64(nonce‖ciphertext)>`; both must always decrypt correctly so the key can be enabled on a live database.
+- Fresh random 96-bit nonce per value — two encryptions of the same plaintext must differ.
+- A present-but-invalid key is a startup error (never silent plaintext); an `enc:v1:` value with no key configured is a loud decrypt error.
+- The tag literal lives once as `ENC_PREFIX`; `src/reencrypt.rs` selects rows by it — do not duplicate the string.
+
 ## Related files
 
 - `src/store.rs` — the only caller of `encrypt`/`decrypt` (write/read choke point).

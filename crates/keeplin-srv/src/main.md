@@ -46,6 +46,34 @@ Runs once an hour when either knob is on:
 - The pool caps and timeouts turn an exhausted pool into a fast per-request error instead of
   an indefinite hang, and reap idle/old connections so zombies do not accumulate.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `main()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `maintenance_loop()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `run_retention()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `shutdown_signal()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×2; e.g. `AppState`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Startup must fail fast on invalid config: missing `DATABASE_URL`, weak `JWT_SECRET` (without `KEEPLIN_DEV_INSECURE=1`), malformed `AT_REST_KEY`.
+- Migrations run at startup via `sqlx::migrate!` and are forward-only; the binary must remain runnable against an already-migrated database (no-op).
+- Graceful shutdown drains in-flight work but force-exits after `SHUTDOWN_GRACE_SECS` (long-lived WebSockets would otherwise pin the process forever).
+- The maintenance loop owns presence heartbeat/sweep and the retention passes; disabling retention knobs must not disable presence upkeep.
+
 ## Related files
 
 - `config.md` — every environment knob this file reads.

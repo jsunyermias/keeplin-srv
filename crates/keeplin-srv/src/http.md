@@ -115,6 +115,53 @@ the server keeps the collaborative line model underneath.
 - Import seeds each line's version vector with the importer's **device** component, consistent
   with how collaborative ops are signed.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `router()` — defined here (EXTRACTED; 13 cross-file edge(s))
+- `update_note()` — defined here (EXTRACTED; 6 cross-file edge(s))
+- `delete_note()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `create_share()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `list_shares()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `transfer_ownership()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `create_notebook_share()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `list_notebook_shares()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `note_history()` — defined here (EXTRACTED; 5 cross-file edge(s))
+- `notebook_history()` — defined here (EXTRACTED; 5 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: references×30; e.g. `AuthedUser`)
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×41; e.g. `AppError`)
+- `crates/keeplin-srv/src/mail.rs` — delegated email delivery (mail webhook) (EXTRACTED: references×1; e.g. `MailKind`)
+- `crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: calls×15, references×1; e.g. `resolve_note_access()`, `resolve_notebook_access()`, `Access`)
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×43; e.g. `AppState`)
+- `crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×19; e.g. `PageCursor`, `User`, `UserDevice`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: calls×2; e.g. `winner()`, `line_winner()`)
+- `crates/keeplin-srv/src/main.rs` — keeplin-srv entry point (EXTRACTED: calls×1; e.g. `main()`)
+- `crates/keeplin-srv/tests/collab.rs` — collaborative channel & hardening tests (EXTRACTED: calls×3; e.g. `spawn_instance()`, `spawn_rate_limited()`, `spawn_server_with_state()`)
+- `crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×1; e.g. `spawn_server()`)
+- `crates/keeplin-srv/tests/integration.rs` — device relay tests (real `DbBackend`) (EXTRACTED: calls×3; e.g. `spawn_instance()`, `spawn_server()`, `spawn_server_with_config()`)
+- `crates/keeplin-srv/tests/materialize.rs` — domain-entity materialisation tests (EXTRACTED: calls×1; e.g. `spawn_server()`)
+- `crates/keeplin-srv/tests/quotas.rs` — per-user quota enforcement tests (EXTRACTED: calls×1; e.g. `spawn()`)
+- `crates/keeplin-srv/tests/reencrypt.rs` — re-encrypt pass tests (EXTRACTED: calls×1; e.g. `spawn_server()`)
+- `crates/keeplin-srv/tests/soak.rs` — multi-instance collaborative soak/load drill (EXTRACTED: calls×1; e.g. `spawn_instance()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Authorisation is checked in the handler **before** any data access, via the `permissions` resolvers; history/list responses never bypass them.
+- `PROTOCOL_VERSION` + `compatible_with()` (exact match) are the single server-side statement of wire compatibility, mirrored by keeplin-core's `compat.rs`; bump both together.
+- `/health`, `/ready`, `/version` stay outside auth and rate limiting.
+- The `HISTORY_VISIBILITY=access` collaborator cutoff is passed as the payload-timestamp (`authored`) bound, never as a `received_at` bound (journal re-delivery would leak pre-access versions).
+- Body-size caps (`MAX_UPLOAD_BYTES`, `MAX_NOTE_BODY_BYTES`) and per-user quotas are enforced before allocation/storage.
+
 ## Related files
 
 - `auth.md` — the middleware and token issuance.

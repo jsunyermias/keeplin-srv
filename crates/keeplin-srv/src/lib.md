@@ -32,6 +32,28 @@ only `pub mod` declarations, one per source file.
 - The library exposes `router(state)` and `AppState::new(config, pool)` so tests spin up the
   full server against a throwaway database without touching `main.rs`.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- (no symbols extracted for this file — it contributes only its file node) (EXTRACTED)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- (none in the graph) (EXTRACTED)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- `lib.rs` only declares modules — no logic; every concrete type lives in a sub-module.
+- Every public module keeps a companion `.md` (the contractual doc system) and a new module is added to both `lib.rs` and its doc.
+
 ## Related files
 
 - `main.rs` — the binary that builds the pool and serves this router.
