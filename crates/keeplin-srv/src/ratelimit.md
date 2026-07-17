@@ -38,6 +38,38 @@ space a single server sees; a future improvement could evict idle buckets).
 - `/health` is mounted outside the rate-limited sub-router (see `http.md`) so liveness probes
   are never throttled.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `RateLimiter` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `rate_limit_mw()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `Bucket` — defined here (EXTRACTED; file-local)
+- `LimiterState` — defined here (EXTRACTED; file-local)
+- `.new()` — defined here (EXTRACTED; file-local)
+- `.enabled()` — defined here (EXTRACTED; file-local)
+- `.projected_tokens()` — defined here (EXTRACTED; file-local)
+- `.check()` — defined here (EXTRACTED; file-local)
+- `.bucket_count()` — defined here (EXTRACTED; file-local)
+- `ip()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: imports_from×1, references×1; e.g. `AppState`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- `RATE_LIMIT_PER_MIN=0` disables limiting entirely (the middleware must be a strict no-op).
+- Limiting is per-client-IP and per-instance; behind a proxy every request shares one IP, so deployments rate-limit at the proxy instead.
+- `/health`, `/ready` and `/version` are never rate-limited (liveness probes and the protocol handshake must always pass).
+
 ## Related files
 
 - `http.md` — where the middleware is layered onto all routes but `/health`.

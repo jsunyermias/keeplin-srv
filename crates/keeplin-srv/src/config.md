@@ -42,6 +42,43 @@ helper.
   IP and share one bucket. Rate-limit at the proxy instead.
 - Rotating `JWT_SECRET` invalidates every issued token (all devices must log in again).
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `Config` — defined here (EXTRACTED; 11 cross-file edge(s))
+- `env_parse()` — defined here (EXTRACTED; file-local)
+- `dev_insecure()` — defined here (EXTRACTED; file-local)
+- `is_weak_secret()` — defined here (EXTRACTED; file-local)
+- `resolve_jwt_secret()` — defined here (EXTRACTED; file-local)
+- `.from_env()` — defined here (EXTRACTED; file-local)
+- `weak_secrets_are_rejected()` — defined here (EXTRACTED; file-local)
+- `a_strong_secret_is_accepted()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- (none in the graph) (EXTRACTED)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×2; e.g. `AppState`, `.new()`)
+- `crates/keeplin-srv/tests/collab.rs` — collaborative channel & hardening tests (EXTRACTED: references×1; e.g. `test_config()`)
+- `crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: references×1; e.g. `test_config()`)
+- `crates/keeplin-srv/tests/integration.rs` — device relay tests (real `DbBackend`) (EXTRACTED: references×2; e.g. `spawn_server_with_config()`, `test_config()`)
+- `crates/keeplin-srv/tests/materialize.rs` — domain-entity materialisation tests (EXTRACTED: references×1; e.g. `test_config()`)
+- `crates/keeplin-srv/tests/quotas.rs` — per-user quota enforcement tests (EXTRACTED: references×2; e.g. `quota_config()`, `spawn()`)
+- `crates/keeplin-srv/tests/reencrypt.rs` — re-encrypt pass tests (EXTRACTED: references×1; e.g. `test_config()`)
+- `crates/keeplin-srv/tests/soak.rs` — multi-instance collaborative soak/load drill (EXTRACTED: references×1; e.g. `test_config()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Every knob comes from the environment with a backward-compatible default; a fresh deployment must run with only `DATABASE_URL` + `JWT_SECRET` set.
+- A weak/placeholder `JWT_SECRET` aborts startup unless `KEEPLIN_DEV_INSECURE=1` explicitly opts into insecure local dev.
+- `0` disables every optional limit/retention knob; `HISTORY_VISIBILITY` maps `access` → `history_since_access = true`, anything else → full history.
+
 ## Related files
 
 - `.env.example` — a copy-paste starting point mirroring these keys.

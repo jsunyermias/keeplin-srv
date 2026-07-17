@@ -29,10 +29,19 @@ token), `touch_device` (last-seen).
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
 `list_notes_for_user` (owned + shared + filed in a notebook the user owns), `update_note_meta`, `soft_delete_note`.
 **Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, `set_note_owner`.
-**History** (Front D stage 2; per-entity, issue #27): `entity_history(HistoryKind, id, limit, not_before, user_scope)`
+**History** (Front D stage 2; per-entity, issue #27):
+`entity_history(HistoryKind, id, limit, not_before, authored_not_before, user_scope)`
 reads an entity's past versions newest first (`seq DESC`), matching note/notebook `Change`
 payloads by their `op` tag and snapshot id; only the envelope is inspected — snapshots stay
-opaque. `user_scope = None` reads across **all** users (per-entity history for a shared,
+opaque. Two independent lower bounds: `not_before` filters on the journal row's
+`received_at` (retention age); `authored_not_before` filters on the **payload's own causal
+timestamp** (snapshot `updated_at`, or top-level `deleted_at` for tombstones, via the
+`keeplin_try_timestamptz` safe cast from migration 0013, `COALESCE`d to `received_at` for
+legacy payloads) — this is the `HISTORY_VISIBILITY=access` collaborator window, and it must
+**never** be switched back to `received_at`: journal re-delivery (a reinstalled client
+re-pushing from epoch) mints fresh `received_at` values for pre-access content and would
+leak it (honest-client boundary; a forged `updated_at` can still cheat — SECURITY.md).
+`user_scope = None` reads across **all** users (per-entity history for a shared,
 server-materialised entity — the HTTP handler authorises read access first); `Some(user)`
 restricts to one account (a relay-only entity with no server owner/share model). Returns
 `EntityVersionRow { timestamp, device_id, entity? }` (`entity` `None` = tombstone).
@@ -75,6 +84,47 @@ Owned by the SQL migrations, documented in `migrations/*.md`:
   null clears a nullable column — the semantics `NotePatch` encodes.
 - `gc_line_tombstones` deletes long-dead lines **and** drops their ids from each note's
   `order_json`, leaving the order's version metadata untouched (compaction is not an edit).
+
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `Note` — defined here (EXTRACTED; 6 cross-file edge(s))
+- `Store` — defined here (EXTRACTED; 4 cross-file edge(s))
+- `User` — defined here (EXTRACTED; 3 cross-file edge(s))
+- `EntityVersionRow` — defined here (EXTRACTED; 3 cross-file edge(s))
+- `PageCursor` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `NoteShare` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `NotebookShare` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `Line` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `UserDevice` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `.create_email_token()` — defined here (EXTRACTED; 2 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/crypto.rs` — at-rest encryption of note titles and line content (EXTRACTED: references×2; e.g. `Cipher`)
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×90; e.g. `AppError`)
+- `crates/keeplin-srv/src/mail.rs` — delegated email delivery (mail webhook) (EXTRACTED: references×2; e.g. `MailKind`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: calls×1; e.g. `create_token()`)
+- `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×4; e.g. `deliver_event()`, `line_snapshot()`, `winner()`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: references×19; e.g. `.resolve()`, `paginated()`, `RegisterResponse`)
+- `crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: references×3; e.g. `resolve_note_access()`, `resolve_notebook_access()`)
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
+- `crates/keeplin-srv/src/sync.rs` — the device sync relay (EXTRACTED: references×1; e.g. `authenticate()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- `Store` is the only module that touches SQL and the only place the at-rest `Cipher` encrypts/decrypts (`notes.title`, `lines.content`) — no handler reads or writes those columns directly.
+- Conflict resolution is version vectors (`note_log::resolve` semantics) everywhere; a dominated write is ignored, concurrency falls to the deterministic `(updated_at, last_writer)` tiebreak.
+- Deletes are soft (tombstones kept for convergence); hard reclamation happens only in the explicit GC/purge passes.
+- `entity_history`'s access window (`authored_not_before`) filters on the payload's own `updated_at`/`deleted_at` via `keeplin_try_timestamptz`, never on `received_at`.
+- Journal pruning only removes rows already delivered to every connected device and older than the retention window; materialised tables are the source of truth.
 
 ## Related files
 

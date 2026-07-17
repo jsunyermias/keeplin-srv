@@ -34,6 +34,39 @@ Both reject with `507 Insufficient Storage` when exceeded.
 - `seed_resource` creates the metadata with an **empty** blob so the test controls the stored size
   purely through `put_blob`; the storage quota measures actual `octet_length`, not the declared size.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `spawn()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `quota_config()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `register()` — defined here (EXTRACTED; file-local)
+- `login()` — defined here (EXTRACTED; file-local)
+- `post_note()` — defined here (EXTRACTED; file-local)
+- `device()` — defined here (EXTRACTED; file-local)
+- `seed_resource()` — defined here (EXTRACTED; file-local)
+- `put_blob()` — defined here (EXTRACTED; file-local)
+- `registration_can_be_disabled()` — defined here (EXTRACTED; file-local)
+- `note_quota_blocks_creation_past_the_limit()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×2; e.g. `Config`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Quota rejections are `507` and enforced before storage: blob-storage cap (`MAX_USER_STORAGE_BYTES`) and live-note cap (`MAX_NOTES_PER_USER`).
+- `0` means unlimited and must stay the default-compatible behaviour.
+- Throwaway `#[sqlx::test]` database; real HTTP surface.
+
 ## Related files
 
 - `../src/http.rs` — where the quotas are enforced.

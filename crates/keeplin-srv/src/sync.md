@@ -58,6 +58,40 @@ binary has it stored to `resource_blobs` (backward compatibility). Failures are 
 - Journal growth is bounded by `CHANGES_RETENTION_DAYS` pruning (only rows delivered to every
   device of the user), run by the maintenance loop.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `authenticate()` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `SyncHub` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `handler()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `run_connection()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `deliver_backlog()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `relay_loop()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `handle_incoming()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `materialize()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `FanoutBatch` — defined here (EXTRACTED; file-local)
+- `FanoutMsg` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×7; e.g. `AppState`)
+- `crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×1; e.g. `UserDevice`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Relay payloads are opaque: the server never interprets keeplin-core's `Change` beyond the envelope needed for journaling and materialisation — client model changes must not require server changes.
+- `(batch_id, batch_index)` dedupes client retries; a re-sent batch must be a no-op.
+- A device never receives its own changes back (echo suppression by origin device id).
+- Journal append and materialisation must both happen for every accepted change; the materialised tables — not the journal — are the source of truth.
+
 ## Related files
 
 - `store.md` — `append_changes`, cursors, pruning, and the `upsert_*`/`delete_*` materialisation methods.

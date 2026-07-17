@@ -161,7 +161,21 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Wire-protocol version the server speaks. Bump on a breaking change to the relay/collab
 /// message shapes so a client can detect an incompatible server at connect (issues #39/#114).
+///
+/// Mirrored by `keeplin-core/src/compat.rs` (`PROTOCOL_VERSION` + `compatible_with`), which
+/// enforces it client-side at `DbBackend::new` / `CollabBackend::start`: an incompatible
+/// answer fails the client's startup loudly and no sync is attempted; a missing `/version`
+/// (old server) is a client-side warning. Bump both constants together; then bump the
+/// keeplin-core `rev` pinned in this repo's Cargo.toml and run this test suite — it drives
+/// the real client against this server, so a drift fails here, not in production.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The compatibility rule, defined once per repo and mirrored in keeplin-core's
+/// `compat::compatible_with`: exact protocol match. Capabilities (below) cover additive
+/// evolution, so a `PROTOCOL_VERSION` bump is reserved for breaking changes.
+pub fn compatible_with(client_protocol: u32) -> bool {
+    client_protocol == PROTOCOL_VERSION
+}
 
 /// Feature flags a client can probe to branch behaviour instead of guessing (e.g. skip the
 /// history endpoint on a server that lacks it). Additive: new capabilities are appended.
@@ -1274,12 +1288,15 @@ struct HistoryQuery {
 const HISTORY_DEFAULT_LIMIT: u32 = 100;
 const HISTORY_MAX_LIMIT: u32 = 10_000;
 
-/// Combine the retention age bound with an optional access-grant cutoff, then read the
-/// history. `access_cutoff` is `Some(instant)` only when the `access` visibility policy
-/// applies to this caller; the effective lower bound is the **later** (more recent) of the
-/// two. `user_scope` is `None` for a server-materialised (authorised, possibly shared) entity
-/// — per-entity history across all users — and `Some(caller)` for a relay-only entity that is
-/// private to the account.
+/// Apply the retention age bound and an optional access-grant cutoff, then read the history.
+/// The two bounds are independent filters in `Store::entity_history`: retention compares the
+/// journal row's `received_at`; `access_cutoff` — `Some(instant)` only when the `access`
+/// visibility policy applies to this caller — compares the **payload's own causal timestamp**
+/// (`updated_at`/`deleted_at`), so journal re-delivery (a reinstalled device re-pushing from
+/// epoch, which mints fresh `received_at` values) cannot slip pre-access versions into a
+/// collaborator's window. `user_scope` is `None` for a server-materialised (authorised,
+/// possibly shared) entity — per-entity history across all users — and `Some(caller)` for a
+/// relay-only entity that is private to the account.
 async fn history_versions(
     state: &AppState,
     kind: crate::store::HistoryKind,
@@ -1295,14 +1312,16 @@ async fn history_versions(
         .min(HISTORY_MAX_LIMIT);
     let retention_cutoff = (state.config.retention_days > 0)
         .then(|| chrono::Utc::now() - chrono::Duration::days(state.config.retention_days as i64));
-    let not_before = match (retention_cutoff, access_cutoff) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, None) => a,
-        (None, b) => b,
-    };
     state
         .store
-        .entity_history(kind, id, limit as i64, not_before, user_scope)
+        .entity_history(
+            kind,
+            id,
+            limit as i64,
+            retention_cutoff,
+            access_cutoff,
+            user_scope,
+        )
         .await
 }
 
@@ -1489,4 +1508,17 @@ async fn export_note(
         title: note.title,
         body,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule mirrored in keeplin-core's `compat::compatible_with`: exact match.
+    #[test]
+    fn protocol_compatibility_is_exact_match() {
+        assert!(compatible_with(PROTOCOL_VERSION));
+        assert!(!compatible_with(PROTOCOL_VERSION + 1));
+        assert!(!compatible_with(0));
+    }
 }

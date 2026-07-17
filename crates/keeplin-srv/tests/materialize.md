@@ -34,9 +34,45 @@ entities pushed over the relay become durable, queryable, version-vector-resolve
 
 ## Coverage gaps
 
-- The client-side change (uploading blobs out-of-band and stripping `data` from the relay) is
-  keeplin's; here the current client still ships the binary in the `Change`, exercising the server's
-  backward-compat path alongside the direct `PUT`/`GET` blob endpoints.
+- These tests drive the **relay-mode** client (`DbBackend` alone), whose `ResourceCreate` still
+  carries the binary inline — deliberately exercising the server's backward-compat path. The
+  **collab-mode** client (`CollabBackend`) uploads out-of-band (`upload_blob` →
+  `PUT /api/resources/:id/data`) and strips `data` from the relayed change; that path is driven
+  through the real client in `tests/collab_client_resources_e2e.rs` (blob served, journal
+  blob-free, second device downloads from the server).
+
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `test_config()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `spawn_server()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `register()` — defined here (EXTRACTED; file-local)
+- `login()` — defined here (EXTRACTED; file-local)
+- `device()` — defined here (EXTRACTED; file-local)
+- `epoch()` — defined here (EXTRACTED; file-local)
+- `push()` — defined here (EXTRACTED; file-local)
+- `get_json()` — defined here (EXTRACTED; file-local)
+- `notebook_materialises_and_is_served()` — defined here (EXTRACTED; file-local)
+- `tag_and_association_materialise()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Tests run against throwaway `#[sqlx::test]` databases with the REAL relay client (`DbBackend`), not mocks.
+- These tests cover the relay-mode inline-binary (backward-compat) path on purpose; the collab-mode out-of-band path is covered by `collab_client_resources_e2e.rs`.
+- Materialised tables — not the journal — are asserted as the source of truth (see the pruning-survival test).
 
 ## Related files
 

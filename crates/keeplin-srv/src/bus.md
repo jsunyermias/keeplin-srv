@@ -46,6 +46,33 @@ clients see).
   and heartbeat-touched; the maintenance loop sweeps rows a crashed instance left
   behind, and an instance clears its own rows on startup.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `spawn()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `run()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `handle_collab_op()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `handle_collab_presence()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `handle_sync_batch()` — defined here (EXTRACTED; 1 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: imports_from×1, references×5; e.g. `AppState`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- All cross-instance delivery (collab ops/presence, relay wakes) rides Postgres LISTEN/NOTIFY — no other broker may be introduced.
+- Events are stamped with the origin `instance_id`; an instance must ignore its own bus events (it already applied them locally).
+- The bus is at-least-once and wake-only: consumers re-read durable state from the database; a missed NOTIFY may delay but never lose data.
+
 ## Related files
 
 - `collab.md` — `deliver_event` / `deliver_presence` are the delivery entrypoints the bus calls.

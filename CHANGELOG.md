@@ -10,6 +10,41 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### 2026-07 production-readiness audit follow-up
+
+- **AT_REST_KEY re-encrypt pass**: new `keeplin-reencrypt` binary
+  (`src/reencrypt.rs`) migrates pre-key plaintext `notes.title` /
+  `lines.content` rows to `enc:v1:` — idempotent, batched, resumable,
+  live-server safe, `--dry-run`. RUNBOOK gains a "Key rotation &
+  re-encryption" section (no live rotation; key backups separate from DB
+  backups); SECURITY.md updated.
+- **Protocol handshake**: `compatible_with()` mirrored next to
+  `PROTOCOL_VERSION` in `src/http.rs` (exact match, one place per repo);
+  the pinned keeplin-core now checks `GET /version` at startup — an
+  incompatible server fails the client loudly, a missing endpoint warns
+  and continues. Bump procedure documented in the README.
+- **HISTORY_VISIBILITY=access loophole closed**: the collaborator window
+  now compares the payload's own `updated_at`/`deleted_at` (safe cast via
+  migration `0013`) instead of journal `received_at`, so a reinstalled
+  client re-pushing its journal from epoch can no longer leak pre-access
+  versions. Residual limit (client-asserted timestamps) documented in
+  SECURITY.md.
+- **Docs de-staled**: README describes the actual relay/collab split
+  (collab has landed; with `collab_api_url` note bodies ride `/api/ws`);
+  `tests/materialize.md` no longer claims the client ships binaries in
+  the `Change`. New `collab_client_resources_e2e` drives the out-of-band
+  blob path through the real client (client-side upload-race fix adopted
+  via the keeplin pin bump).
+- **`legacy/` removed**: the dead Express+Yjs prototype (with its insecure
+  default JWT secret) is deleted; git history preserves it.
+- **Graphify integration**: committed knowledge graph
+  (`graphify-out/graph.json` + `GRAPH_REPORT.md`), mandatory
+  `## Graph context` section in every companion `.md` (dependencies /
+  dependents with inline summaries + restated invariants), CI-enforced by
+  `scripts/check-docs.sh`, doc templates mirrored in `docs/templates/`,
+  and a README section on the two-layer (graph → companion docs)
+  navigation model.
+
 ### Added
 - Multi-instance soak/load drill (`tests/soak.rs`, run with `--ignored`): N concurrent
   editors across two bus-connected instances + a mid-session replica kill, asserting

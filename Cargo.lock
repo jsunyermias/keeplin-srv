@@ -1153,7 +1153,7 @@ dependencies = [
 [[package]]
 name = "keeplin-core"
 version = "0.1.0"
-source = "git+https://github.com/jsunyermias/keeplin.git?rev=ee12577187e4ac27329973964d126936e2fe81dc#ee12577187e4ac27329973964d126936e2fe81dc"
+source = "git+https://github.com/jsunyermias/keeplin.git?rev=073786fa71e4f225ec850ee4610930057ddc9277#073786fa71e4f225ec850ee4610930057ddc9277"
 dependencies = [
  "aes-gcm",
  "anyhow",

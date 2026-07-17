@@ -15,7 +15,8 @@
 //! - A stored value is tagged `enc:v1:<base64(nonce‖ciphertext)>`. Untagged
 //!   values are plaintext. Both forms decrypt correctly, so enabling the key on
 //!   a running database is safe: old rows stay readable and new writes are
-//!   encrypted (a one-off re-encrypt pass can migrate the old rows later).
+//!   encrypted. The one-off `keeplin-reencrypt` binary (`src/reencrypt.rs`)
+//!   migrates the old plaintext rows to `enc:v1:` — see RUNBOOK.md.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
@@ -23,7 +24,11 @@ use base64::Engine as _;
 
 use crate::error::AppError;
 
-const TAG: &str = "enc:v1:";
+/// Storage tag prefixing every encrypted value. Public so the re-encrypt pass
+/// (`src/reencrypt.rs`) can select the rows that still lack it (`NOT LIKE
+/// 'enc:v1:%'`) without duplicating the literal.
+pub const ENC_PREFIX: &str = "enc:v1:";
+const TAG: &str = ENC_PREFIX;
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 

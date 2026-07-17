@@ -115,7 +115,9 @@ pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<D
         .unwrap(),
     );
     let top: Arc<dyn StorageBackend> = collab.clone();
-    collab.start(top).await;
+    // `start` runs the GET /version handshake; this server is the matching
+    // keeplin-srv, so it must negotiate cleanly.
+    collab.start(top).await.expect("protocol handshake");
     collab
 }
 

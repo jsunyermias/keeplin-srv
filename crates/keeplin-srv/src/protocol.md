@@ -32,6 +32,36 @@ The client half in `keeplin/keeplin-core/src/collab/protocol.rs` must stay byte-
 - The server's `Op` includes `note_id` (a deliberate addition over the original design sketch)
   so one connection can multiplex several notes.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `LineOp` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `Cursor` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `LineSnapshot` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `NoteLinesSnapshot` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `CollabClientMsg` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `CollabServerMsg` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `.last_writer()` — defined here (EXTRACTED; file-local)
+- `PresenceInfo` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- (none in the graph) (EXTRACTED)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×7; e.g. `.broadcast()`, `touch_presence()`, `handle_msg()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Every op carries its own `vv`, `last_writer` and `updated_at`; the server resolves against current state with `note_log::resolve` — never by locking.
+- The concurrency actor in ops is the **device** id (not the user), so two devices of one user never share a vv component.
+- Wire shapes here are the collab protocol contract with keeplin-core's `collab::protocol`; a breaking change requires bumping `PROTOCOL_VERSION` on both sides.
+
 ## Related files
 
 - `collab.md` — the engine that produces/consumes these types.

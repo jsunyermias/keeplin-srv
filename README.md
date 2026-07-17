@@ -50,6 +50,19 @@ resolve against the order entity.
 
 - `GET /health` (liveness) · `GET /ready` (readiness — DB round-trip, `503` if down) · `GET /version` (protocol version + capabilities) · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
   tombstones, live sessions/connections)
+
+### Protocol versioning (`GET /version`)
+
+`/version` advertises `protocol_version` and a capability list. The keeplin client checks it
+at startup (`keeplin-core/src/compat.rs`, mirroring `PROTOCOL_VERSION` +
+`compatible_with()` in this repo's `src/http.rs`): a compatible answer is logged, an
+**incompatible** one fails the client loudly with a message naming which side to upgrade
+(no sync is attempted), and a missing `/version` (older server) is a client-side warning.
+
+**Version-bump procedure**: to adopt a newer keeplin-core, bump the pinned `rev` in
+`crates/keeplin-srv/Cargo.toml` and run this repo's test suite — it exercises the real
+client (`DbBackend`, `CollabBackend`) against this server, so a wire drift fails in CI, not
+in production. On a breaking wire change, bump `PROTOCOL_VERSION` in both repos together.
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
 - `POST /api/devices` · `GET /api/devices` · `DELETE /api/devices/:id` (revokes
@@ -74,11 +87,21 @@ resolve against the order entity.
 ## Device sync relay (`GET /api/sync`)
 
 Besides the collaborative channel, the server implements the WebSocket relay
-that keeplin-core's current `DbBackend` speaks (`{"type":"auth","token"}`
-handshake + `{"type":"changes",…}` envelopes), with a persistent journal,
-deferred catch-up via per-device cursors and retry deduplication. It syncs one
-user's devices while collaborative mode lands in the daemon. One login (one
+that keeplin-core's `DbBackend` speaks (`{"type":"auth","token"}` handshake +
+`{"type":"changes",…}` envelopes), with a persistent journal, deferred
+catch-up via per-device cursors and retry deduplication. One login (one
 token) per device.
+
+Collaborative mode has landed in the daemon (`collab/mod.rs`, `CollabBackend`,
+`collab_api_url` in `config.toml`), and the two channels split the work: with
+`collab_api_url` set, **note bodies are edited over `/api/ws`** (line ops
+against the server's materialised note state) and stop flowing through the
+relay — the client filters note `Change`s out of `/api/sync` — while
+**notebooks, tags and resource metadata keep syncing over the relay**.
+Resource *binaries* travel neither channel: they are uploaded out-of-band
+(`PUT /api/resources/:id/data`) and downloaded on demand. Without
+`collab_api_url` (relay-only mode), everything — notes included — syncs over
+`/api/sync` with end-to-end client-encrypted payloads.
 
 ### Connecting a keeplin-daemon
 
@@ -194,8 +217,31 @@ rest** in PostgreSQL with AES-256-GCM, so a database dump, stolen backup, or SQL
 read access sees ciphertext instead of note contents — it does **not** defend
 against a compromised running server. Enabling the key on an existing database is
 safe: rows written before it stay readable (they are plaintext) and new writes
-are encrypted; a one-off re-encrypt pass can migrate the old rows. **Back up the
-key** separately from the database — losing it makes encrypted notes unrecoverable.
+are encrypted; the one-off `keeplin-reencrypt` binary migrates the old rows
+(idempotent, resumable, `--dry-run` — see `RUNBOOK.md`, "Key rotation &
+re-encryption"). **Back up the key** separately from the database — losing it
+makes encrypted notes unrecoverable.
+
+## Navigating this repo (for humans and AI agents)
+
+Two navigation layers, checked in:
+
+1. **LAYER 1 — discovery: the Graphify knowledge graph.** `graphify-out/graph.json` (and the
+   readable `graphify-out/GRAPH_REPORT.md`) is a queryable graph of every symbol, file and
+   relationship. Ask it before reading code: `graphify query "which files depend on
+   store.rs?"`, `graphify path "Store" "router"`, `graphify explain "entity_history"`. After
+   large refactors, refresh it with `graphify update .` (AST-only, no API key needed).
+2. **LAYER 2 — work: the companion `.md` files.** Every `foo.rs` has a contractual `foo.md`
+   next to it, written to be **hyper self-contained**: purpose, API, invariants, and a
+   `## Graph context` section (dependencies/dependents with one-line inline summaries,
+   sourced from the graph; redundancy across companions is intentional). Agents should query
+   the graph first, then read the companion `.md` — not the raw `.rs` — whenever possible.
+
+CI enforces the contract (`scripts/check-docs.sh`): every `.rs` has a companion `.md` and
+every companion carries `## Graph context`. Doc templates live in `docs/templates/`
+(mirrored from keeplin). To enable the optional Graphify Claude Code hooks locally, copy
+`.claude/settings.example.json` to `.claude/settings.local.json` — the example is guarded so
+it no-ops for contributors without Graphify installed (`pip install graphifyy`).
 
 ## Operating in production
 

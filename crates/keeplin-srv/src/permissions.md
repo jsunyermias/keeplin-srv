@@ -83,6 +83,40 @@ each note.
   test — cheap and total-ordering-free.
 - Sharing targets a user by **email** (resolved to a `user_id` server-side) or by raw id.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `resolve_note_access()` — defined here (EXTRACTED; 13 cross-file edge(s))
+- `resolve_notebook_access()` — defined here (EXTRACTED; 8 cross-file edge(s))
+- `Access` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `Capabilities` — defined here (EXTRACTED; file-local)
+- `.from_bits()` — defined here (EXTRACTED; file-local)
+- `.empty()` — defined here (EXTRACTED; file-local)
+- `.all()` — defined here (EXTRACTED; file-local)
+- `.normalized()` — defined here (EXTRACTED; file-local)
+- `.bits()` — defined here (EXTRACTED; file-local)
+- `.contains()` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×2; e.g. `AppError`)
+- `crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×3; e.g. `Note`, `Store`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: calls×1; e.g. `handle_msg()`)
+- `crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×15, references×1; e.g. `get_note()`, `update_note()`, `delete_note()`)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Capabilities are a bitset with implied bits expanded server-side; a grant is always capped to the granter's own capabilities (no privilege escalation).
+- The owner implicitly holds every capability; shares only ever grant to non-owners.
+- `resolve_note_access` / `resolve_notebook_access` are the single choke points for read/write authorisation — handlers must not roll their own checks.
+
 ## Related files
 
 - `http.md` — REST handlers gate on `resolve_note_access` + the capability checks; the share

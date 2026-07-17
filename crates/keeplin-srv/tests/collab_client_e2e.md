@@ -37,6 +37,29 @@ throwaway PostgreSQL database (`#[sqlx::test]`). This closes the gap left by the
   correct throughout. That client-side ordering is a keeplin (`CollabBackend`) concern, tracked
   separately; this suite deliberately avoids depending on it.
 
+## Graph context
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `collab_client_writes_note_through_to_the_server()` — defined here (EXTRACTED; 2 cross-file edge(s))
+
+**Direct dependencies** (files this one's symbols reference)
+
+- `crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×2; e.g. `collab_device()`, `wait_server_body()`)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- (none in the graph) (EXTRACTED)
+
+**Invariants** (restated on purpose; a change to this file must keep these true)
+
+- Drives the REAL client stack (`CollabBackend<DbBackend>`), never a mock (repo convention #4).
+- Each e2e scenario lives in its own test binary (issue #51) — do not add scenarios to this binary.
+- Runs against a throwaway `#[sqlx::test]` PostgreSQL database.
+
 ## Related files
 
 - `../src/collab.rs` — the server side of the `/api/ws` channel.

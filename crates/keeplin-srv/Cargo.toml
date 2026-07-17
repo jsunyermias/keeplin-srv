@@ -31,8 +31,10 @@ sqlx = { version = "0.8", features = [
 # Bump process: set `rev` to the keeplin release you are adopting, then run the
 # full test suite (the materialisation path in sync.rs depends on keeplin-core's
 # `Change` model and `note_log::resolve`). When keeplin publishes git tags, prefer
-# `tag = "vX.Y.Z"` over a bare commit. This rev is keeplin main incl. the #118 create-vs-rediscovery data-loss fix.
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "ee12577187e4ac27329973964d126936e2fe81dc" }
+# `tag = "vX.Y.Z"` over a bare commit. This rev is keeplin main + the GET /version
+# protocol handshake (compat.rs; CollabBackend::start now returns Result) + the
+# out-of-band resource blob upload fix (eager metadata push before PUT).
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "073786fa71e4f225ec850ee4610930057ddc9277" }
 argon2 = "0.5"
 password-hash = "0.5"
 # At-rest encryption of note content/title (issue keeplin#110). AES-256-GCM with
