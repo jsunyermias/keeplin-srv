@@ -161,7 +161,21 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Wire-protocol version the server speaks. Bump on a breaking change to the relay/collab
 /// message shapes so a client can detect an incompatible server at connect (issues #39/#114).
+///
+/// Mirrored by `keeplin-core/src/compat.rs` (`PROTOCOL_VERSION` + `compatible_with`), which
+/// enforces it client-side at `DbBackend::new` / `CollabBackend::start`: an incompatible
+/// answer fails the client's startup loudly and no sync is attempted; a missing `/version`
+/// (old server) is a client-side warning. Bump both constants together; then bump the
+/// keeplin-core `rev` pinned in this repo's Cargo.toml and run this test suite — it drives
+/// the real client against this server, so a drift fails here, not in production.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The compatibility rule, defined once per repo and mirrored in keeplin-core's
+/// `compat::compatible_with`: exact protocol match. Capabilities (below) cover additive
+/// evolution, so a `PROTOCOL_VERSION` bump is reserved for breaking changes.
+pub fn compatible_with(client_protocol: u32) -> bool {
+    client_protocol == PROTOCOL_VERSION
+}
 
 /// Feature flags a client can probe to branch behaviour instead of guessing (e.g. skip the
 /// history endpoint on a server that lacks it). Additive: new capabilities are appended.
@@ -1489,4 +1503,17 @@ async fn export_note(
         title: note.title,
         body,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule mirrored in keeplin-core's `compat::compatible_with`: exact match.
+    #[test]
+    fn protocol_compatibility_is_exact_match() {
+        assert!(compatible_with(PROTOCOL_VERSION));
+        assert!(!compatible_with(PROTOCOL_VERSION + 1));
+        assert!(!compatible_with(0));
+    }
 }

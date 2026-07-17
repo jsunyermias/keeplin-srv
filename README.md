@@ -50,6 +50,19 @@ resolve against the order entity.
 
 - `GET /health` (liveness) · `GET /ready` (readiness — DB round-trip, `503` if down) · `GET /version` (protocol version + capabilities) · `GET /api/metrics` (aggregate counters — **auth required**: users, notes, lines,
   tombstones, live sessions/connections)
+
+### Protocol versioning (`GET /version`)
+
+`/version` advertises `protocol_version` and a capability list. The keeplin client checks it
+at startup (`keeplin-core/src/compat.rs`, mirroring `PROTOCOL_VERSION` +
+`compatible_with()` in this repo's `src/http.rs`): a compatible answer is logged, an
+**incompatible** one fails the client loudly with a message naming which side to upgrade
+(no sync is attempted), and a missing `/version` (older server) is a client-side warning.
+
+**Version-bump procedure**: to adopt a newer keeplin-core, bump the pinned `rev` in
+`crates/keeplin-srv/Cargo.toml` and run this repo's test suite — it exercises the real
+client (`DbBackend`, `CollabBackend`) against this server, so a wire drift fails in CI, not
+in production. On a breaking wire change, bump `PROTOCOL_VERSION` in both repos together.
 - `POST /api/register` — `{ email, password, display_name? }`
 - `POST /api/login` — `{ email, password, device_name }` → `{ token, device_id }`
 - `POST /api/devices` · `GET /api/devices` · `DELETE /api/devices/:id` (revokes
