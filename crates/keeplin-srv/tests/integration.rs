@@ -1296,15 +1296,14 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     assert_eq!(code, 200);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // Version 2 (after B has access). Push only this change, not the whole journal from
-    // epoch — re-sending v1 now (after the share) would make it pass the access-window
-    // filter and defeat the test.
-    let cut = chrono::Utc::now();
+    // Version 2 (after B has access). An honest client stamps `updated_at` on
+    // every edit (it is the conflict-resolution timestamp); the access window
+    // compares exactly this value against the share's grant time.
     let mut renamed = nb.clone();
     renamed.title = "v2".into();
+    renamed.updated_at = chrono::Utc::now();
     a.update_notebook(renamed).await.unwrap();
-    let only_v2 = a.get_changes_since(cut).await.unwrap();
-    a.send_changes(only_v2).await.unwrap();
+    push(&a).await;
 
     let tb = login(addr, "b@example.com", "dev-b").await;
     // B eventually sees v2 (post-access) but never v1 (pre-access).
@@ -1316,14 +1315,39 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(
-        b_versions.len(),
-        1,
-        "collaborator sees only post-access versions"
+    assert!(
+        !b_versions.is_empty() && b_versions.iter().all(|v| v["entity"]["title"] == "v2"),
+        "collaborator sees only post-access versions, got {b_versions:?}"
     );
-    assert_eq!(b_versions[0]["entity"]["title"], "v2");
 
-    // The owner still sees both versions.
-    let a_versions = notebook_history(addr, &ta, nb.id).await;
-    assert_eq!(a_versions.len(), 2, "owner sees the full history");
+    // The reinstall/re-push loophole: a client that reinstalls and re-pushes its journal
+    // from epoch creates NEW journal rows (fresh received_at) for pre-access content. The
+    // window filters on the payload's own causal `updated_at`, so the re-delivered v1 —
+    // authored before the share — must NOT leak to B.
+    push(&a).await; // the whole journal from epoch again, v1 included
+    let mut a_versions = Vec::new();
+    for _ in 0..50 {
+        // Wait until the re-pushed rows have landed: the owner's unwindowed
+        // view grows past the original two versions.
+        a_versions = notebook_history(addr, &ta, nb.id).await;
+        if a_versions.len() > 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        a_versions.len() > 2,
+        "the re-push must have journaled duplicate rows (owner sees them all)"
+    );
+    assert!(
+        a_versions.iter().any(|v| v["entity"]["title"] == "v1"),
+        "owner keeps seeing the full history, v1 included"
+    );
+
+    let b_versions = notebook_history(addr, &tb, nb.id).await;
+    assert!(
+        !b_versions.is_empty() && b_versions.iter().all(|v| v["entity"]["title"] == "v2"),
+        "re-pushing the journal from epoch after the share must not leak \
+         pre-access versions to the collaborator, got {b_versions:?}"
+    );
 }

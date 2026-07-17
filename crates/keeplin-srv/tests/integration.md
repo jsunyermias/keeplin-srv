@@ -34,6 +34,8 @@ authentication, persistence, and offline catch-up. Also covers the REST auth sur
 |---------------|----------|------------------|
 | `register_login_and_device_listing` | register/login/add device/list | 409 on dup email, 401 on bad password, 2 devices listed |
 | `history_endpoints_serve_versions_from_the_server_journal` | A pushes note create/edit/delete + a notebook rename, then queries `GET /api/{notes,notebooks}/:id/history` | versions newest-first with tombstone `entity: null`, `?limit=` caps the reply, another account sees an empty list |
+| `notebook_history_is_visible_to_shared_collaborators` | owner shares a notebook (default `creation` visibility) | the collaborator sees the owner's **full** history |
+| `history_visibility_since_access_windows_a_collaborator` | `HISTORY_VISIBILITY=access`: v1 pushed before the share, v2 after; then the owner **re-pushes the whole journal from epoch** (the reinstall scenario — fresh journal rows, fresh `received_at`, pre-access `updated_at`) | the collaborator sees only v2 both before **and after** the re-push (the window filters on the payload's own causal timestamp, so re-delivery cannot leak v1); the owner always sees everything, duplicates included |
 
 ## Fixtures and helpers
 

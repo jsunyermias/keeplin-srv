@@ -57,6 +57,15 @@ oversight. Mitigations, in order of strength:
   substitute.
 - Presence names and cursor positions of collaborators are visible to everyone
   with read access to a note (by design).
+- **`HISTORY_VISIBILITY=access` windows honest clients, not adversarial ones.**
+  The collaborator window compares the *payload's own* causal timestamp
+  (`updated_at` / `deleted_at` inside the Change) against the share's grant
+  time, so journal re-delivery (a reinstalled device re-pushing its journal
+  from epoch) can no longer leak pre-access versions. But that timestamp is
+  client-asserted: a malicious device could forge a future `updated_at` on a
+  pre-access snapshot and slip it into the window. The policy is an honest-
+  client privacy boundary, not a cryptographic one — do not rely on it against
+  a hostile account that had (or colluded with) write access.
 
 ## Reporting a vulnerability
 

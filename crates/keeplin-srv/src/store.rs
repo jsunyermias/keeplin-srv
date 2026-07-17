@@ -685,11 +685,26 @@ impl Store {
     /// History is **per-entity**, not per-user: a note edited by several collaborators has one
     /// timeline, so every user with read access sees every editor's versions (issue #27). The
     /// caller's read authorization is enforced by the HTTP handler *before* this is called;
-    /// this query matches by entity id across all users' journal rows. `not_before` bounds the
-    /// visible window — the HTTP layer sets it to the later of the retention age bound and, when
-    /// the admin selects the `access` visibility policy, the caller's access-grant time. The
-    /// payloads stay opaque: only the envelope (`op`, snapshot key, `deleted_at`) is inspected,
-    /// and the snapshot is returned verbatim (client-encrypted fields remain ciphertext).
+    /// this query matches by entity id across all users' journal rows. Two independent lower
+    /// bounds window the visible versions:
+    ///
+    /// - `not_before` compares against the journal row's `received_at` (the retention age
+    ///   bound: rows older than the retention window are on their way out anyway).
+    /// - `authored_not_before` compares against the **payload's own causal timestamp** — the
+    ///   snapshot's `updated_at` for create/update, the top-level `deleted_at` for tombstones,
+    ///   falling back to `received_at` for legacy payloads without one (the same value the
+    ///   returned `timestamp` field has always used). The HTTP layer sets it to the share's
+    ///   grant time under the `access` visibility policy. It deliberately does **not** use
+    ///   `received_at`: journal re-delivery (a reinstalled client re-pushing from epoch)
+    ///   creates fresh rows with fresh `received_at` for pre-access content, which would
+    ///   defeat the window and leak old versions to a collaborator. A forged `updated_at`
+    ///   can still cheat the window — this is an honest-client boundary (see SECURITY.md).
+    ///   The cast goes through `keeplin_try_timestamptz` (migration 0013) so one malformed
+    ///   client-supplied timestamp degrades to the fallback instead of failing every read.
+    ///
+    /// The payloads stay opaque: only the envelope (`op`, snapshot key, `deleted_at`) is
+    /// inspected, and the snapshot is returned verbatim (client-encrypted fields remain
+    /// ciphertext).
     /// `user_scope`: `None` reads the entity's history across **all** users' journal rows
     /// (per-entity history for a server-materialised, potentially shared entity — the HTTP
     /// handler has already authorised read access). `Some(user_id)` restricts to that user's
@@ -701,6 +716,7 @@ impl Store {
         entity_id: Uuid,
         limit: i64,
         not_before: Option<DateTime<Utc>>,
+        authored_not_before: Option<DateTime<Utc>>,
         user_scope: Option<Uuid>,
     ) -> Result<Vec<EntityVersionRow>, AppError> {
         let upsert_ops: Vec<String> = kind.upsert_ops().iter().map(|s| s.to_string()).collect();
@@ -712,6 +728,11 @@ impl Store {
                    OR (payload->>'op' = ANY($3) AND payload->>'id' = $1))
                  AND ($4::timestamptz IS NULL OR received_at >= $4)
                  AND ($6::uuid IS NULL OR user_id = $6)
+                 AND ($7::timestamptz IS NULL OR COALESCE(
+                        keeplin_try_timestamptz(
+                            CASE WHEN payload->>'op' = ANY($3) THEN payload->>'deleted_at'
+                                 ELSE payload->'{key}'->>'updated_at' END),
+                        received_at) >= $7)
                ORDER BY seq DESC
                LIMIT $5"#,
             key = kind.snapshot_key(),
@@ -722,6 +743,7 @@ impl Store {
         .bind(not_before)
         .bind(limit)
         .bind(user_scope)
+        .bind(authored_not_before)
         .fetch_all(&self.pool)
         .await?;
 

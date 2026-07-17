@@ -29,10 +29,19 @@ token), `touch_device` (last-seen).
 **Notes**: `create_note` (optional client id → `Conflict` on dup), `get_note`,
 `list_notes_for_user` (owned + shared + filed in a notebook the user owns), `update_note_meta`, `soft_delete_note`.
 **Shares** (capability bitset, `permissions.md`): `create_or_update_share`, `get_share`, `list_shares`, `delete_share`, `set_note_owner`.
-**History** (Front D stage 2; per-entity, issue #27): `entity_history(HistoryKind, id, limit, not_before, user_scope)`
+**History** (Front D stage 2; per-entity, issue #27):
+`entity_history(HistoryKind, id, limit, not_before, authored_not_before, user_scope)`
 reads an entity's past versions newest first (`seq DESC`), matching note/notebook `Change`
 payloads by their `op` tag and snapshot id; only the envelope is inspected — snapshots stay
-opaque. `user_scope = None` reads across **all** users (per-entity history for a shared,
+opaque. Two independent lower bounds: `not_before` filters on the journal row's
+`received_at` (retention age); `authored_not_before` filters on the **payload's own causal
+timestamp** (snapshot `updated_at`, or top-level `deleted_at` for tombstones, via the
+`keeplin_try_timestamptz` safe cast from migration 0013, `COALESCE`d to `received_at` for
+legacy payloads) — this is the `HISTORY_VISIBILITY=access` collaborator window, and it must
+**never** be switched back to `received_at`: journal re-delivery (a reinstalled client
+re-pushing from epoch) mints fresh `received_at` values for pre-access content and would
+leak it (honest-client boundary; a forged `updated_at` can still cheat — SECURITY.md).
+`user_scope = None` reads across **all** users (per-entity history for a shared,
 server-materialised entity — the HTTP handler authorises read access first); `Some(user)`
 restricts to one account (a relay-only entity with no server owner/share model). Returns
 `EntityVersionRow { timestamp, device_id, entity? }` (`entity` `None` = tombstone).

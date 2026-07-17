@@ -1288,12 +1288,15 @@ struct HistoryQuery {
 const HISTORY_DEFAULT_LIMIT: u32 = 100;
 const HISTORY_MAX_LIMIT: u32 = 10_000;
 
-/// Combine the retention age bound with an optional access-grant cutoff, then read the
-/// history. `access_cutoff` is `Some(instant)` only when the `access` visibility policy
-/// applies to this caller; the effective lower bound is the **later** (more recent) of the
-/// two. `user_scope` is `None` for a server-materialised (authorised, possibly shared) entity
-/// — per-entity history across all users — and `Some(caller)` for a relay-only entity that is
-/// private to the account.
+/// Apply the retention age bound and an optional access-grant cutoff, then read the history.
+/// The two bounds are independent filters in `Store::entity_history`: retention compares the
+/// journal row's `received_at`; `access_cutoff` — `Some(instant)` only when the `access`
+/// visibility policy applies to this caller — compares the **payload's own causal timestamp**
+/// (`updated_at`/`deleted_at`), so journal re-delivery (a reinstalled device re-pushing from
+/// epoch, which mints fresh `received_at` values) cannot slip pre-access versions into a
+/// collaborator's window. `user_scope` is `None` for a server-materialised (authorised,
+/// possibly shared) entity — per-entity history across all users — and `Some(caller)` for a
+/// relay-only entity that is private to the account.
 async fn history_versions(
     state: &AppState,
     kind: crate::store::HistoryKind,
@@ -1309,14 +1312,16 @@ async fn history_versions(
         .min(HISTORY_MAX_LIMIT);
     let retention_cutoff = (state.config.retention_days > 0)
         .then(|| chrono::Utc::now() - chrono::Duration::days(state.config.retention_days as i64));
-    let not_before = match (retention_cutoff, access_cutoff) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, None) => a,
-        (None, b) => b,
-    };
     state
         .store
-        .entity_history(kind, id, limit as i64, not_before, user_scope)
+        .entity_history(
+            kind,
+            id,
+            limit as i64,
+            retention_cutoff,
+            access_cutoff,
+            user_scope,
+        )
         .await
 }
 
