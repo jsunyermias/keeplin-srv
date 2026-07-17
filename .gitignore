@@ -18,12 +18,5 @@
 .DS_Store
 Thumbs.db
 
-# Legacy Node.js implementation
-legacy/node_modules/
-legacy/dist/
-legacy/data/
-legacy/*.tsbuildinfo
-legacy/*.log
-
 # Local clone of the Keeplin client (used for reference)
 keeplin/
