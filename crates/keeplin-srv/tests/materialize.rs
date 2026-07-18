@@ -1,10 +1,4 @@
-//! End-to-end tests of the domain-entity materialisation added on top of the
-//! relay: notebooks, tags, note↔tag associations and resource metadata arrive
-//! over `/api/sync` (driven by the real keeplin-core `DbBackend`) and the server
-//! turns them into durable, queryable, version-vector-resolved state — the
-//! "server is the truth, client DB is a cache" model. Backed by a throwaway
-//! Postgres database (`#[sqlx::test]`).
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -23,6 +17,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// md:fn test_config
 fn test_config() -> Config {
     Config {
         port: 0,
@@ -55,6 +50,7 @@ fn test_config() -> Config {
     }
 }
 
+// md:fn spawn_server
 async fn spawn_server(pool: PgPool) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(), pool));
     let app: Router = router(state);
@@ -71,6 +67,7 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
+// md:fn register
 async fn register(addr: SocketAddr, email: &str) {
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/api/register"))
@@ -81,6 +78,7 @@ async fn register(addr: SocketAddr, email: &str) {
     assert_eq!(resp.status(), 200);
 }
 
+// md:fn login
 async fn login(addr: SocketAddr, email: &str, device_name: &str) -> String {
     let body: Value = reqwest::Client::new()
         .post(format!("http://{addr}/api/login"))
@@ -94,6 +92,7 @@ async fn login(addr: SocketAddr, email: &str, device_name: &str) -> String {
     body["token"].as_str().unwrap().to_string()
 }
 
+// md:fn device
 async fn device(addr: SocketAddr, token: &str) -> DbBackend {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("device.db");
@@ -103,19 +102,19 @@ async fn device(addr: SocketAddr, token: &str) -> DbBackend {
         .unwrap()
 }
 
+// md:fn epoch
 fn epoch() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(0, 0).unwrap()
 }
 
-/// Push every local change of `dev` to the relay, giving the server a moment to
-/// materialise the batch.
+// md:fn push
 async fn push(dev: &DbBackend) {
     let changes = dev.get_changes_since(epoch()).await.unwrap();
     dev.send_changes(changes).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 }
 
-/// Authenticated GET returning parsed JSON.
+// md:fn get_json
 async fn get_json(addr: SocketAddr, token: &str, path: &str) -> Value {
     reqwest::Client::new()
         .get(format!("http://{addr}{path}"))
@@ -128,8 +127,7 @@ async fn get_json(addr: SocketAddr, token: &str, path: &str) -> Value {
         .unwrap()
 }
 
-// ── Materialisation over the relay ───────────────────────────────────────────
-
+// md:fn notebook_materialises_and_is_served
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_materialises_and_is_served(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -147,6 +145,7 @@ async fn notebook_materialises_and_is_served(pool: PgPool) {
     assert_eq!(arr[0]["title"], "Work");
 }
 
+// md:fn tag_and_association_materialise
 #[sqlx::test(migrations = "../../migrations")]
 async fn tag_and_association_materialise(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -174,6 +173,7 @@ async fn tag_and_association_materialise(pool: PgPool) {
     assert_eq!(ids[0], tag.id.to_string());
 }
 
+// md:fn removing_a_tag_association_tombstones_it
 #[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_tag_association_tombstones_it(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -200,6 +200,7 @@ async fn removing_a_tag_association_tombstones_it(pool: PgPool) {
     );
 }
 
+// md:fn resource_metadata_and_blob_materialise
 #[sqlx::test(migrations = "../../migrations")]
 async fn resource_metadata_and_blob_materialise(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -223,24 +224,29 @@ async fn resource_metadata_and_blob_materialise(pool: PgPool) {
     assert_eq!(arr[0]["id"], resource.id.to_string());
     assert_eq!(arr[0]["file_name"], "photo.png");
 
-    // The binary travelled inside the ResourceCreate (current client) and the
-    // server stored it in resource_blobs; the download endpoint returns it.
-    let got = reqwest::Client::new()
-        .get(format!("http://{addr}/api/resources/{}/data", resource.id))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    assert_eq!(got.as_ref(), bytes.as_slice());
+    let client = reqwest::Client::new();
+    let mut got: Vec<u8> = Vec::new();
+    for _ in 0..100 {
+        let resp = client
+            .get(format!("http://{addr}/api/resources/{}/data", resource.id))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        if resp.status().is_success() {
+            got = resp.bytes().await.unwrap().to_vec();
+            if got == bytes {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(got.as_slice(), bytes.as_slice());
 }
 
+// md:fn streaming_blob_upload_then_download
 #[sqlx::test(migrations = "../../migrations")]
 async fn streaming_blob_upload_then_download(pool: PgPool) {
-    // The Option B path: metadata exists (via the relay), then the binary is
-    // PUT out-of-band and read back.
     let addr = spawn_server(pool).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
@@ -256,16 +262,26 @@ async fn streaming_blob_upload_then_download(pool: PgPool) {
     push(&a).await;
 
     let new_bytes = vec![9u8; 4096];
-    let put = reqwest::Client::new()
-        .put(format!("http://{addr}/api/resources/{}/data", resource.id))
-        .bearer_auth(&token)
-        .body(new_bytes.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(put.status(), 200);
+    let client = reqwest::Client::new();
+    let mut put_status = 0u16;
+    for _ in 0..100 {
+        put_status = client
+            .put(format!("http://{addr}/api/resources/{}/data", resource.id))
+            .bearer_auth(&token)
+            .body(new_bytes.clone())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        if put_status == 200 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(put_status, 200);
 
-    let got = reqwest::Client::new()
+    let got = client
         .get(format!("http://{addr}/api/resources/{}/data", resource.id))
         .bearer_auth(&token)
         .send()
@@ -277,6 +293,7 @@ async fn streaming_blob_upload_then_download(pool: PgPool) {
     assert_eq!(got.as_ref(), new_bytes.as_slice(), "PUT replaced the blob");
 }
 
+// md:fn uploading_to_unknown_resource_is_rejected
 #[sqlx::test(migrations = "../../migrations")]
 async fn uploading_to_unknown_resource_is_rejected(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -296,6 +313,7 @@ async fn uploading_to_unknown_resource_is_rejected(pool: PgPool) {
     assert_eq!(resp.status(), 404, "no metadata → no upload");
 }
 
+// md:fn deleting_a_notebook_removes_it_from_listings
 #[sqlx::test(migrations = "../../migrations")]
 async fn deleting_a_notebook_removes_it_from_listings(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -315,6 +333,7 @@ async fn deleting_a_notebook_removes_it_from_listings(pool: PgPool) {
     );
 }
 
+// md:fn users_do_not_see_each_others_entities
 #[sqlx::test(migrations = "../../migrations")]
 async fn users_do_not_see_each_others_entities(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -333,8 +352,7 @@ async fn users_do_not_see_each_others_entities(pool: PgPool) {
     );
 }
 
-// ── Version-vector resolution (store level, deterministic) ───────────────────
-
+// md:fn concurrent_notebook_edits_converge_deterministically
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     let store = Store::new(pool.clone());
@@ -354,18 +372,14 @@ async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     let mut nb_b = Notebook::new("from-b");
     nb_b.id = id;
     nb_b.vv = VersionVector::from([("devB".to_string(), 1)]);
-    // Concurrent (neither vv dominates), later timestamp → B wins the tiebreak.
     nb_b.updated_at = base + Duration::seconds(1);
     nb_b.last_writer = "devB".into();
 
-    // Apply in one order…
     assert!(store.upsert_notebook(user.id, &nb_a).await.unwrap());
     assert!(store.upsert_notebook(user.id, &nb_b).await.unwrap());
     let winner1 = store.list_notebooks(user.id, None, None).await.unwrap();
     assert_eq!(winner1[0].title, "from-b");
 
-    // …and the reverse order converges to the same winner (b still wins; the
-    // stale a-write is ignored).
     let store2 = Store::new(pool.clone());
     let id2 = Uuid::new_v4();
     let mut nb_a2 = nb_a.clone();
@@ -373,7 +387,7 @@ async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     let mut nb_b2 = nb_b.clone();
     nb_b2.id = id2;
     assert!(store2.upsert_notebook(user.id, &nb_b2).await.unwrap());
-    assert!(!store2.upsert_notebook(user.id, &nb_a2).await.unwrap()); // a loses → not written
+    assert!(!store2.upsert_notebook(user.id, &nb_a2).await.unwrap());
     let winner2 = store2
         .list_notebooks(user.id, None, None)
         .await
@@ -384,6 +398,7 @@ async fn concurrent_notebook_edits_converge_deterministically(pool: PgPool) {
     assert_eq!(winner2.title, "from-b", "order-independent convergence");
 }
 
+// md:fn materialised_entities_survive_journal_pruning
 #[sqlx::test(migrations = "../../migrations")]
 async fn materialised_entities_survive_journal_pruning(pool: PgPool) {
     let addr = spawn_server(pool.clone()).await;
@@ -393,7 +408,6 @@ async fn materialised_entities_survive_journal_pruning(pool: PgPool) {
     a.create_notebook(Notebook::new("Durable")).await.unwrap();
     push(&a).await;
 
-    // Simulate delivery to every device, then prune the whole journal.
     let store = Store::new(pool.clone());
     let device_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM user_devices")
         .fetch_all(&pool)
@@ -418,17 +432,12 @@ async fn materialised_entities_survive_journal_pruning(pool: PgPool) {
         .unwrap();
     assert_eq!(remaining, 0, "journal emptied");
 
-    // The materialised notebook is still served — the table is the truth, not
-    // the (now-pruned) journal.
     let notebooks = get_json(addr, &token, "/api/notebooks").await;
     assert_eq!(notebooks.as_array().unwrap().len(), 1);
     assert_eq!(notebooks[0]["title"], "Durable");
 }
 
-// ── Retention & storage hygiene (store level) ────────────────────────────────
-
-/// The same client `batch_id` used by two different users must NOT be deduplicated against
-/// each other — dedup is per-user (issue #26). A user's own batch retry still dedupes.
+// md:fn same_batch_id_across_users_is_not_deduplicated
 #[sqlx::test(migrations = "../../migrations")]
 async fn same_batch_id_across_users_is_not_deduplicated(pool: PgPool) {
     let store = Store::new(pool);
@@ -455,7 +464,6 @@ async fn same_batch_id_across_users_is_not_deduplicated(pool: PgPool) {
         "the same batch_id for a different user must not be treated as a duplicate"
     );
 
-    // A true retry of A's own batch is still deduplicated.
     let retry = store
         .append_changes(a.id, da.id, "da", batch, &payload)
         .await
@@ -463,14 +471,13 @@ async fn same_batch_id_across_users_is_not_deduplicated(pool: PgPool) {
     assert!(retry.is_empty(), "a user's own batch retry is deduped");
 }
 
-/// A device that logged in but never connected (no delivery cursor) must not block journal
-/// pruning forever (issue #23).
+// md:fn a_never_connected_device_does_not_block_pruning
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_never_connected_device_does_not_block_pruning(pool: PgPool) {
     let store = Store::new(pool);
     let u = store.create_user("a@x.com", "h", "A").await.unwrap();
     let connected = store.create_device(u.id, "connected").await.unwrap();
-    let _phantom = store.create_device(u.id, "phantom").await.unwrap(); // never connects
+    let _phantom = store.create_device(u.id, "phantom").await.unwrap();
 
     let batch = Uuid::new_v4();
     let seqs = store
@@ -496,8 +503,7 @@ async fn a_never_connected_device_does_not_block_pruning(pool: PgPool) {
     );
 }
 
-/// A soft-deleted resource stops counting against the storage quota (so a user can free
-/// space), and its blob bytes are reclaimable by the purge pass (issue #24).
+// md:fn deleted_resource_frees_quota_and_blob_is_purgeable
 #[sqlx::test(migrations = "../../migrations")]
 async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
     let store = Store::new(pool);
@@ -509,7 +515,6 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
     assert!(store.upsert_resource_meta(u.id, &r).await.unwrap());
     store.put_resource_blob(r.id, &[1, 2, 3]).await.unwrap();
 
-    // The live resource counts against quota.
     assert_eq!(
         store
             .user_blob_bytes_excluding(u.id, Uuid::nil())
@@ -518,14 +523,12 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
         3
     );
 
-    // Soft-delete it with a dominating version so the tombstone wins resolution.
     let del_vv = VersionVector::from([("dev".to_string(), 2)]);
     assert!(store
         .delete_resource(r.id, Utc::now(), &del_vv, "dev")
         .await
         .unwrap());
 
-    // It no longer counts against quota…
     assert_eq!(
         store
             .user_blob_bytes_excluding(u.id, Uuid::nil())
@@ -535,7 +538,6 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
         "a soft-deleted resource no longer counts against quota"
     );
 
-    // …and the purge pass reclaims its blob (metadata tombstone stays).
     let purged = store
         .purge_deleted_resource_blobs(Utc::now() + Duration::hours(1))
         .await

@@ -1,7 +1,4 @@
-//! End-to-end tests of the collaborative line-editing protocol over a real
-//! WebSocket: Join → Welcome snapshot, op propagation between participants,
-//! deterministic conflict resolution, roles, presence, and import/export.
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +13,7 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+// md:fn test_config
 fn test_config() -> Config {
     Config {
         port: 0,
@@ -48,13 +46,12 @@ fn test_config() -> Config {
     }
 }
 
+// md:fn spawn_server
 async fn spawn_server(pool: PgPool) -> SocketAddr {
     spawn_server_with_state(pool).await.0
 }
 
-/// Spawn a server instance **with the cross-instance bus running** (issue #45).
-/// Only the multi-instance test needs it; the other tests rely on the local
-/// broadcast path, so they avoid holding a permanent `PgListener` connection.
+// md:fn spawn_instance
 async fn spawn_instance(pool: PgPool) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(), pool));
     keeplin_srv::bus::spawn(state.clone());
@@ -72,8 +69,7 @@ async fn spawn_instance(pool: PgPool) -> SocketAddr {
     addr
 }
 
-/// Like `spawn_server` but also hands back the state, for tests that poke the
-/// store directly (e.g. the tombstone GC).
+// md:fn spawn_server_with_state
 async fn spawn_server_with_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
     let state = Arc::new(AppState::new(test_config(), pool));
     let app: Router = router(state.clone());
@@ -90,8 +86,7 @@ async fn spawn_server_with_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
     (addr, state)
 }
 
-/// Register a user; returns (user_id, device_id, token) for a fresh device
-/// login. Ops must be signed with the *device* id — the vv actor.
+// md:fn user
 async fn user(addr: SocketAddr, email: &str) -> (String, String, String) {
     let client = reqwest::Client::new();
     let reg: Value = client
@@ -120,6 +115,7 @@ async fn user(addr: SocketAddr, email: &str) -> (String, String, String) {
     )
 }
 
+// md:fn create_note
 async fn create_note(addr: SocketAddr, token: &str, title: &str) -> String {
     let note: Value = reqwest::Client::new()
         .post(format!("http://{addr}/api/notes"))
@@ -134,8 +130,8 @@ async fn create_note(addr: SocketAddr, token: &str, title: &str) -> String {
     note["id"].as_str().unwrap().to_string()
 }
 
+// md:fn share
 async fn share(addr: SocketAddr, token: &str, note_id: &str, email: &str, role: &str) {
-    // Capability bits: READ=1, WRITE=2. editor = READ|WRITE, viewer = READ.
     let capabilities = match role {
         "editor" => 3,
         "viewer" => 1,
@@ -151,6 +147,7 @@ async fn share(addr: SocketAddr, token: &str, note_id: &str, email: &str, role: 
     assert_eq!(resp.status(), 200);
 }
 
+// md:fn ws_connect
 async fn ws_connect(addr: SocketAddr, token: &str) -> Ws {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws?token={token}"))
         .await
@@ -158,12 +155,12 @@ async fn ws_connect(addr: SocketAddr, token: &str) -> Ws {
     ws
 }
 
+// md:fn send
 async fn send(ws: &mut Ws, msg: Value) {
     ws.send(Message::Text(msg.to_string())).await.unwrap();
 }
 
-/// Receive JSON messages until `pred` matches (skipping presence chatter and
-/// anything else), or panic after a timeout.
+// md:fn recv_until
 async fn recv_until(ws: &mut Ws, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..50 {
         let msg = tokio::time::timeout(Duration::from_secs(3), ws.next())
@@ -181,11 +178,12 @@ async fn recv_until(ws: &mut Ws, what: &str, pred: impl Fn(&Value) -> bool) -> V
     panic!("gave up waiting for {what}");
 }
 
+// md:fn join
 fn join(note_id: &str) -> Value {
     json!({ "type": "Join", "note_id": note_id })
 }
 
-/// Build an Insert op envelope for one line.
+// md:fn insert_op
 #[allow(clippy::too_many_arguments)]
 fn insert_op(
     note_id: &str,
@@ -211,6 +209,7 @@ fn insert_op(
     })
 }
 
+// md:fn update_op
 fn update_op(
     note_id: &str,
     line_id: &str,
@@ -233,6 +232,7 @@ fn update_op(
     })
 }
 
+// md:fn export_body
 async fn export_body(addr: SocketAddr, token: &str, note_id: &str) -> String {
     let v: Value = reqwest::Client::new()
         .get(format!("http://{addr}/api/notes/{note_id}/export"))
@@ -246,11 +246,7 @@ async fn export_body(addr: SocketAddr, token: &str, note_id: &str) -> String {
     v["body"].as_str().unwrap().to_string()
 }
 
-/// Poll the export endpoint until the materialised body equals `expected`.
-/// Ops are applied asynchronously to the HTTP surface, so tests must wait for
-/// the converged state instead of sleeping a fixed amount (a fixed sleep is
-/// exactly what flakes on slow CI runners). Panics with the last seen body if
-/// convergence does not happen within ~5s.
+// md:fn wait_export
 async fn wait_export(addr: SocketAddr, token: &str, note_id: &str, expected: &str) {
     let mut last = String::new();
     for _ in 0..50 {
@@ -263,12 +259,12 @@ async fn wait_export(addr: SocketAddr, token: &str, note_id: &str, expected: &st
     panic!("body never converged to {expected:?}; last seen: {last:?}");
 }
 
+// md:Timestamps
 const T1: &str = "2026-01-01T10:00:00Z";
 const T2: &str = "2026-01-01T10:00:01Z";
 const T3: &str = "2026-01-01T10:00:02Z";
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
+// md:fn join_receives_welcome_snapshot
 #[sqlx::test(migrations = "../../migrations")]
 async fn join_receives_welcome_snapshot(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -283,11 +279,11 @@ async fn join_receives_welcome_snapshot(pool: PgPool) {
     assert_eq!(welcome["snapshot"]["order"].as_array().unwrap().len(), 0);
     assert_eq!(welcome["snapshot"]["lines"].as_array().unwrap().len(), 0);
 
-    // Presence includes ourselves.
     let presence = recv_until(&mut ws, "Presence", |v| v["type"] == "Presence").await;
     assert_eq!(presence["users"].as_array().unwrap().len(), 1);
 }
 
+// md:fn ops_propagate_between_participants
 #[sqlx::test(migrations = "../../migrations")]
 async fn ops_propagate_between_participants(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -303,7 +299,6 @@ async fn ops_propagate_between_participants(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome B", |v| v["type"] == "Welcome").await;
 
-    // A inserts a line; B must receive the op with a server_seq.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_a,
@@ -317,7 +312,6 @@ async fn ops_propagate_between_participants(pool: PgPool) {
     assert_eq!(received["op"], "Insert");
     assert_eq!(received["content"], "hola desde A");
 
-    // B updates that line, having seen A's write: vv covers both components.
     send(
         &mut ws_b,
         update_op(
@@ -334,26 +328,20 @@ async fn ops_propagate_between_participants(pool: PgPool) {
     assert_eq!(op_at_a["ops"][0]["op"], "Update");
     assert_eq!(op_at_a["ops"][0]["content"], "editada por B");
 
-    // The materialised body reflects the final state.
     assert_eq!(export_body(addr, &token_a, &note_id).await, "editada por B");
 }
 
-/// Two server instances share one database; an op applied on one instance must
-/// reach a subscriber connected to the *other* instance, and presence must merge
-/// across both — the whole point of the LISTEN/NOTIFY bus (issue #45).
+// md:fn ops_and_presence_propagate_across_instances
 #[sqlx::test(migrations = "../../migrations")]
 async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
     let addr_a = spawn_instance(pool.clone()).await;
     let addr_b = spawn_instance(pool.clone()).await;
 
-    // Accounts and the shared note are created against instance A; both live in
-    // the shared database, so instance B sees them too.
     let (uid_a, did_a, token_a) = user(addr_a, "a@example.com").await;
     let (_uid_b, did_b, token_b) = user(addr_a, "b@example.com").await;
     let note_id = create_note(addr_a, &token_a, "Cross-instance").await;
     share(addr_a, &token_a, &note_id, "b@example.com", "editor").await;
 
-    // A joins on instance A, B joins on instance B.
     let mut ws_a = ws_connect(addr_a, &token_a).await;
     let mut ws_b = ws_connect(addr_b, &token_b).await;
     send(&mut ws_a, join(&note_id)).await;
@@ -361,14 +349,11 @@ async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome B", |v| v["type"] == "Welcome").await;
 
-    // Presence merges across instances: A eventually sees both participants,
-    // even though B is connected to the other replica.
     recv_until(&mut ws_a, "merged presence", |v| {
         v["type"] == "Presence" && v["users"].as_array().map(|u| u.len()) == Some(2)
     })
     .await;
 
-    // An op on instance A reaches the subscriber on instance B via the bus.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_a,
@@ -379,7 +364,6 @@ async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
     assert_eq!(op_at_b["user_id"].as_str().unwrap(), uid_a);
     assert_eq!(op_at_b["ops"][0]["content"], "from instance A");
 
-    // And the reverse direction: B's op reaches A.
     let line_b = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
@@ -397,7 +381,6 @@ async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
     let op_at_a = recv_until(&mut ws_a, "Op at A across instances", |v| v["type"] == "Op").await;
     assert_eq!(op_at_a["ops"][0]["content"], "from instance B");
 
-    // Both replicas converge on the same materialised body.
     wait_export(
         addr_b,
         &token_b,
@@ -407,6 +390,7 @@ async fn ops_and_presence_propagate_across_instances(pool: PgPool) {
     .await;
 }
 
+// md:fn concurrent_updates_resolve_deterministically
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -422,7 +406,6 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome B", |v| v["type"] == "Welcome").await;
 
-    // A creates the line; wait until B has seen it.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_a,
@@ -431,9 +414,6 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     .await;
     recv_until(&mut ws_b, "insert at B", |v| v["type"] == "Op").await;
 
-    // Both edit concurrently from the same base ({A:1}): neither vector
-    // dominates, so the deterministic (timestamp, writer) tiebreak decides —
-    // B's edit carries the later timestamp and must win on every replica.
     send(
         &mut ws_a,
         update_op(
@@ -459,11 +439,10 @@ async fn concurrent_updates_resolve_deterministically(pool: PgPool) {
     )
     .await;
 
-    // Whichever order the server processed them in, the converged state is
-    // the same: B's edit wins the deterministic tiebreak.
     wait_export(addr, &token_a, &note_id, "versión de B").await;
 }
 
+// md:fn stale_op_is_ignored
 #[sqlx::test(migrations = "../../migrations")]
 async fn stale_op_is_ignored(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -492,7 +471,6 @@ async fn stale_op_is_ignored(pool: PgPool) {
         ),
     )
     .await;
-    // A replay of the very same update (same vv) must not regress anything.
     send(
         &mut ws,
         update_op(
@@ -506,12 +484,10 @@ async fn stale_op_is_ignored(pool: PgPool) {
     )
     .await;
 
-    // Ops on one connection apply in order, and the replay can never win its
-    // vv check (its writer component does not advance), so converging to "v2"
-    // proves the update applied and the replay was dropped.
     wait_export(addr, &token_a, &note_id, "v2").await;
 }
 
+// md:fn move_reorders_lines
 #[sqlx::test(migrations = "../../migrations")]
 async fn move_reorders_lines(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -537,7 +513,6 @@ async fn move_reorders_lines(pool: PgPool) {
     )
     .await;
 
-    // Move "tres" to the front.
     send(
         &mut ws,
         json!({
@@ -558,6 +533,7 @@ async fn move_reorders_lines(pool: PgPool) {
     wait_export(addr, &token, &note_id, "tres\nuno\ndos").await;
 }
 
+// md:fn viewer_can_watch_but_not_edit
 #[sqlx::test(migrations = "../../migrations")]
 async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -581,8 +557,7 @@ async fn viewer_can_watch_but_not_edit(pool: PgPool) {
     assert_eq!(export_body(addr, &token_b, &note_id).await, "");
 }
 
-/// Revoking a collaborator's share takes effect immediately on the live channel: a further
-/// edit is rejected without waiting for a reconnect (issue #30).
+// md:fn revoking_a_share_stops_edits_mid_session
 #[sqlx::test(migrations = "../../migrations")]
 async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -595,7 +570,6 @@ async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome", |v| v["type"] == "Welcome").await;
 
-    // B edits successfully while shared.
     let l1 = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
@@ -604,7 +578,6 @@ async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
     .await;
     wait_export(addr, &token_a, &note_id, "primera").await;
 
-    // A revokes B's share while B stays connected.
     let code = reqwest::Client::new()
         .delete(format!("http://{addr}/api/notes/{note_id}/share/{uid_b}"))
         .bearer_auth(&token_a)
@@ -614,7 +587,6 @@ async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
         .status();
     assert_eq!(code, 200);
 
-    // B's next edit is rejected immediately (no reconnect needed).
     let l2 = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
@@ -625,6 +597,7 @@ async fn revoking_a_share_stops_edits_mid_session(pool: PgPool) {
     assert_eq!(err["code"], "forbidden");
 }
 
+// md:fn outsider_cannot_join
 #[sqlx::test(migrations = "../../migrations")]
 async fn outsider_cannot_join(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -638,6 +611,7 @@ async fn outsider_cannot_join(pool: PgPool) {
     assert_eq!(err["code"], "forbidden");
 }
 
+// md:fn presence_shows_other_participants
 #[sqlx::test(migrations = "../../migrations")]
 async fn presence_shows_other_participants(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -654,7 +628,6 @@ async fn presence_shows_other_participants(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome B", |v| v["type"] == "Welcome").await;
 
-    // A must observe a presence list containing both display names.
     let presence = recv_until(&mut ws_a, "presence with both", |v| {
         v["type"] == "Presence" && v["users"].as_array().is_some_and(|u| u.len() == 2)
     })
@@ -670,7 +643,6 @@ async fn presence_shows_other_participants(pool: PgPool) {
         "{names:?}"
     );
 
-    // B sends a cursor; A sees it attached to B's presence entry.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
@@ -691,6 +663,7 @@ async fn presence_shows_other_participants(pool: PgPool) {
     assert_eq!(presence["note_id"].as_str().unwrap(), note_id);
 }
 
+// md:fn import_then_export_roundtrip
 #[sqlx::test(migrations = "../../migrations")]
 async fn import_then_export_roundtrip(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -712,7 +685,6 @@ async fn import_then_export_roundtrip(pool: PgPool) {
 
     assert_eq!(export_body(addr, &token, note_id).await, body);
 
-    // The materialised body also comes back on a plain GET (design §3.4).
     let note: Value = reqwest::Client::new()
         .get(format!("http://{addr}/api/notes/{note_id}"))
         .bearer_auth(&token)
@@ -724,7 +696,6 @@ async fn import_then_export_roundtrip(pool: PgPool) {
         .unwrap();
     assert_eq!(note["body"].as_str().unwrap(), body);
 
-    // And a Join sees the imported lines in the snapshot.
     let mut ws = ws_connect(addr, &token).await;
     send(&mut ws, join(note_id)).await;
     let welcome = recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
@@ -732,6 +703,7 @@ async fn import_then_export_roundtrip(pool: PgPool) {
     assert_eq!(welcome["snapshot"]["lines"].as_array().unwrap().len(), 4);
 }
 
+// md:fn forged_writer_is_rejected
 #[sqlx::test(migrations = "../../migrations")]
 async fn forged_writer_is_rejected(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -744,7 +716,6 @@ async fn forged_writer_is_rejected(pool: PgPool) {
     send(&mut ws_b, join(&note_id)).await;
     recv_until(&mut ws_b, "Welcome", |v| v["type"] == "Welcome").await;
 
-    // B tries to sign with A's device id — last_writer must be B's device.
     let line_id = uuid::Uuid::new_v4().to_string();
     send(
         &mut ws_b,
@@ -755,8 +726,7 @@ async fn forged_writer_is_rejected(pool: PgPool) {
     assert_eq!(err["code"], "bad_writer");
 }
 
-// ── Production hardening ─────────────────────────────────────────────────────
-
+// md:fn ws_accepts_authorization_header
 #[sqlx::test(migrations = "../../migrations")]
 async fn ws_accepts_authorization_header(pool: PgPool) {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -764,7 +734,6 @@ async fn ws_accepts_authorization_header(pool: PgPool) {
     let (_uid, _did, token) = user(addr, "a@example.com").await;
     let note_id = create_note(addr, &token, "Header").await;
 
-    // No token in the query string: only the Authorization header.
     let mut req = format!("ws://{addr}/api/ws").into_client_request().unwrap();
     req.headers_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
@@ -776,13 +745,13 @@ async fn ws_accepts_authorization_header(pool: PgPool) {
     .await;
 }
 
+// md:fn deleting_a_device_revokes_its_token
 #[sqlx::test(migrations = "../../migrations")]
 async fn deleting_a_device_revokes_its_token(pool: PgPool) {
     let addr = spawn_server(pool).await;
     let (_uid, _did, token) = user(addr, "a@example.com").await;
     let client = reqwest::Client::new();
 
-    // Register a second device with its own token.
     let second: Value = client
         .post(format!("http://{addr}/api/devices"))
         .bearer_auth(&token)
@@ -796,7 +765,6 @@ async fn deleting_a_device_revokes_its_token(pool: PgPool) {
     let second_token = second["token"].as_str().unwrap();
     let second_id = second["device_id"].as_str().unwrap();
 
-    // The second token works…
     let ok = client
         .get(format!("http://{addr}/api/devices"))
         .bearer_auth(second_token)
@@ -805,7 +773,6 @@ async fn deleting_a_device_revokes_its_token(pool: PgPool) {
         .unwrap();
     assert_eq!(ok.status(), 200);
 
-    // …until its device is revoked from the first device.
     let del = client
         .delete(format!("http://{addr}/api/devices/{second_id}"))
         .bearer_auth(&token)
@@ -823,8 +790,7 @@ async fn deleting_a_device_revokes_its_token(pool: PgPool) {
     assert_eq!(denied.status(), 401);
 }
 
-/// Deleting a device must also revoke its token on the collaborative channel, not only on
-/// REST (issue #20): `/api/ws` re-checks that the token's device still exists.
+// md:fn deleting_a_device_revokes_its_collab_token
 #[sqlx::test(migrations = "../../migrations")]
 async fn deleting_a_device_revokes_its_collab_token(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -844,7 +810,6 @@ async fn deleting_a_device_revokes_its_collab_token(pool: PgPool) {
     let second_token = second["token"].as_str().unwrap();
     let second_id = second["device_id"].as_str().unwrap();
 
-    // The second token opens a collaborative connection…
     assert!(
         tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws?token={second_token}"))
             .await
@@ -852,7 +817,6 @@ async fn deleting_a_device_revokes_its_collab_token(pool: PgPool) {
         "a live device's token must connect"
     );
 
-    // …until its device is revoked.
     let del = client
         .delete(format!("http://{addr}/api/devices/{second_id}"))
         .bearer_auth(&token)
@@ -869,6 +833,7 @@ async fn deleting_a_device_revokes_its_collab_token(pool: PgPool) {
     );
 }
 
+// md:fn gc_compacts_old_tombstones
 #[sqlx::test(migrations = "../../migrations")]
 async fn gc_compacts_old_tombstones(pool: PgPool) {
     let (addr, state) = spawn_server_with_state(pool).await;
@@ -879,8 +844,6 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     send(&mut ws, join(&note_id)).await;
     recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
 
-    // Two lines; the second is deleted with an old tombstone (T1 is months
-    // in the past, well beyond any GC window).
     let l1 = uuid::Uuid::new_v4().to_string();
     let l2 = uuid::Uuid::new_v4().to_string();
     send(&mut ws, insert_op(&note_id, &l1, None, "viva", &did, 1, T1)).await;
@@ -905,11 +868,6 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
         }),
     )
     .await;
-    // Wait for the fully-settled state — 2 lines, exactly 1 tombstoned —
-    // before running GC. Polling the exported body is ambiguous here: it reads
-    // "viva" both after the first insert (before line 2 exists) and after the
-    // delete, so a fast poll could catch the intermediate state and GC before
-    // the tombstone exists. Polling the store's line set is unambiguous.
     let note_uuid = note_id.parse().unwrap();
     let mut settled = false;
     for _ in 0..50 {
@@ -923,12 +881,10 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     }
     assert!(settled, "delete never landed as a tombstone");
 
-    // GC anything tombstoned more than 30 days ago: exactly one line.
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let reclaimed = state.store.gc_line_tombstones(cutoff).await.unwrap();
     assert_eq!(reclaimed, 1);
 
-    // The body is unchanged, the tombstone is gone from lines and order.
     assert_eq!(export_body(addr, &token, &note_id).await, "viva");
     let lines = state
         .store
@@ -945,7 +901,7 @@ async fn gc_compacts_old_tombstones(pool: PgPool) {
     assert_eq!(order.order.len(), 1);
 }
 
-/// `/version` is an unauthenticated capability/version handshake (issues #39/#114).
+// md:fn version_endpoint_advertises_capabilities
 #[sqlx::test(migrations = "../../migrations")]
 async fn version_endpoint_advertises_capabilities(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -963,8 +919,7 @@ async fn version_endpoint_advertises_capabilities(pool: PgPool) {
     assert!(caps.iter().any(|c| c == "history"), "advertises history");
 }
 
-/// `/health` is a cheap liveness stub; `/ready` does a real DB round-trip. Both are
-/// unauthenticated and not rate-limited (issue #36).
+// md:fn health_and_readiness_probes
 #[sqlx::test(migrations = "../../migrations")]
 async fn health_and_readiness_probes(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -978,7 +933,6 @@ async fn health_and_readiness_probes(pool: PgPool) {
     assert_eq!(health.status(), 200);
     assert_eq!(health.text().await.unwrap(), "ok");
 
-    // The database is up, so readiness passes with a DB round-trip.
     let ready = client
         .get(format!("http://{addr}/ready"))
         .send()
@@ -988,13 +942,13 @@ async fn health_and_readiness_probes(pool: PgPool) {
     assert_eq!(ready.text().await.unwrap(), "ready");
 }
 
+// md:fn metrics_reports_counts
 #[sqlx::test(migrations = "../../migrations")]
 async fn metrics_reports_counts(pool: PgPool) {
     let addr = spawn_server(pool).await;
     let (_uid, _did, token) = user(addr, "a@example.com").await;
     create_note(addr, &token, "Contada").await;
 
-    // Metrics now require a valid token (issue #22): anonymous access is 401.
     let anon = reqwest::Client::new()
         .get(format!("http://{addr}/api/metrics"))
         .send()
@@ -1016,7 +970,7 @@ async fn metrics_reports_counts(pool: PgPool) {
     assert!(m["collab_sessions"].as_i64().is_some());
 }
 
-/// Spawn a server whose per-IP rate limit is `per_min` requests/minute.
+// md:fn spawn_rate_limited
 async fn spawn_rate_limited(pool: PgPool, per_min: u32) -> SocketAddr {
     let mut cfg = test_config();
     cfg.rate_limit_per_min = per_min;
@@ -1035,15 +989,13 @@ async fn spawn_rate_limited(pool: PgPool, per_min: u32) -> SocketAddr {
     addr
 }
 
+// md:fn rate_limit_throttles_and_spares_health
 #[sqlx::test(migrations = "../../migrations")]
 async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
-    // Budget of 10 requests/minute from this IP (registration + login spend two).
     let addr = spawn_rate_limited(pool, 10).await;
     let (_uid, _did, token) = user(addr, "a@example.com").await;
     let client = reqwest::Client::new();
 
-    // Hammer an authenticated limited route: early requests pass the limiter (200), and once
-    // the budget is spent the limiter short-circuits with 429 before the handler runs.
     let mut got_ok = false;
     let mut got_throttled = false;
     for _ in 0..40 {
@@ -1072,7 +1024,6 @@ async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
         "burst past the budget must be throttled with 429"
     );
 
-    // /health is never rate-limited — orchestrator probes must always pass.
     for _ in 0..10 {
         let code = client
             .get(format!("http://{addr}/health"))
@@ -1084,8 +1035,7 @@ async fn rate_limit_throttles_and_spares_health(pool: PgPool) {
     }
 }
 
-// ── Capability model (Front B) ─────────────────────────────────────────────────
-
+// md:fn share_caps
 async fn share_caps(addr: SocketAddr, token: &str, note_id: &str, email: &str, caps: i32) -> u16 {
     reqwest::Client::new()
         .post(format!("http://{addr}/api/notes/{note_id}/share"))
@@ -1098,6 +1048,7 @@ async fn share_caps(addr: SocketAddr, token: &str, note_id: &str, email: &str, c
         .as_u16()
 }
 
+// md:fn note_status
 async fn note_status(addr: SocketAddr, token: &str, note_id: &str, method: &str) -> u16 {
     let http = reqwest::Client::new();
     let url = format!("http://{addr}/api/notes/{note_id}");
@@ -1115,6 +1066,7 @@ async fn note_status(addr: SocketAddr, token: &str, note_id: &str, method: &str)
         .as_u16()
 }
 
+// md:fn capability_grants_enforce_hierarchy_and_escalation
 #[sqlx::test(migrations = "../../migrations")]
 async fn capability_grants_enforce_hierarchy_and_escalation(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -1123,7 +1075,6 @@ async fn capability_grants_enforce_hierarchy_and_escalation(pool: PgPool) {
     let (_c, _dc, _token_c) = user(addr, "c@example.com").await;
     let note_id = create_note(addr, &token_a, "N").await;
 
-    // A grants B read-only (READ = 1). B can read but not write, and cannot share at all.
     assert_eq!(
         share_caps(addr, &token_a, &note_id, "b@example.com", 1).await,
         200
@@ -1136,8 +1087,6 @@ async fn capability_grants_enforce_hierarchy_and_escalation(pool: PgPool) {
         "read-only grantee has no share_write"
     );
 
-    // A upgrades B to SHARE_WRITE (8 → normalises to read|write|share_read|share_write = 15),
-    // but not MANAGE. B may now grant C up to its own caps, but not manage (escalation).
     assert_eq!(
         share_caps(addr, &token_a, &note_id, "b@example.com", 8).await,
         200
@@ -1154,6 +1103,7 @@ async fn capability_grants_enforce_hierarchy_and_escalation(pool: PgPool) {
     );
 }
 
+// md:fn ownership_transfer_moves_delete_rights
 #[sqlx::test(migrations = "../../migrations")]
 async fn ownership_transfer_moves_delete_rights(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -1161,7 +1111,6 @@ async fn ownership_transfer_moves_delete_rights(pool: PgPool) {
     let (_b, _db, token_b) = user(addr, "b@example.com").await;
     let note_id = create_note(addr, &token_a, "N").await;
 
-    // Only the owner can transfer; hand ownership to B.
     let code = reqwest::Client::new()
         .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
         .bearer_auth(&token_a)
@@ -1173,11 +1122,11 @@ async fn ownership_transfer_moves_delete_rights(pool: PgPool) {
         .as_u16();
     assert_eq!(code, 200);
 
-    // A kept no implicit access; B is the owner now.
     assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
     assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
 }
 
+// md:fn move_note
 async fn move_note(addr: SocketAddr, token: &str, note_id: &str, notebook_id: &str) {
     let code = reqwest::Client::new()
         .patch(format!("http://{addr}/api/notes/{note_id}"))
@@ -1190,6 +1139,7 @@ async fn move_note(addr: SocketAddr, token: &str, note_id: &str, notebook_id: &s
     assert_eq!(code, 200);
 }
 
+// md:fn notebook_share_cascades_to_child_notes
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
     let (addr, state) = spawn_server_with_state(pool).await;
@@ -1197,18 +1147,14 @@ async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
     let (uid_b, _db, token_b) = user(addr, "b@example.com").await;
     let owner_a = uuid::Uuid::parse_str(&uid_a).unwrap();
 
-    // A owns a notebook (materialised as if it had synced from A's device).
     let nb = keeplin_core::models::Notebook::new("NB");
     let nb_id = nb.id.to_string();
     state.store.upsert_notebook(owner_a, &nb).await.unwrap();
 
-    // A creates a note and moves it into the notebook (the move adopts the notebook's
-    // grants — currently none, so the note has no shares yet).
     let note_id = create_note(addr, &token_a, "N").await;
     move_note(addr, &token_a, &note_id, &nb_id).await;
     assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 403);
 
-    // Sharing the *notebook* with B cascades read onto the child note.
     let code = reqwest::Client::new()
         .post(format!("http://{addr}/api/notebooks/{nb_id}/share"))
         .bearer_auth(&token_a)
@@ -1223,10 +1169,8 @@ async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
         200,
         "notebook share cascaded read onto the note"
     );
-    // Read-only: B still cannot edit.
     assert_eq!(note_status(addr, &token_b, &note_id, "PATCH").await, 403);
 
-    // Revoking the notebook share re-cascades: B loses access to the note.
     let code = reqwest::Client::new()
         .delete(format!("http://{addr}/api/notebooks/{nb_id}/share/{uid_b}"))
         .bearer_auth(&token_a)
@@ -1238,6 +1182,7 @@ async fn notebook_share_cascades_to_child_notes(pool: PgPool) {
     assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 403);
 }
 
+// md:fn notebook_share_caps
 async fn notebook_share_caps(
     addr: SocketAddr,
     token: &str,
@@ -1256,6 +1201,7 @@ async fn notebook_share_caps(
         .as_u16()
 }
 
+// md:fn move_note_status
 async fn move_note_status(addr: SocketAddr, token: &str, note_id: &str, notebook_id: &str) -> u16 {
     reqwest::Client::new()
         .patch(format!("http://{addr}/api/notes/{note_id}"))
@@ -1268,9 +1214,7 @@ async fn move_note_status(addr: SocketAddr, token: &str, note_id: &str, notebook
         .as_u16()
 }
 
-/// Moving a note into a notebook makes it adopt that notebook's grants, so the mover must
-/// hold `write` on the **destination** notebook too — otherwise a note could be disclosed to
-/// (or captured by) a notebook the mover cannot even see (issue #13).
+// md:fn note_move_requires_write_on_destination_notebook
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_move_requires_write_on_destination_notebook(pool: PgPool) {
     let (addr, state) = spawn_server_with_state(pool).await;
@@ -1278,18 +1222,15 @@ async fn note_move_requires_write_on_destination_notebook(pool: PgPool) {
     let (_uid_b, _db, token_b) = user(addr, "b@example.com").await;
     let owner_a = uuid::Uuid::parse_str(&uid_a).unwrap();
 
-    // A owns a notebook; B owns a note.
     let nb = keeplin_core::models::Notebook::new("NB");
     let nb_id = nb.id.to_string();
     state.store.upsert_notebook(owner_a, &nb).await.unwrap();
     let note_id = create_note(addr, &token_b, "N").await;
 
-    // No access to the destination: the move is forbidden.
     assert_eq!(
         move_note_status(addr, &token_b, &note_id, &nb_id).await,
         403
     );
-    // Read on the destination is not enough — the bar is write.
     assert_eq!(
         notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 1).await,
         200
@@ -1298,7 +1239,6 @@ async fn note_move_requires_write_on_destination_notebook(pool: PgPool) {
         move_note_status(addr, &token_b, &note_id, &nb_id).await,
         403
     );
-    // With write on the destination the move goes through.
     assert_eq!(
         notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 2).await,
         200
@@ -1307,16 +1247,13 @@ async fn note_move_requires_write_on_destination_notebook(pool: PgPool) {
         move_note_status(addr, &token_b, &note_id, &nb_id).await,
         200
     );
-    // An unknown destination notebook is NotFound, not a silent move.
     assert_eq!(
         move_note_status(addr, &token_b, &note_id, &uuid::Uuid::new_v4().to_string()).await,
         404
     );
 }
 
-/// The notebook owner holds implicit `manage` over every note filed in their notebook (the
-/// folder-owner model, issue #15): read/write/share administration — but not delete or
-/// transfer, which stay with the note's own owner.
+// md:fn notebook_owner_can_manage_child_notes_they_do_not_own
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
     let (addr, state) = spawn_server_with_state(pool).await;
@@ -1328,7 +1265,6 @@ async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
     let nb_id = nb.id.to_string();
     state.store.upsert_notebook(owner_a, &nb).await.unwrap();
 
-    // B owns a note and files it in A's notebook (B holds write on the notebook).
     let note_id = create_note(addr, &token_b, "N").await;
     assert_eq!(
         notebook_share_caps(addr, &token_a, &nb_id, "b@example.com", 2).await,
@@ -1339,11 +1275,8 @@ async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
         200
     );
 
-    // A holds no note share (the cascade copies only `notebook_shares`, which names B), yet
-    // as the notebook owner A can read and edit the child note…
     assert_eq!(note_status(addr, &token_a, &note_id, "GET").await, 200);
     assert_eq!(note_status(addr, &token_a, &note_id, "PATCH").await, 200);
-    // …and sees it in their note listing…
     let notes: Value = reqwest::Client::new()
         .get(format!("http://{addr}/api/notes"))
         .bearer_auth(&token_a)
@@ -1361,14 +1294,11 @@ async fn notebook_owner_can_manage_child_notes_they_do_not_own(pool: PgPool) {
             .any(|n| n["id"] == note_id.as_str()),
         "notebook owner sees child notes in their listing"
     );
-    // …but cannot delete it: ownership stays with B.
     assert_eq!(note_status(addr, &token_a, &note_id, "DELETE").await, 403);
     assert_eq!(note_status(addr, &token_b, &note_id, "DELETE").await, 200);
 }
 
-/// keeplin-core models the Inbox as the nil UUID; this server models it as NULL. A PATCH
-/// with the nil UUID (what the collab client mirrors for an Inbox note) must behave as a
-/// move to the Inbox: no destination check, no cascade, shares untouched.
+// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares
 #[sqlx::test(migrations = "../../migrations")]
 async fn nil_notebook_id_patch_means_inbox_and_keeps_shares(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -1391,6 +1321,5 @@ async fn nil_notebook_id_patch_means_inbox_and_keeps_shares(pool: PgPool) {
     let note: Value = response.json().await.unwrap();
     assert!(note["notebook_id"].is_null(), "stored as NULL (the Inbox)");
     assert_eq!(note["title"], "renamed");
-    // No destructive cascade ran: B's share survives.
     assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 200);
 }

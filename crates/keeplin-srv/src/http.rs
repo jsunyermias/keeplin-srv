@@ -1,3 +1,4 @@
+// md:Overview
 use std::sync::Arc;
 
 use axum::{
@@ -20,22 +21,19 @@ use crate::{
     store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
 };
 
-/// Hard ceiling on `?limit=` so a client cannot ask for an unbounded page and
-/// defeat pagination (issue #29).
+// md:MAX_PAGE_LIMIT
 const MAX_PAGE_LIMIT: i64 = 500;
 
-/// Query string shared by the paginated list endpoints: `?limit=&cursor=`.
-/// Both are optional — omitting `limit` returns every row (back-compatible with
-/// pre-pagination clients).
+// md:ListQuery
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     limit: Option<i64>,
     cursor: Option<String>,
 }
 
+// md:impl ListQuery
 impl ListQuery {
-    /// Clamp the requested limit to `[1, MAX_PAGE_LIMIT]` (or `None` for "all")
-    /// and decode the opaque cursor, rejecting a malformed one with `400`.
+    // md:impl ListQuery > fn resolve
     fn resolve(&self) -> Result<(Option<i64>, Option<PageCursor>), AppError> {
         let limit = self.limit.map(|l| l.clamp(1, MAX_PAGE_LIMIT));
         let cursor = match self.cursor.as_deref() {
@@ -49,10 +47,7 @@ impl ListQuery {
     }
 }
 
-/// Build a list response: the JSON array (unchanged shape) plus an
-/// `X-Next-Cursor` header when a full page was returned, so a paging client
-/// knows to ask for more. When `limit` is `None` (unpaginated) or the page came
-/// back short, no header is set — the list is complete.
+// md:fn paginated
 fn paginated<T: Serialize>(
     items: Vec<T>,
     limit: Option<i64>,
@@ -71,9 +66,8 @@ fn paginated<T: Serialize>(
     resp
 }
 
+// md:fn router
 pub fn router(state: Arc<AppState>) -> Router {
-    // Resource binary upload/download carries a raised body limit (metadata and
-    // JSON routes keep axum's small default).
     let resource_data = Router::new()
         .route(
             "/api/resources/:id/data",
@@ -82,9 +76,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(state.config.max_upload_bytes));
 
     let protected = Router::new()
-        // Aggregate counters are operational data (deployment size, live activity), so they
-        // require a valid token rather than being world-readable (issue #22). Operators who
-        // want stricter isolation should bind this behind an admin network/proxy.
         .route("/api/metrics", get(metrics))
         .route(
             "/api/devices",
@@ -110,8 +101,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/notes/:id/history", get(note_history))
         .route("/api/notes/:id/export", get(export_note))
         .route("/api/import", post(import_note))
-        // Domain entities the server materialises from the relay (read side for
-        // cold rehydration / queries; writes still arrive over `/api/sync`).
         .route("/api/notebooks", get(list_notebooks))
         .route(
             "/api/notebooks/:id/share",
@@ -129,22 +118,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(resource_data)
         .layer(middleware::from_fn_with_state(state.clone(), auth::auth_mw));
 
-    // Everything except `/health` sits behind the per-IP rate limiter, so
-    // orchestrator liveness probes are never throttled.
     let limited = Router::new()
         .route("/api/register", post(register))
         .route("/api/login", post(login))
-        // Email flows (issue #49): confirmations and the reset request are
-        // unauthenticated by nature (the caller has no valid session), but
-        // rate-limited like everything else.
         .route("/api/account/verify/confirm", post(verify_confirm))
         .route("/api/account/reset/request", post(reset_request))
         .route("/api/account/reset/confirm", post(reset_confirm))
         .merge(protected)
-        // Collaborative editing channel (design §7): token in the
-        // Authorization header (preferred) or `?token=` (fallback).
         .route("/api/ws", get(crate::collab::handler))
-        // Device sync relay for keeplin-core's DbBackend.
         .route("/api/sync", get(crate::sync::handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -159,38 +140,26 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Wire-protocol version the server speaks. Bump on a breaking change to the relay/collab
-/// message shapes so a client can detect an incompatible server at connect (issues #39/#114).
-///
-/// Mirrored by `keeplin-core/src/compat.rs` (`PROTOCOL_VERSION` + `compatible_with`), which
-/// enforces it client-side at `DbBackend::new` / `CollabBackend::start`: an incompatible
-/// answer fails the client's startup loudly and no sync is attempted; a missing `/version`
-/// (old server) is a client-side warning. Bump both constants together; then bump the
-/// keeplin-core `rev` pinned in this repo's Cargo.toml and run this test suite — it drives
-/// the real client against this server, so a drift fails here, not in production.
+// md:PROTOCOL_VERSION
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// The compatibility rule, defined once per repo and mirrored in keeplin-core's
-/// `compat::compatible_with`: exact protocol match. Capabilities (below) cover additive
-/// evolution, so a `PROTOCOL_VERSION` bump is reserved for breaking changes.
+// md:fn compatible_with
 pub fn compatible_with(client_protocol: u32) -> bool {
     client_protocol == PROTOCOL_VERSION
 }
 
-/// Feature flags a client can probe to branch behaviour instead of guessing (e.g. skip the
-/// history endpoint on a server that lacks it). Additive: new capabilities are appended.
+// md:CAPABILITIES
 const CAPABILITIES: &[&str] = &[
-    "history",            // GET /api/{notes,notebooks}/:id/history
-    "history_visibility", // HISTORY_VISIBILITY policy (issue #27)
-    "resource_purge",     // server-side deleted-blob purge (issue #24)
-    "readiness",          // GET /ready (issue #36)
-    "account_management", // password change + sign-out-everywhere + deletion (issue #31)
-    "pagination",         // ?limit=&cursor= on list endpoints + X-Next-Cursor (issue #29)
-    "email_flows", // verification + password reset via the mail webhook (issue #49); 501 when unconfigured
+    "history",
+    "history_visibility",
+    "resource_purge",
+    "readiness",
+    "account_management",
+    "pagination",
+    "email_flows",
 ];
 
-/// `GET /version` — unauthenticated capability/version handshake so a client can negotiate
-/// behaviour without guessing (issues #39/#114). Never rate-limited.
+// md:fn version
 async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "name": "keeplin-srv",
@@ -200,15 +169,12 @@ async fn version() -> Json<serde_json::Value> {
     }))
 }
 
-/// Liveness: the process is up. Cheap and dependency-free, so an orchestrator never
-/// restarts a healthy process just because the database blipped. Never rate-limited.
+// md:fn health
 async fn health() -> &'static str {
     "ok"
 }
 
-/// Readiness: the process can actually serve requests — it does a lightweight database
-/// round-trip and returns `503` if the database is unreachable, so a load balancer stops
-/// routing traffic to an instance that would only error (issue #36). Never rate-limited.
+// md:fn ready
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.store.ping().await {
         Ok(()) => (axum::http::StatusCode::OK, "ready"),
@@ -222,21 +188,13 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
+// md:MetricsQuery
 #[derive(Debug, Deserialize)]
 struct MetricsQuery {
     format: Option<String>,
 }
 
-/// Aggregate operational counters: row counts plus live session/connection
-/// numbers. No per-user data. JSON by default; `?format=prometheus` renders
-/// the Prometheus text exposition format so a scraper can consume it directly
-/// (configure the scrape job with the bearer token, e.g. `authorization:
-/// credentials` in the Prometheus scrape config).
-///
-/// Note for multi-replica deployments (issue #45): the `users`/`notes`/`lines`/
-/// `line_tombstones` gauges come from the shared database and are identical on
-/// every replica; `collab_*` and `relay_live_users` are **per-instance** live
-/// gauges — scrape every replica and sum them.
+// md:fn metrics
 async fn metrics(
     State(state): State<Arc<AppState>>,
     Query(q): Query<MetricsQuery>,
@@ -284,18 +242,12 @@ async fn metrics(
     .into_response())
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
-
-/// Canonicalise an email for storage and lookup: trim surrounding whitespace and
-/// lowercase it, so `John@X.com`, `john@x.com` and `  john@x.com ` are one account
-/// and login is not case-sensitive (issue #43).
+// md:fn normalize_email
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
-/// Minimal structural check — exactly one `@`, a non-empty local part, and a
-/// dotted domain. Deliberately not RFC-complete: it only rejects input that is
-/// obviously not an email so the `email` column actually holds addresses.
+// md:fn is_valid_email
 fn is_valid_email(email: &str) -> bool {
     let mut parts = email.split('@');
     match (parts.next(), parts.next(), parts.next()) {
@@ -310,26 +262,25 @@ fn is_valid_email(email: &str) -> bool {
     }
 }
 
+// md:RegisterBody
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
     email: String,
     password: String,
-    /// Shown to other participants in collaborative sessions. Defaults to the
-    /// part of the email before the '@'.
     display_name: Option<String>,
 }
 
+// md:RegisterResponse
 #[derive(Debug, serde::Serialize)]
 struct RegisterResponse {
     user: User,
 }
 
+// md:fn register
 async fn register(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Json<RegisterResponse>, AppError> {
-    // A private/single-tenant deployment can close signups (issue #21); the open endpoint
-    // would otherwise let anyone create unlimited accounts.
     if !state.config.registration_enabled {
         return Err(AppError::Forbidden);
     }
@@ -349,9 +300,6 @@ async fn register(
         .store
         .create_user(&email, &hash, &display_name)
         .await?;
-    // Kick off email verification when delivery is configured (issue #49).
-    // Best-effort: a webhook hiccup must not fail the registration — the user
-    // can re-request via POST /api/account/verify/request.
     if state.mailer.enabled() {
         if let Err(e) = send_flow_mail(&state, &user, crate::mail::MailKind::VerifyEmail).await {
             tracing::error!(error = %e, "verification mail on register failed");
@@ -360,6 +308,7 @@ async fn register(
     Ok(Json(RegisterResponse { user }))
 }
 
+// md:LoginBody
 #[derive(Debug, Deserialize)]
 struct LoginBody {
     email: String,
@@ -367,28 +316,20 @@ struct LoginBody {
     device_name: String,
 }
 
+// md:LoginResponse
 #[derive(Debug, serde::Serialize)]
 struct LoginResponse {
-    /// Device token: paste it into keeplin-daemon's `auth_token` config field.
-    /// One login (one token) per device — the relay uses the device identity
-    /// inside the token to know what each device has already received.
     token: String,
     device_id: Uuid,
 }
 
+// md:fn login
 async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    // Normalize the same way registration does so login is case-insensitive (issue #43).
-    // Do not reject a malformed email here: an unknown address must still run the dummy
-    // hash below, or the format check would itself become an enumeration oracle (issue #32).
     let email = normalize_email(&body.email);
 
-    // Brute-force lockout: refuse before touching the password once the email has
-    // accumulated too many recent failures. DB-backed (shared across replicas) and
-    // keyed by the submitted email whether or not an account exists, so the 429 is
-    // uniform and reveals nothing about account existence.
     let lockout_enabled = state.config.login_max_failures > 0;
     if lockout_enabled && state.store.login_locked(&email).await? {
         return Err(AppError::TooManyAttempts);
@@ -410,9 +351,6 @@ async fn login(
     let user = match state.store.get_user_by_email(&email).await? {
         Some(user) => user,
         None => {
-            // Verify against a fixed dummy hash so a missing account costs the same Argon2
-            // work as a wrong password — otherwise response timing reveals which emails have
-            // accounts (issue #32). The result is discarded; the outcome is identical.
             let _ = auth::verify_password(&body.password, auth::dummy_password_hash());
             record_failure().await?;
             return Err(AppError::InvalidToken);
@@ -424,14 +362,10 @@ async fn login(
         return Err(AppError::InvalidToken);
     }
 
-    // With EMAIL_VERIFICATION_REQUIRED, an unverified account cannot log in.
-    // Checked only after the password succeeded, so this reveals nothing to a
-    // caller who does not already hold the credentials (issue #49).
     if state.config.email_verification_required && user.email_verified_at.is_none() {
         return Err(AppError::BadRequest("email not verified".into()));
     }
 
-    // A legitimate login resets the email's failure history.
     if lockout_enabled {
         state.store.clear_login_failures(&email).await?;
     }
@@ -456,13 +390,13 @@ async fn login(
     }))
 }
 
-// ── Devices ──────────────────────────────────────────────────────────────────
-
+// md:CreateDeviceBody
 #[derive(Debug, Deserialize)]
 struct CreateDeviceBody {
     device_name: String,
 }
 
+// md:CreateDeviceResponse
 #[derive(Debug, serde::Serialize)]
 struct CreateDeviceResponse {
     token: String,
@@ -470,8 +404,7 @@ struct CreateDeviceResponse {
     device_name: String,
 }
 
-/// Register an additional device for the authenticated user and return its
-/// own token (equivalent to a fresh login without re-sending the password).
+// md:fn create_device
 async fn create_device(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -496,8 +429,7 @@ async fn create_device(
     }))
 }
 
-/// Revoke one of the caller's devices. Its token stops working immediately
-/// on REST and on both WebSocket channels.
+// md:fn delete_device
 async fn delete_device(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -509,6 +441,7 @@ async fn delete_device(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:fn list_devices
 async fn list_devices(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -517,8 +450,7 @@ async fn list_devices(
     Ok(Json(devices))
 }
 
-/// Revoke **all** of the caller's devices — "sign out everywhere" (issue #31). Every token,
-/// including the caller's current one, stops working immediately.
+// md:fn delete_all_devices
 async fn delete_all_devices(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -527,15 +459,14 @@ async fn delete_all_devices(
     Ok(Json(serde_json::json!({ "ok": true, "revoked": removed })))
 }
 
+// md:ChangePasswordBody
 #[derive(Debug, Deserialize)]
 struct ChangePasswordBody {
     current_password: String,
     new_password: String,
 }
 
-/// `POST /api/account/password` — change the caller's password (issue #31). Requires the
-/// current password. Existing device tokens remain valid (they are JWTs); call
-/// `DELETE /api/devices` afterwards to also sign out everywhere.
+// md:fn change_password
 async fn change_password(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -557,15 +488,13 @@ async fn change_password(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:DeleteAccountBody
 #[derive(Debug, Deserialize)]
 struct DeleteAccountBody {
     password: String,
 }
 
-/// `DELETE /api/account` — permanently delete the caller's account and everything it
-/// owns (devices, notes, notebooks, tags, resources, shares, journal) (issue #31). The
-/// current password is required as a confirmation; the deletion cascades in the database,
-/// so it is irreversible.
+// md:fn delete_account
 async fn delete_account(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -583,12 +512,7 @@ async fn delete_account(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// ── Email flows: verification + password reset (issue #49) ───────────────────
-//
-// Delivery is delegated to the operator's mail webhook (`mail.rs`) — keeplin
-// never speaks SMTP. Without MAIL_WEBHOOK_URL the request endpoints answer 501.
-
-/// Mint a token for `user` and hand it to the mail webhook.
+// md:fn send_flow_mail
 async fn send_flow_mail(
     state: &AppState,
     user: &User,
@@ -605,8 +529,7 @@ async fn send_flow_mail(
         .map_err(AppError::Internal)
 }
 
-/// `POST /api/account/verify/request` — (re)send the caller's verification
-/// email. `501` when no mail webhook is configured.
+// md:fn verify_request
 async fn verify_request(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -630,13 +553,13 @@ async fn verify_request(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:TokenBody
 #[derive(Debug, Deserialize)]
 struct TokenBody {
     token: String,
 }
 
-/// `POST /api/account/verify/confirm` — unauthenticated: the token *is* the
-/// proof. Stamps `email_verified_at`; `400` for an unknown/expired/used token.
+// md:fn verify_confirm
 async fn verify_confirm(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TokenBody>,
@@ -650,15 +573,13 @@ async fn verify_confirm(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:ResetRequestBody
 #[derive(Debug, Deserialize)]
 struct ResetRequestBody {
     email: String,
 }
 
-/// `POST /api/account/reset/request` — start a password reset. Answers a
-/// uniform `200` whether or not the account exists (no existence oracle, #32);
-/// even a webhook delivery failure is logged, not surfaced, for the same
-/// reason. `501` when no mail webhook is configured.
+// md:fn reset_request
 async fn reset_request(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ResetRequestBody>,
@@ -677,15 +598,14 @@ async fn reset_request(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:ResetConfirmBody
 #[derive(Debug, Deserialize)]
 struct ResetConfirmBody {
     token: String,
     new_password: String,
 }
 
-/// `POST /api/account/reset/confirm` — finish a password reset: set the new
-/// password, revoke **every** device (sign out everywhere — the reset may mean
-/// the old credential was compromised), and clear the login-lockout counter.
+// md:fn reset_confirm
 async fn reset_confirm(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ResetConfirmBody>,
@@ -707,9 +627,7 @@ async fn reset_confirm(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// ── Domain entities (server = source of truth; client DB is a cache) ─────────
-
-/// Live notebooks of the authenticated user, for cold rehydration.
+// md:fn list_notebooks
 async fn list_notebooks(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -725,7 +643,7 @@ async fn list_notebooks(
     }))
 }
 
-/// Live tags of the authenticated user.
+// md:fn list_tags
 async fn list_tags(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -738,8 +656,7 @@ async fn list_tags(
     }))
 }
 
-/// Live resource metadata of the authenticated user. Binaries are fetched
-/// separately via `GET /api/resources/:id/data`.
+// md:fn list_resources
 async fn list_resources(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -755,7 +672,7 @@ async fn list_resources(
     }))
 }
 
-/// Live tag ids attached to a note.
+// md:fn list_note_tags
 async fn list_note_tags(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -766,9 +683,7 @@ async fn list_note_tags(
     ))
 }
 
-/// Download a resource's binary payload. The bytes are opaque (encrypted by the
-/// client), so the content type is generic; the client already has the real
-/// MIME type from the resource metadata.
+// md:fn get_resource_data
 async fn get_resource_data(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -785,9 +700,7 @@ async fn get_resource_data(
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], data))
 }
 
-/// Upload (or replace) a resource's binary payload out-of-band. The resource
-/// metadata must already exist for this user (it arrives over `/api/sync`); the
-/// body is the raw bytes, capped by `MAX_UPLOAD_BYTES`.
+// md:fn put_resource_data
 async fn put_resource_data(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -799,8 +712,6 @@ async fn put_resource_data(
     }
     let limit = state.config.max_user_storage_bytes;
     if limit > 0 {
-        // Count every other blob of this user plus the incoming one; replacing
-        // a resource's blob is measured by its new size, not double-counted.
         let others = state
             .store
             .user_blob_bytes_excluding(user.user_id, id)
@@ -815,10 +726,7 @@ async fn put_resource_data(
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
 
-// ── Notes ────────────────────────────────────────────────────────────────────
-
-/// Materialise a note's body for non-collaborative reads (design §3.4): the
-/// live lines, in order, joined with '\n'.
+// md:fn materialize_body
 async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, AppError> {
     let order = state
         .store
@@ -835,9 +743,6 @@ async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, App
         .map(|line| line.content.as_str())
         .collect();
 
-    // Refuse to build a pathologically large body in memory (issue #44). The
-    // collab line limits permit a note up to ~1 GB; measure the joined size
-    // first and bail with 413 rather than allocating it. `0` disables the cap.
     let cap = state.config.max_note_body_bytes;
     if cap > 0 {
         let separators = live.len().saturating_sub(1);
@@ -852,6 +757,7 @@ async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, App
     Ok(live.join("\n"))
 }
 
+// md:NoteResponse
 #[derive(Debug, serde::Serialize)]
 struct NoteResponse {
     #[serde(flatten)]
@@ -859,19 +765,20 @@ struct NoteResponse {
     body: String,
 }
 
+// md:CreateNoteBody
 #[derive(Debug, Deserialize)]
 struct CreateNoteBody {
-    /// Optional client-supplied id, so a daemon uploading a local note keeps
-    /// the same note id on the server. 409 if it already exists.
     id: Option<Uuid>,
     #[serde(default = "default_title")]
     title: String,
 }
 
+// md:fn default_title
 fn default_title() -> String {
     "Untitled note".into()
 }
 
+// md:fn create_note
 async fn create_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -893,6 +800,7 @@ async fn create_note(
     Ok(Json(note))
 }
 
+// md:fn list_notes
 async fn list_notes(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -908,6 +816,7 @@ async fn list_notes(
     }))
 }
 
+// md:fn get_note
 async fn get_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -922,8 +831,7 @@ async fn get_note(
     Ok(Json(NoteResponse { note, body }))
 }
 
-/// Deserialize a present field (even an explicit `null`) as `Some(value)`,
-/// so `PATCH` can distinguish "leave unchanged" (absent) from "clear" (null).
+// md:fn present
 fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -932,6 +840,7 @@ where
     T::deserialize(de).map(Some)
 }
 
+// md:UpdateNoteBody
 #[derive(Debug, Deserialize)]
 struct UpdateNoteBody {
     title: Option<String>,
@@ -944,6 +853,7 @@ struct UpdateNoteBody {
     todo_completed: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
+// md:fn update_note
 async fn update_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -955,10 +865,6 @@ async fn update_note(
     if !access.can_write() {
         return Err(AppError::Forbidden);
     }
-    // keeplin-core models the Inbox as the nil UUID (`ordering::INBOX_ID`); this server
-    // models it as NULL. Map nil → NULL so a client mirroring an Inbox note performs a
-    // move *out* of any notebook (shares untouched) instead of naming a notebook that
-    // cannot exist — which would 404 on the destination check below.
     let notebook_id = match body.notebook_id {
         Some(Some(nb)) if nb.is_nil() => Some(None),
         other => other,
@@ -971,16 +877,9 @@ async fn update_note(
         todo_completed: body.todo_completed,
     };
     let moved_into = match &patch.notebook_id {
-        // A move into a real notebook adopts that notebook's grants (destructive cascade).
-        // A move to the Inbox (null) leaves the note's own shares untouched.
         Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
         _ => None,
     };
-    // A move adopts the destination notebook's grants (destructive cascade), which both
-    // discloses the note to that notebook's members and replaces the note's own shares.
-    // So the mover needs `write` on the destination notebook too, not just on the note;
-    // an unknown destination is `NotFound`. Moving *out* (to the Inbox) needs no
-    // destination check.
     if let Some(nb) = moved_into {
         let nb_access = resolve_notebook_access(&state.store, nb, user.user_id).await?;
         if !nb_access.can_write() {
@@ -998,6 +897,7 @@ async fn update_note(
     Ok(Json(note))
 }
 
+// md:fn delete_note
 async fn delete_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1005,7 +905,6 @@ async fn delete_note(
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
     let access = resolve_note_access(&state.store, &note, user.user_id).await?;
-    // Only the owner may delete the note (design §9.3).
     if !access.can_delete() {
         return Err(AppError::Forbidden);
     }
@@ -1017,18 +916,15 @@ async fn delete_note(
     Ok(Json(note))
 }
 
-// ── Shares ───────────────────────────────────────────────────────────────────
-
+// md:CreateShareBody
 #[derive(Debug, Deserialize)]
 struct CreateShareBody {
-    /// Either the target user's id or their email must be provided.
     user_id: Option<Uuid>,
     user_email: Option<String>,
-    /// The capability bitmask to grant (see `permissions::Capabilities`). Implied bits are
-    /// expanded server-side, and the grant is capped to the granter's own capabilities.
     capabilities: i32,
 }
 
+// md:fn create_share
 async fn create_share(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1046,7 +942,6 @@ async fn create_share(
             "capabilities must be non-empty".into(),
         ));
     }
-    // No privilege escalation: you cannot grant a capability you do not hold yourself.
     if requested.bits() & access.caps.bits() != requested.bits() {
         return Err(AppError::Forbidden);
     }
@@ -1075,6 +970,7 @@ async fn create_share(
     Ok(Json(share))
 }
 
+// md:fn list_shares
 async fn list_shares(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1088,6 +984,7 @@ async fn list_shares(
     Ok(Json(state.store.list_shares(id).await?))
 }
 
+// md:fn delete_share
 async fn delete_share(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1099,7 +996,6 @@ async fn delete_share(
         .await?
         .ok_or(AppError::NotFound)?;
     let access = resolve_note_access(&state.store, &note, user.user_id).await?;
-    // A `share_write` grantee can revoke anyone; anyone can remove themselves.
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
@@ -1107,16 +1003,14 @@ async fn delete_share(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// md:TransferBody
 #[derive(Debug, Deserialize)]
 struct TransferBody {
-    /// The new owner, by id or email.
     user_id: Option<Uuid>,
     user_email: Option<String>,
 }
 
-/// `POST /api/notes/:id/transfer` — hand ownership to another user. Owner-only; ownership is
-/// separate from the capability grants and survives the transfer (the old owner keeps no
-/// implicit access unless separately shared).
+// md:fn transfer_ownership
 async fn transfer_ownership(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1143,7 +1037,6 @@ async fn transfer_ownership(
         }
     }
     .ok_or(AppError::NotFound)?;
-    // The new owner no longer needs a share row; drop any so their access is unambiguous.
     state.store.delete_share(id, target.id).await?;
     let note = state
         .store
@@ -1153,9 +1046,7 @@ async fn transfer_ownership(
     Ok(Json(note))
 }
 
-// ── Notebook permissions (Front B stage 1b) ─────────────────────────────────────
-
-/// Resolve a share/transfer target from `{user_id | user_email}` to a `User`.
+// md:fn resolve_target
 async fn resolve_target(
     state: &AppState,
     user_id: Option<Uuid>,
@@ -1178,6 +1069,7 @@ async fn resolve_target(
     .ok_or(AppError::NotFound)
 }
 
+// md:fn create_notebook_share
 async fn create_notebook_share(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1206,7 +1098,6 @@ async fn create_notebook_share(
     if target.id == owner {
         return Err(AppError::BadRequest("owner already has access".into()));
     }
-    // The share write cascades onto the notebook's notes inside the store call.
     let share = state
         .store
         .create_or_update_notebook_share(id, target.id, requested.bits())
@@ -1214,6 +1105,7 @@ async fn create_notebook_share(
     Ok(Json(share))
 }
 
+// md:fn list_notebook_shares
 async fn list_notebook_shares(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1226,6 +1118,7 @@ async fn list_notebook_shares(
     Ok(Json(state.store.list_notebook_shares(id).await?))
 }
 
+// md:fn delete_notebook_share
 async fn delete_notebook_share(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1235,7 +1128,6 @@ async fn delete_notebook_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    // Revocation re-cascades to the notebook's notes inside the store call.
     state
         .store
         .delete_notebook_share(notebook_id, target_id)
@@ -1243,8 +1135,7 @@ async fn delete_notebook_share(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// `POST /api/notebooks/:id/transfer` — hand notebook ownership to another user (owner-only),
-/// then re-cascade the notebook's grants so child notes reflect the new profile.
+// md:fn transfer_notebook
 async fn transfer_notebook(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1267,36 +1158,17 @@ async fn transfer_notebook(
     ))
 }
 
-// ── History (Front D stage 2; per-note, issue #27) ───────────────────────────
-//
-// The server journal is the durable, cross-device change record; these endpoints expose it
-// as version history so a fresh device (whose local journal is empty) can still show and
-// revert through past versions. History is **per-entity**: a note has one timeline, so every
-// user with read access sees every collaborator's edits (issue #27). The caller's read
-// authorization is checked here before any history is read. The admin-selected
-// `HISTORY_VISIBILITY` policy optionally windows a *collaborator's* view to versions from when
-// they were granted access (the owner always sees the full history). Snapshots are returned
-// exactly as pushed: client-encrypted fields stay ciphertext and are decrypted client-side.
-
-/// `?limit=` — version-count cap. Defaults to 100, hard-capped at 10 000 (the client's
-/// revert scan bound).
+// md:HistoryQuery
 #[derive(Debug, Deserialize)]
 struct HistoryQuery {
     limit: Option<u32>,
 }
 
+// md:History limits
 const HISTORY_DEFAULT_LIMIT: u32 = 100;
 const HISTORY_MAX_LIMIT: u32 = 10_000;
 
-/// Apply the retention age bound and an optional access-grant cutoff, then read the history.
-/// The two bounds are independent filters in `Store::entity_history`: retention compares the
-/// journal row's `received_at`; `access_cutoff` — `Some(instant)` only when the `access`
-/// visibility policy applies to this caller — compares the **payload's own causal timestamp**
-/// (`updated_at`/`deleted_at`), so journal re-delivery (a reinstalled device re-pushing from
-/// epoch, which mints fresh `received_at` values) cannot slip pre-access versions into a
-/// collaborator's window. `user_scope` is `None` for a server-materialised (authorised,
-/// possibly shared) entity — per-entity history across all users — and `Some(caller)` for a
-/// relay-only entity that is private to the account.
+// md:fn history_versions
 async fn history_versions(
     state: &AppState,
     kind: crate::store::HistoryKind,
@@ -1325,8 +1197,7 @@ async fn history_versions(
         .await
 }
 
-/// The visibility cutoff for a collaborator under the `access` policy: `Some(share.created_at)`
-/// when the policy is on and the caller is a non-owner grantee, else `None` (full history).
+// md:fn access_cutoff
 fn access_cutoff(
     state: &AppState,
     access: &crate::permissions::Access,
@@ -1339,10 +1210,7 @@ fn access_cutoff(
     }
 }
 
-/// `GET /api/notes/:id/history` — past versions of a note, newest first. For a
-/// server-materialised note this is **per-note**: every user with read access sees every
-/// collaborator's edits (issue #27). A relay-only note (no server-side `notes` row, hence no
-/// owner/share model) is private to the account and read from the caller's own journal.
+// md:fn note_history
 async fn note_history(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1369,7 +1237,6 @@ async fn note_history(
                 .await?,
             ))
         }
-        // No server-side note entity: private to this account, read per-user.
         None => Ok(Json(
             history_versions(
                 &state,
@@ -1384,17 +1251,13 @@ async fn note_history(
     }
 }
 
-/// `GET /api/notebooks/:id/history` — past versions of a notebook. Per-notebook for a
-/// materialised notebook (all users with access see every edit); per-user otherwise. See
-/// [`note_history`].
+// md:fn notebook_history
 async fn notebook_history(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
     Path(id): Path<Uuid>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
-    // A materialised notebook has an owner row; resolve access against it. If it is not
-    // materialised, fall back to the caller's own journal (private, per-user).
     if state.store.notebook_owner(id).await?.is_some() {
         let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
         if !access.can_read() {
@@ -1428,23 +1291,21 @@ async fn notebook_history(
     }
 }
 
-// ── Import / export (design §10) ─────────────────────────────────────────────
-
+// md:ImportBody
 #[derive(Debug, Deserialize)]
 struct ImportBody {
     title: String,
     body: String,
 }
 
+// md:ImportResponse
 #[derive(Debug, serde::Serialize)]
 struct ImportResponse {
     note_id: Uuid,
     line_count: usize,
 }
 
-/// Offline → server migration for one note: split the flat body on '\n' into
-/// one versioned line per row, seeding each line's vector with the importer's
-/// component.
+// md:fn import_note
 async fn import_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1454,7 +1315,6 @@ async fn import_note(
         .store
         .create_note(None, &body.title, user.user_id)
         .await?;
-    // The vv actor is the device, same as ops on the collaborative channel.
     let writer = user.device_id.to_string();
     let now = chrono::Utc::now();
     let lines: Vec<&str> = body.body.split('\n').collect();
@@ -1484,6 +1344,7 @@ async fn import_note(
     }))
 }
 
+// md:ExportResponse
 #[derive(Debug, serde::Serialize)]
 struct ExportResponse {
     id: Uuid,
@@ -1491,7 +1352,7 @@ struct ExportResponse {
     body: String,
 }
 
-/// Server → offline migration for one note: the live lines joined with '\n'.
+// md:fn export_note
 async fn export_note(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
@@ -1510,11 +1371,12 @@ async fn export_note(
     }))
 }
 
+// md:mod tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The rule mirrored in keeplin-core's `compat::compatible_with`: exact match.
+    // md:mod tests > fn protocol_compatibility_is_exact_match
     #[test]
     fn protocol_compatibility_is_exact_match() {
         assert!(compatible_with(PROTOCOL_VERSION));
