@@ -524,6 +524,35 @@ deployments, applied batches are also written to the `collab_events` outbox
 
 ---
 
+## Graph context
+
+Repo-tooling metadata, not a code block (no marker in the source). Kept in every
+companion because CI (`scripts/check-docs.sh`) enforces it: this file is LAYER 2 of the
+navigation model, the Graphify graph (`graphify-out/graph.json`) is LAYER 1; refresh with
+`graphify update .` after refactors.
+
+<!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
+     EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
+
+**Nodes/edges this file contributes** (top symbols by cross-file degree)
+
+- `LineOp` — defined here (EXTRACTED; 2 cross-file edge(s))
+- `Cursor` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `LineSnapshot` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `NoteLinesSnapshot` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `CollabClientMsg` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `CollabServerMsg` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `.last_writer()` — defined here (EXTRACTED; file-local)
+- `PresenceInfo` — defined here (EXTRACTED; file-local)
+
+**Direct dependencies** (files this one's symbols reference)
+
+- (none in the graph) (EXTRACTED)
+
+**Direct dependents** (files whose symbols reference this one)
+
+- `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×7; e.g. `.broadcast()`, `touch_presence()`, `handle_msg()`)
+
 ## Coverage checklist
 
 Every code block of `protocol.rs`, in source order, each documented above (five points)
