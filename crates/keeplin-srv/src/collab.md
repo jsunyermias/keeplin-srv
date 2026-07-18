@@ -1,81 +1,835 @@
 # `collab.rs` — the collaborative session engine
 
-## Purpose
+Self-contained companion for `crates/keeplin-srv/src/collab.rs`. It documents **every code
+block of the source file, in source order** — a reader with only this file must be able to
+understand `collab.rs` without opening anything else, so project-wide conventions are
+deliberately re-explained here (hyper-redundancy is intended).
 
-Implements `GET /api/ws`, the real-time line-editing channel (design §7). It is the **broker
-and durable source of truth**: it authenticates a connection, tracks per-note live sessions
-and presence, validates and resolves each incoming `LineOp` against current state, persists
-it, and fans the applied ops out to the note's other subscribers with a monotonic
-`server_seq`. Clients rebuild from a `Welcome` snapshot on connect — there is no infinite op
-log.
+**How to navigate**: every block in `collab.rs` carries exactly one marker comment of the
+form `// md:<Header> > … > <Block header>`, whose path is the header chain of the section
+documenting it here (starting below the file title). Grep the marker text to jump
+code → doc; grep the section's block name (or the marker path) in the `.rs` to jump
+doc → code. Each block section covers five fixed points: **Identification**,
+**What it does**, **Dependencies**, **Used by**, **Repeated context**.
 
-## Key types
+---
 
-| Type | Kind | Description |
-|------|------|-------------|
-| `CollabRegistry` | struct | all live sessions, keyed by note id; lives in `AppState` |
-| `CollabSession` | struct | one note's live session: subscribers, presence, an apply lock, a `server_seq` counter |
-| `Subscriber` | struct | one connection: user id, display name, cursor, an outbound channel |
-| `OpOutcome` | enum | `Applied(op)` / `Ignored` / `Invalid{code,message}` — the result of resolving one op |
+## Overview
 
-## Connection flow
+**Identification** — file-level block: the module's imports. Marker `// md:Overview` at
+the top of the file.
 
+```rust
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::{ /* ws types, Query, State, HeaderMap, Response */ };
+use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
+use keeplin_core::storage::note_log::{resolve, VersionVector, Winner};
+use tokio::sync::{mpsc, Mutex, RwLock};
+use uuid::Uuid;
+
+use crate::{auth, error::AppError, permissions::resolve_note_access,
+    protocol::{CollabClientMsg, CollabServerMsg, Cursor, LineOp, LineSnapshot,
+               NoteLinesSnapshot, PresenceInfo},
+    state::AppState, store::Line};
 ```
-handler → authenticate (token from Authorization header or ?token=; device must still exist)
-        → run_connection:
-            join session, send Welcome snapshot
-            select loop:
-              client frame → handle_msg (Join / Op / Cursor / Leave / Ack)
-              — Op: apply_op per op under the session lock → broadcast applied ops (server_seq++)
-            on disconnect: remove subscriber, broadcast presence, drop empty session
+
+**What it does** — The collaborative-editing engine behind `GET /api/ws` (design §7):
+per-note live sessions, presence, and the application of `LineOp`s against the
+versioned line + order entities. The server is the **broker and durable source of
+truth** (design §2.4): it validates each operation, resolves it against current state
+with keeplin-core's `note_log::resolve`, persists it, and fans the applied ops out to
+the note's other subscribers with a monotonically increasing `server_seq`. Clients are
+stateful: they keep their own copy and rebuild from the `Welcome` snapshot on
+(re)connect — **there is no infinite op log**.
+
+Conflict rules (design §5): per **line**, `resolve(local, incoming)` — the op is
+applied iff the incoming write wins (causally newer by version vector, or concurrent
+and winning the deterministic `(timestamp, writer)` tiebreak); a dominated op is
+silently ignored. Per **order** (`Insert`/`Move`), the same resolution against the
+note's order entity; an applied op merges its vector into the order's. **No locks
+anywhere for conflict resolution** — the in-process and advisory locks below serialise
+*application*, never decide *winners*.
+
+**Dependencies** — external: `axum` (WS upgrade, extractors), `tokio` (`mpsc`,
+`Mutex`, `RwLock`, atomics, time), `futures_util` (socket split),
+`keeplin_core::storage::note_log::{resolve, VersionVector, Winner}` (client repo, the
+shared resolution function), `serde_json`, `chrono`, `uuid`, `tracing`. Internal:
+`auth::verify_token` (`auth.rs`), `AppError` (`error.rs`), `resolve_note_access`
+(`permissions.rs`), the wire types (`protocol.rs`), `AppState` (`state.rs`), and the
+line/order/presence/outbox methods of `store.rs`.
+
+**Used by** — `http.rs` routes `GET /api/ws` to `handler`; `state.rs` holds the
+`CollabRegistry`; `bus.rs` calls `deliver_event` / `deliver_presence`;
+`http.rs::metrics` reads `CollabRegistry::stats`. Exercised by `tests/collab.rs`
+(raw-JSON protocol tests), the three `collab_client_*_e2e` tests (real keeplin-core
+client), and `tests/soak.rs` (multi-instance drill).
+
+**Repeated context** — The device-as-actor rule: ops are signed with the JWT's
+**device id** (`last_writer` + vv components); presence is **user**-scoped. Snapshot
+rebuild is the universal recovery path (lag, drop, reconnect, missed bus event). All
+durable state is PostgreSQL rows (lines, `note_line_order`, presence table,
+`collab_events` outbox); everything in this module's memory is per-instance and
+rebuildable — which is what makes the multi-replica model (issue #45) sound.
+
+---
+
+## Constants
+
+**Identification** — logical section: the six tuning constants; marker
+`// md:Constants`.
+
+```rust
+const MAX_LINE_LEN: usize = 10_000;
+const MAX_LINES_PER_NOTE: usize = 100_000;
+const MAX_WS_MESSAGE: usize = 1024 * 1024;
+const OUTBOUND_CAPACITY: usize = 256;
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 ```
 
-## Op validation & resolution
+**What it does** — The design limits (§11.1): max line length (10 k chars), max lines
+per note (100 k), max incoming WS message (1 MiB). Plus the connection hygiene knobs:
+`OUTBOUND_CAPACITY` — bounded outbound queue per connection; a slow/stalled consumer
+is **dropped** rather than buffering without limit (issue #34), safe because a
+stateful client rebuilds from the next `Welcome` snapshot. `PING_INTERVAL` — periodic
+pings keep NAT/proxy paths open and surface a dead peer via a failed write
+(issue #35). `ACTIVITY_TIMEOUT` — if no frame at all (not even a pong) arrives within
+this window, the peer is treated as dead and the connection closed (issue #35).
 
-`apply_op` is the load-bearing function. For each op it checks, in order:
+**Dependencies** — none.
 
-1. **Writer identity** — `last_writer` must equal the connection's authenticated **device id**
-   (clients cannot forge edits in another's name).
-2. **Content limits** — no `\n` in a line, ≤ `MAX_LINE_LEN`, ≤ `MAX_LINES_PER_NOTE`.
-3. **Existence** — the target line / `after_line_id` must (or must not, for `Insert`) exist.
-4. **Version advance** — the op's `vv` must advance the writer's own component past the
-   entity's current one (`advances_writer`); a replay fails this and is `Ignored`, which is
-   what makes application **idempotent**.
-5. **Resolution** — `note_log::resolve(current, incoming)`. `Insert`/`Move` resolve against the
-   **order** entity, `Update`/`Delete` against the **line** entity. A dominated op is
-   `Ignored`; concurrent ops fall to the deterministic `(timestamp, device_id)` tiebreak. The
-   applied op merges its vector into the entity's (`merge_vv`).
+**Used by** — `apply_op` (limits), `handler` (`MAX_WS_MESSAGE`), `run_connection`
+(the three connection knobs).
 
-Only `Applied` ops are persisted and fanned out. `Invalid` sends the sender an `Error`;
-`Ignored` is silent.
+**Repeated context** — Limits are enforced **before persisting** (in `apply_op`), so
+the database can never hold an over-limit line/order. 10 k × 100 k bounds a note's
+theoretical materialised body at ~1 GB, which is why the REST read path has its own
+`MAX_NOTE_BODY_BYTES` cap (issue #44, `config.rs`).
 
-## Concurrency discipline
+---
 
-- `CollabSession::apply_lock` (a `Mutex`) serialises op application **and** the join snapshot:
-  a joiner reads the snapshot and subscribes under the lock, so no op can slip between the two
-  (which would leave it missing from both). Two ops never interleave their read-modify-write.
-- **Access is re-resolved on every op batch** (not cached at join), so a share revoked
-  mid-session is enforced on the next edit rather than persisting for the life of the
-  connection (issue #30).
-- Outbound frames per connection funnel through one **bounded** `mpsc` channel
-  (`OUTBOUND_CAPACITY`) owned by a single writer task, so the socket has exactly one writer. A
-  subscriber whose queue is full (a slow/stalled consumer) is dropped from the session rather
-  than buffering without bound (issue #34); it reconnects and rebuilds from a fresh snapshot.
-- The writer task also emits periodic **pings** (`PING_INTERVAL`), and the read loop closes the
-  connection if no frame — not even a pong — arrives within `ACTIVITY_TIMEOUT`, so a silently
-  dropped peer is reaped instead of leaking a subscriber slot (issue #35).
-- Sessions are created on demand and dropped when the last subscriber leaves; on a server
-  restart clients reconnect and get a fresh snapshot — sessions hold no durable state.
+## Subscriber
 
-## Design notes
+**Identification** — private struct; marker `// md:Subscriber`.
 
-- The **device** is the vv actor (not the user): two devices of the same user must not share a
-  version-vector component, or the server would treat the second's concurrent edit as a replay.
-  Presence stays user-based; only the vv/`last_writer` are device-scoped.
-- `Move` extracts the moved block then reinserts it after the target, guarding against making a
-  moved line its own anchor.
+```rust
+struct Subscriber {
+    tx: mpsc::Sender<String>,
+}
+```
+
+**What it does** — One live connection's entry in a session: the sending half of its
+bounded outbound channel. Everything else about the connection (user, device, joined
+notes) lives on the connection task's stack; presence lives in the shared table.
+
+**Dependencies** — `tokio::mpsc`.
+
+**Used by** — `CollabSession.subscribers`; inserted by `handle_msg` (`Join`), removed
+on `Leave`/disconnect/slow-consumer drop.
+
+**Repeated context** — Frames are pre-serialised `String`s so one serialisation
+serves every subscriber (see `broadcast`).
+
+---
+
+## CollabSession
+
+**Identification** — public struct; marker `// md:CollabSession`.
+
+```rust
+pub struct CollabSession {
+    seq: AtomicU64,
+    apply_lock: Mutex<()>,
+    subscribers: RwLock<HashMap<u64, Subscriber>>,
+}
+```
+
+**What it does** — One live collaborative session per note with at least one
+subscriber (design §3.5), created on demand and destroyed when the last subscriber
+leaves. Fields: `seq` — the monotonic per-session sequence stamped on each fanned-out
+`Op` by *this* instance (a connection only ever talks to one instance, so a
+per-instance counter is enough for the client's gap detection — issue #45);
+`apply_lock` — serialises op application and join snapshots for this note, so a
+joiner can never miss an op between reading the snapshot and subscribing, and two op
+batches never interleave their read-modify-write; `subscribers` — the live
+connections keyed by `conn_id`. If the server restarts, clients reconnect and get a
+fresh snapshot from the database — the session holds **no durable state**.
+
+**Dependencies** — `Subscriber` (this file), tokio sync primitives.
+
+**Used by** — `CollabRegistry.sessions`; `handle_msg`, `deliver_event`,
+`deliver_presence`, `run_connection` (this file).
+
+**Repeated context** — The apply lock is in-process only; cross-instance
+serialisation of order writes is the Postgres advisory lock
+(`store::lock_note_order`) taken inside the `Op` path. Winners are still decided by
+version-vector resolution — the locks only serialise application.
+
+---
+
+## CollabRegistry
+
+**Identification** — public struct; marker `// md:CollabRegistry`.
+
+```rust
+#[derive(Default)]
+pub struct CollabRegistry {
+    sessions: RwLock<HashMap<Uuid, Arc<CollabSession>>>,
+    next_conn_id: AtomicU64,
+}
+```
+
+**What it does** — All live sessions on this instance, keyed by note id, plus the
+connection-id allocator (`next_conn_id`, unique per instance). Lives in `AppState`
+(`::default()` at boot — empty).
+
+**Dependencies** — `CollabSession` (this file).
+
+**Used by** — `state.rs::AppState.collab`; `bus.rs` (via `get`),
+`http.rs::metrics` (via `stats`), this file's connection handling.
+
+**Repeated context** — Per-instance, rebuildable memory; the shared truth for
+"who is present" is the presence *table*, not this map.
+
+---
+
+## impl CollabRegistry
+
+**Identification** — inherent impl block; marker `// md:impl CollabRegistry`.
+Contains `stats`, `get`, `get_or_create`, `drop_if_empty` (next sections).
+
+**What it does** — Session lookup/lifecycle: metrics, bus lookup, on-demand
+creation, lazy destruction.
+
+**Dependencies / Used by / Repeated context** — see the method subsections.
+
+### fn stats
+
+**Identification** — public async method; marker
+`// md:impl CollabRegistry > fn stats`.
+`pub async fn stats(&self) -> (usize, usize)`.
+
+**What it does** — `(live note sessions, live subscriber connections)` for
+`GET /api/metrics`.
+
+**Dependencies** — none. **Used by** — `http.rs::metrics`.
+
+**Repeated context** — none.
+
+### fn get
+
+**Identification** — public async method; marker
+`// md:impl CollabRegistry > fn get`.
+`pub async fn get(&self, note_id: Uuid) -> Option<Arc<CollabSession>>`.
+
+**What it does** — The live session for a note on *this* instance, if any. The bus
+entrypoints use it to deliver a sibling's op/presence to local subscribers
+(issue #45); no session → nothing to deliver → no-op.
+
+**Dependencies** — none. **Used by** — `deliver_event`, `deliver_presence` (this
+file).
+
+**Repeated context** — none.
+
+### fn get_or_create
+
+**Identification** — private async method; marker
+`// md:impl CollabRegistry > fn get_or_create`.
+`async fn get_or_create(&self, note_id: Uuid) -> Arc<CollabSession>`.
+
+**What it does** — The session for a note, created (fresh `seq = 0`, empty
+subscribers) if absent, under the map's write lock.
+
+**Dependencies** — `CollabSession` (this file). **Used by** — `handle_msg`
+(`Join`).
+
+**Repeated context** — `seq` restarting at 0 for a fresh session is fine: clients
+use `server_seq` only for gap detection within one connection's stream.
+
+### fn drop_if_empty
+
+**Identification** — private async method; marker
+`// md:impl CollabRegistry > fn drop_if_empty`.
+`async fn drop_if_empty(&self, note_id: Uuid)`.
+
+**What it does** — Removes the note's session if it has no subscribers left. Called
+after `Leave` and on disconnect — lazy cleanup keeps the map bounded by live notes.
+
+**Dependencies** — none. **Used by** — `handle_msg` (`Leave`), `run_connection`
+(teardown).
+
+**Repeated context** — none.
+
+---
+
+## impl CollabSession
+
+**Identification** — inherent impl block; marker `// md:impl CollabSession`.
+Contains `broadcast` (next section).
+
+**What it does / Dependencies / Used by / Repeated context** — see `fn broadcast`.
+
+### fn broadcast
+
+**Identification** — private async method; marker
+`// md:impl CollabSession > fn broadcast`.
+
+```rust
+async fn broadcast(&self, msg: &CollabServerMsg, skip_conn: Option<u64>)
+```
+
+**What it does** — Sends `msg` to every subscriber, optionally skipping one
+connection (the originator of an op already has it applied locally). Serialises the
+message **once**, then `try_send`s to each subscriber's bounded queue. A subscriber
+whose queue is full (slow/stalled consumer) is collected and **removed from the
+session** after the read pass (issue #34) — it reconnects and rebuilds from a fresh
+snapshot rather than buffering without bound.
+
+**Dependencies** — `Subscriber`, `CollabServerMsg` (`protocol.rs`), `serde_json`.
+
+**Used by** — `deliver_presence`, `deliver_event`, `handle_msg` (`Op` fan-out).
+
+**Repeated context** — Dropping a slow consumer is safe *because* of the
+snapshot-rebuild model: no collab message is load-bearing for durability — the rows
+are.
+
+---
+
+## fn touch_presence
+
+**Identification** — private async function; marker `// md:fn touch_presence`.
+
+```rust
+async fn touch_presence(
+    state: &AppState, note_id: Uuid, conn_id: u64,
+    user_id: Uuid, display_name: &str, cursor: Option<&Cursor>,
+) -> Result<(), AppError>
+```
+
+**What it does** — Records (upserts) this connection's presence row — keyed
+`(note_id, instance_id, conn_id)`, carrying user id, display name and the optional
+caret as opaque JSON — in the shared presence table, then `announce_presence` so
+every replica rebroadcasts the merged list (issue #45).
+
+**Dependencies** — `Store::upsert_presence` (`store.rs`), `announce_presence`
+(this file), `Cursor` (`protocol.rs`).
+
+**Used by** — `handle_msg` (`Join` with no cursor, `Cursor` with one).
+
+**Repeated context** — Presence is ephemeral and unversioned: rows are
+heartbeat-touched by the maintenance loop (`main.rs`) for this instance and swept by
+TTL when an instance crashes; receivers always get the **full** list and replace.
+
+---
+
+## fn clear_presence
+
+**Identification** — private async function; marker `// md:fn clear_presence`.
+`async fn clear_presence(state, note_id, conn_id) -> Result<(), AppError>`.
+
+**What it does** — Deletes this connection's presence row and announces the new
+merged list.
+
+**Dependencies** — `Store::delete_presence` (`store.rs`), `announce_presence`
+(this file).
+
+**Used by** — `handle_msg` (`Leave`), `run_connection` (disconnect teardown).
+
+**Repeated context** — Rows a crashed instance leaves behind are reclaimed by the
+TTL sweep (`main.rs` maintenance loop) and by each instance clearing its own rows at
+startup — this function is only the orderly path.
+
+---
+
+## fn announce_presence
+
+**Identification** — private async function; marker `// md:fn announce_presence`.
+`async fn announce_presence(state: &AppState, note_id: Uuid)`.
+
+**What it does** — Broadcasts the merged presence to **this** instance's
+subscribers now (`deliver_presence`), then notifies the other instances
+(`collab_presence` channel, payload `"<note_id>:<instance_id>"`) to do the same.
+The local broadcast means presence works single-instance even with no bus running;
+the instance id in the payload lets a sibling's bus handler skip the echo back to
+us. A notify failure is logged, not propagated.
+
+**Dependencies** — `deliver_presence` (this file), `Store::notify` (`store.rs`),
+`bus.rs` channel semantics.
+
+**Used by** — `touch_presence`, `clear_presence` (this file).
+
+**Repeated context** — Origin-delivers-locally is the bus's core convention
+(`bus.rs`): the origin instance never depends on its own notification coming back.
+
+---
+
+## fn deliver_presence
+
+**Identification** — public async function; marker `// md:fn deliver_presence`.
+`pub async fn deliver_presence(state: &AppState, note_id: Uuid)`.
+
+**What it does** — Bus entrypoint (also used locally): if this instance has a live
+session for the note, read all presence rows (every instance's) from the shared
+table, merge them **per user** — a user connected twice appears once; the first
+non-`None` cursor wins — and broadcast the full `CollabServerMsg::Presence` list to
+local subscribers. No session or a read failure → warn/return.
+
+**Dependencies** — `CollabRegistry::get`, `CollabSession::broadcast` (this file);
+`Store::list_presence` (`store.rs`); `PresenceInfo`/`Cursor` (`protocol.rs`).
+
+**Used by** — `announce_presence` (local path) and `bus.rs::handle_collab_presence`
+(cross-instance path).
+
+**Repeated context** — Presence lists are **replace, never merge** on the client;
+user-scoped (the UI shows people, not devices).
+
+---
+
+## fn deliver_event
+
+**Identification** — public async function; marker `// md:fn deliver_event`.
+`pub async fn deliver_event(state: &AppState, event: crate::store::CollabEvent)`.
+
+**What it does** — Bus entrypoint: a `collab_op` outbox event authored by
+*another* instance (the caller — `bus.rs::handle_collab_op` — already filtered out
+our own). If this instance has a live session for the note: parse the stored ops
+JSON back into `Vec<LineOp>` (unparseable → warn/return), then **take the session's
+apply lock** — serialising against a concurrent local join so a just-subscribed
+connection cannot miss this op between its snapshot and subscribe (the op is
+already durable; a duplicate delivery is resolved away by the client) — stamp this
+instance's own next `server_seq`, and broadcast `CollabServerMsg::Op` to all local
+subscribers.
+
+**Dependencies** — `CollabRegistry::get`, `CollabSession::{apply_lock, seq,
+broadcast}` (this file); `store::CollabEvent` (`store.rs`); `LineOp`
+(`protocol.rs`).
+
+**Used by** — `bus.rs::handle_collab_op` only.
+
+**Repeated context** — Each instance stamps its **own** sequence on cross-instance
+ops: `server_seq` is a per-connection-stream ordering aid, not a global order; the
+global order is settled by vv resolution at the database.
+
+---
+
+## fn handler
+
+**Identification** — public async function (axum handler); marker
+`// md:fn handler`.
+
+```rust
+pub async fn handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError>
+```
+
+**What it does** — `GET /api/ws` (design §7.1). Token resolution: prefer the
+`Authorization: Bearer` header — a token in the query string ends up in
+proxy/access logs — with `?token=` kept as a fallback for WS clients that cannot
+set headers; absent → `MissingToken` (401). Verify the JWT; then the **revocation
+check** (issue #20): the token's device must still exist and belong to the token's
+user (`store.get_device`), exactly like REST's `auth_mw` and the sync relay's
+handshake — otherwise a revoked token would keep editing notes until `exp`. Load
+the user row (for the display name; a vanished user → `InvalidToken`). Upgrade with
+`MAX_WS_MESSAGE` and run `run_connection`. The token authenticates the **user**;
+which notes the connection may touch is checked per `Join`/`Op` against the shares.
+
+**Dependencies** — `auth::verify_token` (`auth.rs`); `Store::{get_device,
+get_user_by_id}` (`store.rs`); `MAX_WS_MESSAGE`, `run_connection` (this file).
+
+**Used by** — `http.rs::router` (the `/api/ws` route).
+
+**Repeated context** — The crate-wide revocation invariant: every authenticated
+surface re-checks the device row (REST, `/api/sync`, here), which is what makes the
+365-day default `TOKEN_TTL_DAYS` acceptable.
+
+---
+
+## fn run_connection
+
+**Identification** — private async function; marker `// md:fn run_connection`.
+
+```rust
+async fn run_connection(
+    state: Arc<AppState>, socket: WebSocket,
+    user_id: Uuid, device_id: Uuid, display_name: String,
+)
+```
+
+**What it does** — One collaborative connection. Setup: allocate a `conn_id`;
+split the socket; spawn the **writer task** — all outbound traffic (welcomes,
+fan-out, presence, errors) funnels through one bounded `mpsc` channel
+(`OUTBOUND_CAPACITY`) so a single task owns the sink (issue #34), and that task
+also emits periodic pings (`PING_INTERVAL`, first tick after the interval, not
+immediately) whose failed write surfaces a dead peer (issue #35).
+
+Read loop: wait for the next frame **bounded by `ACTIVITY_TIMEOUT`** — a peer gone
+silent (not even answering pings) is dropped instead of leaking a subscriber slot
+forever (issue #35); any frame, including a pong, counts as activity. Text frames
+parse as `CollabClientMsg` (parse failure → `bad_message` error frame, connection
+stays open) and dispatch to `handle_msg` (an internal error is logged and answered
+with an `internal` error frame). `Close`/timeout/transport error → exit the loop.
+
+The `joined` map holds the sessions this connection subscribed to. **Access is
+deliberately not cached in it** (issue #30): it is re-resolved per operation so a
+revoked share takes effect without waiting for a reconnect.
+
+Teardown: for every joined note — remove the subscriber, clear the shared presence
+row, drop the session if empty — then abort the writer task.
+
+**Dependencies** — `CollabRegistry::next_conn_id`, `handle_msg`, `send_error`,
+`clear_presence`, `drop_if_empty`, the connection constants (this file);
+`futures_util` split; `tokio` mpsc/timeout.
+
+**Used by** — `handler` (this file) only.
+
+**Repeated context** — One-writer-per-socket is what makes the bounded-queue drop
+policy sound (no interleaved partial writes); the timeout/ping pair is the leak
+defence of issues #34/#35.
+
+---
+
+## fn send_error
+
+**Identification** — private function; marker `// md:fn send_error`.
+`fn send_error(tx: &mpsc::Sender<String>, code: &str, message: &str)`.
+
+**What it does** — Serialises a `CollabServerMsg::Error { code, message }` and
+`try_send`s it to the connection's outbound queue. Best-effort: if the queue is
+full the error is dropped (the connection is already being dropped as a slow
+consumer). Errors are per-frame; the connection stays open.
+
+**Dependencies** — `CollabServerMsg` (`protocol.rs`), `serde_json`.
+
+**Used by** — `run_connection`, `handle_msg` (this file).
+
+**Repeated context** — Error codes used across this file: `bad_message`,
+`not_found`, `forbidden`, `not_joined`, `bad_writer`, `bad_content`, `too_long`,
+`too_many_lines`, `line_exists`, `bad_after`, `bad_move`, `internal`. They are a
+client-facing contract (tests assert them).
+
+---
+
+## fn handle_msg
+
+**Identification** — private async function; marker `// md:fn handle_msg`.
+
+```rust
+async fn handle_msg(
+    state: &Arc<AppState>, tx: &mpsc::Sender<String>, conn_id: u64,
+    user_id: Uuid, device_id: Uuid, display_name: &str,
+    joined: &mut HashMap<Uuid, Arc<CollabSession>>, msg: CollabClientMsg,
+) -> Result<(), AppError>
+```
+
+**What it does** — Dispatch on the client message:
+
+- **`Join { note_id }`** — load the note (`not_found` if absent/invisible); resolve
+  access and require `can_read` (`forbidden` otherwise — viewers may join and
+  watch). Then, **under the session's apply lock**: read the snapshot, insert the
+  subscriber, and enqueue the `Welcome` — all three together, so (a) no op can slip
+  between snapshot and subscription (local ops and cross-instance ops both take
+  this lock before broadcasting) and (b) the `Welcome` is queued on the
+  connection's channel before any op can be, keeping `Welcome` first. The resolved
+  access is intentionally **not stored** (issue #30) — writes re-resolve per op
+  batch. Record the note in `joined` and `touch_presence` (shared table + notify,
+  issue #45).
+- **`Leave { note_id }`** — remove the subscriber, clear presence, drop the
+  session if empty.
+- **`Op { note_id, ops }`** — must have joined (`not_joined` otherwise).
+  **Re-resolve access** on every batch (issue #30): note gone → `not_found`; access
+  revoked → `forbidden`; `can_write` required (viewers get `forbidden`). Then apply
+  sequentially under the session's in-process apply lock **and** a Postgres
+  advisory lock keyed by the note (`store.lock_note_order` — a transaction holding
+  `pg_advisory_xact_lock`), so two instances editing the same order serialise at
+  the database and cannot lose an update (issue #45). Per op, `apply_op` on the
+  lock's connection: `Applied` ops are collected, `Ignored` ops dropped silently,
+  `Invalid` ops answered with an error frame. Commit (releases the advisory lock);
+  if anything applied, stamp `server_seq` and broadcast to the note's other local
+  subscribers (skipping the originator). Finally, cross-instance fan-out
+  (issue #45): serialise the applied ops into the `collab_events` outbox and NOTIFY
+  `collab_op` with `"<seq>:<instance_id>"` — done **after** the local broadcast so
+  local latency is unaffected; siblings deliver under their own sequence; outbox
+  failures are logged, not fatal (a missed sibling delivery heals by snapshot
+  rebuild).
+- **`Cursor { note_id, cursor }`** — if joined, `touch_presence` with the caret
+  (which broadcasts the merged list).
+- **`Ack { .. }`** — client-side bookkeeping; nothing to do server-side.
+
+**Dependencies** — `resolve_note_access` (`permissions.rs`); `Store::{get_note,
+lock_note_order, insert_collab_event, notify}` (`store.rs`); `read_snapshot`,
+`apply_op`, `send_error`, `touch_presence`, `clear_presence`, session/registry
+methods (this file); wire types (`protocol.rs`).
+
+**Used by** — `run_connection` (this file) only.
+
+**Repeated context** — The Join-under-lock choreography and the per-op access
+re-resolution are the two auditor-visible fixes this file carries (join-gap
+soundness; issue #30 revocation). The advisory lock closes the cross-instance
+lost-update window on the order (issue #45; also the reason tombstone GC must
+serialise against it — issue #25).
+
+---
+
+## fn read_snapshot
+
+**Identification** — private async function; marker `// md:fn read_snapshot`.
+
+```rust
+async fn read_snapshot(state: &AppState, note_id: Uuid) -> Result<NoteLinesSnapshot, AppError>
+```
+
+**What it does** — Builds the `Welcome` payload: the note's order entity
+(`get_note_order` — `NotFound` if the note has no order row) plus every line
+(`list_lines`, tombstones included), converted via `line_snapshot`.
+
+**Dependencies** — `Store::{get_note_order, list_lines}` (`store.rs`);
+`NoteLinesSnapshot` (`protocol.rs`); `line_snapshot` (this file).
+
+**Used by** — `handle_msg` (`Join`) — under the apply lock.
+
+**Repeated context** — Snapshots include tombstoned lines (soft-delete: deletion
+is a `deleted_at` timestamp, never row removal) so a client that was offline
+during a delete still converges on it.
+
+---
+
+## fn line_snapshot
+
+**Identification** — private function; marker `// md:fn line_snapshot`.
+`fn line_snapshot(line: Line) -> LineSnapshot`.
+
+**What it does** — Converts the store's `Line` row into the wire shape
+(`LineSnapshot`), unwrapping the stored vv (`line.vv.0` — the store wraps
+`VersionVector` in a JSONB newtype).
+
+**Dependencies** — `Line` (`store.rs`), `LineSnapshot` (`protocol.rs`).
+
+**Used by** — `read_snapshot` (this file).
+
+**Repeated context** — none.
+
+---
+
+## OpOutcome
+
+**Identification** — private enum; marker `// md:OpOutcome`.
+
+```rust
+enum OpOutcome {
+    Applied(LineOp),
+    Ignored,
+    Invalid { code: String, message: String },
+}
+```
+
+**What it does** — The result of resolving one op. `Applied(op)`: the op won its
+resolution and was persisted — fan it out. `Ignored`: dominated by current state
+(design §4.3.3) — drop **silently** (this is normal convergence, not an error).
+`Invalid { code, message }`: malformed or referencing missing entities — tell the
+sender.
+
+**Dependencies** — `LineOp` (`protocol.rs`).
+
+**Used by** — `apply_op` (produces), `handle_msg` (consumes).
+
+**Repeated context** — Silence on `Ignored` is deliberate: a replica replaying an
+op it already sent, or losing a race it will learn about via fan-out, needs no
+signal.
+
+---
+
+## fn invalid
+
+**Identification** — private function; marker `// md:fn invalid`.
+`fn invalid(code: &str, message: impl Into<String>) -> OpOutcome`.
+
+**What it does** — Constructor shorthand for `OpOutcome::Invalid`.
+
+**Dependencies** — `OpOutcome` (this file). **Used by** — `apply_op`.
+
+**Repeated context** — none.
+
+---
+
+## fn merge_vv
+
+**Identification** — private function; marker `// md:fn merge_vv`.
+`fn merge_vv(a: &VersionVector, b: &VersionVector) -> VersionVector`.
+
+**What it does** — The pointwise maximum of two version vectors — the merged
+causal frontier stored on an entity after an op is applied. (A `VersionVector` is
+a map from actor id — always a device id here — to a monotonically increasing
+counter.)
+
+**Dependencies** — `VersionVector` (keeplin-core).
+
+**Used by** — `apply_op` (all four arms, when writing the winning state).
+
+**Repeated context** — Storing the *merge* (not the op's vv verbatim) is what
+makes the entity's vector dominate both histories afterwards — the foundation of
+convergence.
+
+---
+
+## fn advances_writer
+
+**Identification** — private function; marker `// md:fn advances_writer`.
+`fn advances_writer(current: &VersionVector, op_vv: &VersionVector, writer: &str) -> bool`.
+
+**What it does** — Design §4.3.5: an op's vector must advance its **own writer's**
+component past the entity's current one. Replays of an already-applied op fail
+this and are ignored — which is what keeps application **idempotent**.
+
+**Dependencies** — `VersionVector` (keeplin-core).
+
+**Used by** — `apply_op` (all four arms, before resolution).
+
+**Repeated context** — Idempotency is a system-wide requirement (relay redelivery,
+bus at-least-once, client retries all rely on it); this check is its collab-side
+enforcement point.
+
+---
+
+## fn apply_op
+
+**Identification** — private async function; marker `// md:fn apply_op`.
+
+```rust
+async fn apply_op(
+    state: &AppState,
+    conn: &mut sqlx::PgConnection,
+    note_id: Uuid,
+    device_id: Uuid,
+    op: LineOp,
+) -> Result<OpOutcome, AppError>
+```
+
+**What it does** — Applies one op. All reads and writes go through `conn` — the
+connection holding the note's advisory lock — so the whole batch runs on a single
+connection (cannot deadlock against the bounded pool) and the order's
+read-modify-write is serialised across instances (issue #45).
+
+First gate, all variants: **writer identity** — `op.last_writer()` must equal the
+authenticated device id (`bad_writer` otherwise). Clients cannot forge edits in
+someone else's name, and two devices of one user never share a vv component
+(sharing one would make the server treat the second device's concurrent edits as
+replays). Presence stays user-based; only the vv actor is the device.
+
+Per variant:
+
+- **`Insert`** — content checks (`bad_content` on `\n`, `too_long` over
+  `MAX_LINE_LEN`); `line_exists` if the line id is already taken; load the order
+  (`NotFound` without one); `too_many_lines` at `MAX_LINES_PER_NOTE`; `bad_after`
+  if the anchor is not in the order (`None` anchor = insert at the beginning).
+  Resolution **against the order entity** (design §5.2): `advances_writer` +
+  `winner` — a stale insert loses against the current order and is `Ignored`.
+  On win: insert the line row, then write the new order with
+  `merge_vv(order.vv, op.vv)`.
+- **`Update`** — content checks; the line must exist **in this note**
+  (`not_found`); resolution against the **line** entity (`advances_writer` +
+  `line_winner`); on win, update content with the merged vv.
+- **`Delete`** — the line must exist in this note; resolution against the line;
+  on win, **soft-delete**: set `deleted_at` (tombstone), merged vv. The row
+  remains; tombstones ship in snapshots and are GC'd only after `LINES_GC_DAYS`.
+- **`Move`** — `bad_move` on empty `line_ids` or when the anchor is itself moved;
+  every moved id must be in the order (`not_found`); resolution against the
+  order. On win: extract the moved block, reinsert it after the anchor
+  (`bad_after` if the anchor vanished from the filtered order), write the new
+  order with the merged vv.
+
+**Dependencies** — `LineOp::last_writer` (`protocol.rs`); the `_on(executor)`
+store variants `get_line_on`, `get_note_order_on`, `insert_line_on`,
+`update_line_on`, `soft_delete_line_on`, `set_note_order_on` (`store.rs`);
+`invalid`, `merge_vv`, `advances_writer`, `winner`, `line_winner`,
+`position_after`, the limits (this file).
+
+**Used by** — `handle_msg` (`Op` arm) only.
+
+**Repeated context** — The complete op pipeline, restated: writer gate →
+shape/limit validation → existence → `advances_writer` (idempotency) →
+`note_log::resolve` (vv dominance, then the deterministic
+`(updated_at, last_writer)` LWW tiebreak) → persist with merged vv → fan out.
+`Insert`/`Move` resolve against the **order** entity; `Update`/`Delete` against
+the **line** — the two-entity model that makes structural edits and content edits
+independently mergeable.
+
+---
+
+## fn winner
+
+**Identification** — private function; marker `// md:fn winner`.
+
+```rust
+fn winner(order: &crate::store::NoteOrder, op_vv: &VersionVector,
+          op_ts: DateTime<Utc>, op_writer: &str) -> Winner
+```
+
+**What it does** — Resolves an op against the **order** entity by delegating to
+keeplin-core's `note_log::resolve(current_vv, current_ts, current_writer, op_vv,
+op_ts, op_writer)`. `Winner::Incoming` = apply.
+
+**Dependencies** — `resolve`/`Winner` (keeplin-core), `NoteOrder` (`store.rs`).
+
+**Used by** — `apply_op` (`Insert`, `Move`).
+
+**Repeated context** — Using the *same* `resolve` as every client is what
+guarantees server and clients pick the same winner — the convergence contract.
+
+---
+
+## fn line_winner
+
+**Identification** — private function; marker `// md:fn line_winner`.
+
+```rust
+fn line_winner(line: &Line, op_vv: &VersionVector,
+               op_ts: DateTime<Utc>, op_writer: &str) -> Winner
+```
+
+**What it does** — The same resolution against a **line** entity
+(`line.vv.0`, `line.updated_at`, `line.last_writer`).
+
+**Dependencies** — `resolve`/`Winner` (keeplin-core), `Line` (`store.rs`).
+
+**Used by** — `apply_op` (`Update`, `Delete`).
+
+**Repeated context** — as `fn winner`.
+
+---
+
+## fn position_after
+
+**Identification** — private function; marker `// md:fn position_after`.
+`fn position_after(order: &[Uuid], after_line_id: Option<Uuid>) -> Option<usize>`.
+
+**What it does** — The index right after `after_line_id` in `order`
+(`None` anchor = index 0, the beginning). Returns `None` when the anchor line is
+absent — the caller maps that to `bad_after`.
+
+**Dependencies** — none.
+
+**Used by** — `apply_op` (`Insert`, `Move`).
+
+**Repeated context** — Anchor-based positioning (rather than numeric indices) is
+what keeps concurrent inserts meaningful after resolution reorders things.
+
+---
 
 ## Graph context
+
+Repo-tooling metadata, not a code block (no marker in the source). Kept in every
+companion because CI (`scripts/check-docs.sh`) enforces it: this file is LAYER 2 of
+the navigation model, the Graphify graph (`graphify-out/graph.json`) is LAYER 1;
+refresh with `graphify update .` after refactors.
 
 <!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
      EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
@@ -106,17 +860,41 @@ Only `Applied` ops are persisted and fanned out. `Invalid` sends the sender an `
 
 - `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
 
-**Invariants** (restated on purpose; a change to this file must keep these true)
+## Coverage checklist
 
-- The unit of concurrency is the line; the order of lines is its own versioned entity; resolution is always `note_log::resolve`, never a lock.
-- `last_writer` must equal the authenticated device and the vector must advance the writer's component — forged ops are rejected.
-- Viewers can join and watch but never write; access is re-resolved against the share tables, not cached from join time.
-- Per-note line order updates are serialised across replicas with a Postgres advisory lock; peer instances are reached only via the bus.
-- Limits (line length, lines per note, message size) are enforced before persisting.
+Every code block of `collab.rs`, in source order, each documented above (five points)
+and carrying its marker in the code:
 
-## Related files
-
-- `protocol.md` — the message/op types on the wire.
-- `store.md` — the line and order rows, and their opaque `vv` columns.
-- `permissions.md` — the capability check on `Join`/`Op`.
-- `keeplin/keeplin-core/src/collab/` — the client that speaks this protocol.
+| # | Block (source order) | Marker in code | Documented in section |
+|---|----------------------|----------------|-----------------------|
+| 1 | imports (`use …`) | `// md:Overview` | Overview |
+| 2 | the six consts | `// md:Constants` | Constants |
+| 3 | `struct Subscriber` | `// md:Subscriber` | Subscriber |
+| 4 | `struct CollabSession` | `// md:CollabSession` | CollabSession |
+| 5 | `struct CollabRegistry` | `// md:CollabRegistry` | CollabRegistry |
+| 6 | `impl CollabRegistry` | `// md:impl CollabRegistry` | impl CollabRegistry |
+| 7 | `fn stats` | `// md:impl CollabRegistry > fn stats` | impl CollabRegistry › fn stats |
+| 8 | `fn get` | `// md:impl CollabRegistry > fn get` | impl CollabRegistry › fn get |
+| 9 | `fn get_or_create` | `// md:impl CollabRegistry > fn get_or_create` | impl CollabRegistry › fn get_or_create |
+| 10 | `fn drop_if_empty` | `// md:impl CollabRegistry > fn drop_if_empty` | impl CollabRegistry › fn drop_if_empty |
+| 11 | `impl CollabSession` | `// md:impl CollabSession` | impl CollabSession |
+| 12 | `fn broadcast` | `// md:impl CollabSession > fn broadcast` | impl CollabSession › fn broadcast |
+| 13 | `fn touch_presence` | `// md:fn touch_presence` | fn touch_presence |
+| 14 | `fn clear_presence` | `// md:fn clear_presence` | fn clear_presence |
+| 15 | `fn announce_presence` | `// md:fn announce_presence` | fn announce_presence |
+| 16 | `fn deliver_presence` | `// md:fn deliver_presence` | fn deliver_presence |
+| 17 | `fn deliver_event` | `// md:fn deliver_event` | fn deliver_event |
+| 18 | `fn handler` | `// md:fn handler` | fn handler |
+| 19 | `fn run_connection` | `// md:fn run_connection` | fn run_connection |
+| 20 | `fn send_error` | `// md:fn send_error` | fn send_error |
+| 21 | `fn handle_msg` | `// md:fn handle_msg` | fn handle_msg |
+| 22 | `fn read_snapshot` | `// md:fn read_snapshot` | fn read_snapshot |
+| 23 | `fn line_snapshot` | `// md:fn line_snapshot` | fn line_snapshot |
+| 24 | `enum OpOutcome` | `// md:OpOutcome` | OpOutcome |
+| 25 | `fn invalid` | `// md:fn invalid` | fn invalid |
+| 26 | `fn merge_vv` | `// md:fn merge_vv` | fn merge_vv |
+| 27 | `fn advances_writer` | `// md:fn advances_writer` | fn advances_writer |
+| 28 | `fn apply_op` | `// md:fn apply_op` | fn apply_op |
+| 29 | `fn winner` | `// md:fn winner` | fn winner |
+| 30 | `fn line_winner` | `// md:fn line_winner` | fn line_winner |
+| 31 | `fn position_after` | `// md:fn position_after` | fn position_after |
