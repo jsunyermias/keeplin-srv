@@ -100,23 +100,11 @@ pub struct PresenceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
 pub enum CollabClientMsg {
-    Join {
-        note_id: Uuid,
-    },
-    Leave {
-        note_id: Uuid,
-    },
-    Op {
-        note_id: Uuid,
-        ops: Vec<LineOp>,
-    },
-    Cursor {
-        note_id: Uuid,
-        cursor: Cursor,
-    },
-    Ack {
-        server_seq: u64,
-    },
+    Join { note_id: Uuid },
+    Leave { note_id: Uuid },
+    Op { note_id: Uuid, ops: Vec<LineOp> },
+    Cursor { note_id: Uuid, cursor: Cursor },
+    Ack { server_seq: u64 },
 }
 
 // md:CollabServerMsg
