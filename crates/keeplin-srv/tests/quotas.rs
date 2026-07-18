@@ -1,7 +1,4 @@
-//! Per-user quota enforcement: note count (`POST /api/notes`) and total
-//! resource-blob storage (`PUT /api/resources/:id/data`). Backed by a throwaway
-//! Postgres database (`#[sqlx::test]`).
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -16,6 +13,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// md:fn quota_config
 fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config {
     Config {
         port: 0,
@@ -48,6 +46,7 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
     }
 }
 
+// md:fn spawn
 async fn spawn(pool: PgPool, config: Config) -> SocketAddr {
     let state = Arc::new(AppState::new(config, pool));
     let app: Router = router(state);
@@ -64,6 +63,7 @@ async fn spawn(pool: PgPool, config: Config) -> SocketAddr {
     addr
 }
 
+// md:fn register
 async fn register(addr: SocketAddr, email: &str) {
     reqwest::Client::new()
         .post(format!("http://{addr}/api/register"))
@@ -73,6 +73,7 @@ async fn register(addr: SocketAddr, email: &str) {
         .unwrap();
 }
 
+// md:fn login
 async fn login(addr: SocketAddr, email: &str, device: &str) -> String {
     let body: Value = reqwest::Client::new()
         .post(format!("http://{addr}/api/login"))
@@ -86,6 +87,7 @@ async fn login(addr: SocketAddr, email: &str, device: &str) -> String {
     body["token"].as_str().unwrap().to_string()
 }
 
+// md:fn post_note
 async fn post_note(addr: SocketAddr, token: &str) -> u16 {
     reqwest::Client::new()
         .post(format!("http://{addr}/api/notes"))
@@ -98,6 +100,7 @@ async fn post_note(addr: SocketAddr, token: &str) -> u16 {
         .as_u16()
 }
 
+// md:fn device
 async fn device(addr: SocketAddr, token: &str) -> DbBackend {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("device.db");
@@ -107,8 +110,7 @@ async fn device(addr: SocketAddr, token: &str) -> DbBackend {
         .unwrap()
 }
 
-/// Create resource metadata (with an empty blob) through the relay and return
-/// its id, so the test can then drive its blob size via `PUT`.
+// md:fn seed_resource
 async fn seed_resource(dev: &DbBackend) -> Uuid {
     let resource = dev
         .create_resource(
@@ -126,6 +128,7 @@ async fn seed_resource(dev: &DbBackend) -> Uuid {
     resource.id
 }
 
+// md:fn put_blob
 async fn put_blob(addr: SocketAddr, token: &str, id: Uuid, len: usize) -> u16 {
     reqwest::Client::new()
         .put(format!("http://{addr}/api/resources/{id}/data"))
@@ -138,8 +141,7 @@ async fn put_blob(addr: SocketAddr, token: &str, id: Uuid, len: usize) -> u16 {
         .as_u16()
 }
 
-/// With `registration_enabled = false`, the open signup endpoint is closed (issue #21):
-/// `POST /api/register` returns 403 while login for existing accounts still works.
+// md:fn registration_can_be_disabled
 #[sqlx::test(migrations = "../../migrations")]
 async fn registration_can_be_disabled(pool: PgPool) {
     let mut config = quota_config(0, 0);
@@ -157,6 +159,7 @@ async fn registration_can_be_disabled(pool: PgPool) {
     assert_eq!(code, 403, "registration must be closed when disabled");
 }
 
+// md:fn note_quota_blocks_creation_past_the_limit
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_quota_blocks_creation_past_the_limit(pool: PgPool) {
     let addr = spawn(pool, quota_config(0, 2)).await;
@@ -172,6 +175,7 @@ async fn note_quota_blocks_creation_past_the_limit(pool: PgPool) {
     );
 }
 
+// md:fn note_quota_disabled_by_default
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_quota_disabled_by_default(pool: PgPool) {
     let addr = spawn(pool, quota_config(0, 0)).await;
@@ -182,6 +186,7 @@ async fn note_quota_disabled_by_default(pool: PgPool) {
     }
 }
 
+// md:fn storage_quota_blocks_upload_over_the_limit
 #[sqlx::test(migrations = "../../migrations")]
 async fn storage_quota_blocks_upload_over_the_limit(pool: PgPool) {
     let addr = spawn(pool.clone(), quota_config(100, 0)).await;
@@ -192,16 +197,13 @@ async fn storage_quota_blocks_upload_over_the_limit(pool: PgPool) {
     let a = seed_resource(&dev).await;
     let b = seed_resource(&dev).await;
 
-    // 50 bytes into A: within budget.
     assert_eq!(put_blob(addr, &token, a, 50).await, 200);
-    // Re-uploading 50 to A must not double-count (overwrite), still within budget.
     assert_eq!(put_blob(addr, &token, a, 50).await, 200);
-    // 60 into B: 50 (A) + 60 = 110 > 100 → rejected.
     assert_eq!(put_blob(addr, &token, b, 60).await, 507);
-    // 40 into B: 50 (A) + 40 = 90 ≤ 100 → allowed.
     assert_eq!(put_blob(addr, &token, b, 40).await, 200);
 }
 
+// md:fn storage_quota_isolated_per_user
 #[sqlx::test(migrations = "../../migrations")]
 async fn storage_quota_isolated_per_user(pool: PgPool) {
     let addr = spawn(pool.clone(), quota_config(100, 0)).await;
@@ -215,10 +217,8 @@ async fn storage_quota_isolated_per_user(pool: PgPool) {
     let ra = seed_resource(&da).await;
     let rb = seed_resource(&db).await;
 
-    // A fills its budget; B is unaffected.
     assert_eq!(put_blob(addr, &ta, ra, 100).await, 200);
     assert_eq!(put_blob(addr, &tb, rb, 100).await, 200);
-    // A is now full.
     let ra2 = seed_resource(&da).await;
     assert_eq!(put_blob(addr, &ta, ra2, 1).await, 507);
 }

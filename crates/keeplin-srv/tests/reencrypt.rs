@@ -1,12 +1,4 @@
-//! Tests of the one-off at-rest re-encrypt pass (`keeplin_srv::reencrypt`,
-//! wrapped by the `keeplin-reencrypt` binary).
-//!
-//! Scenario under test: a deployment ran **without** `AT_REST_KEY` (rows are
-//! plaintext), the operator then enables the key, and the pass migrates the
-//! pre-key rows. Seeding therefore goes through a real server instance with
-//! encryption disabled; assertions read the raw column bytes with sqlx and the
-//! decrypted plaintext through a second server instance that has the key.
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -18,10 +10,12 @@ use sqlx::{PgPool, Row};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// md:fn test_key
 fn test_key() -> String {
     base64::engine::general_purpose::STANDARD.encode([9u8; 32])
 }
 
+// md:fn test_config
 fn test_config(at_rest_key: Option<String>) -> Config {
     Config {
         port: 0,
@@ -54,6 +48,7 @@ fn test_config(at_rest_key: Option<String>) -> Config {
     }
 }
 
+// md:fn spawn_server
 async fn spawn_server(pool: PgPool, at_rest_key: Option<String>) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(at_rest_key), pool));
     let app: Router = router(state);
@@ -70,8 +65,7 @@ async fn spawn_server(pool: PgPool, at_rest_key: Option<String>) -> SocketAddr {
     addr
 }
 
-/// Register, log in, and import a note with two lines through the real HTTP
-/// surface. Returns `(token, note_id)`.
+// md:fn seed_note
 async fn seed_note(addr: SocketAddr, title: &str, body: &str) -> (String, Uuid) {
     let client = reqwest::Client::new();
     client
@@ -108,7 +102,7 @@ async fn seed_note(addr: SocketAddr, title: &str, body: &str) -> (String, Uuid) 
     (token, note_id)
 }
 
-/// Every stored value of the two encrypted columns, raw (no decryption).
+// md:fn raw_values
 async fn raw_values(pool: &PgPool) -> (Vec<String>, Vec<String>) {
     let titles = sqlx::query("SELECT title FROM notes ORDER BY title")
         .fetch_all(pool)
@@ -127,11 +121,9 @@ async fn raw_values(pool: &PgPool) -> (Vec<String>, Vec<String>) {
     (titles, contents)
 }
 
-/// Pre-key plaintext rows are rewritten to `enc:v1:` and the server (with the
-/// key configured) still serves the original plaintext afterwards.
+// md:fn reencrypts_pre_key_rows_and_server_still_serves_plaintext
 #[sqlx::test(migrations = "../../migrations")]
 async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool) {
-    // Seed through a server WITHOUT the key: this is pre-key (plaintext) data.
     let plain_addr = spawn_server(pool.clone(), None).await;
     let (_, note_id) = seed_note(plain_addr, "Secret title", "line one\nline two").await;
 
@@ -139,7 +131,6 @@ async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool)
     assert_eq!(titles, vec!["Secret title"]);
     assert_eq!(contents, vec!["line one", "line two"]);
 
-    // Run the pass with the key configured (batch size 1 exercises batching).
     let cipher = Cipher::from_key(Some(&test_key())).unwrap();
     let stats = reencrypt::run(
         &pool,
@@ -154,7 +145,6 @@ async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool)
     assert_eq!(stats.notes_title.rewritten, 1);
     assert_eq!(stats.lines_content.rewritten, 2);
 
-    // Every stored value is now tagged ciphertext…
     let (titles, contents) = raw_values(&pool).await;
     for value in titles.iter().chain(contents.iter()) {
         assert!(
@@ -163,7 +153,6 @@ async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool)
         );
     }
 
-    // …and a server holding the key serves the original plaintext.
     let keyed_addr = spawn_server(pool.clone(), Some(test_key())).await;
     let client = reqwest::Client::new();
     let login: Value = client
@@ -191,7 +180,6 @@ async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool)
     assert_eq!(note["title"], "Secret title");
     assert_eq!(note["body"], "line one\nline two");
 
-    // Idempotent: a second run finds nothing left to do.
     let again = reencrypt::run(&pool, &cipher, &reencrypt::Options::default())
         .await
         .unwrap();
@@ -199,7 +187,7 @@ async fn reencrypts_pre_key_rows_and_server_still_serves_plaintext(pool: PgPool)
     assert_eq!(again.lines_content.scanned, 0);
 }
 
-/// `--dry-run` reports the would-be work and modifies nothing.
+// md:fn dry_run_reports_but_does_not_modify
 #[sqlx::test(migrations = "../../migrations")]
 async fn dry_run_reports_but_does_not_modify(pool: PgPool) {
     let plain_addr = spawn_server(pool.clone(), None).await;
@@ -227,8 +215,7 @@ async fn dry_run_reports_but_does_not_modify(pool: PgPool) {
     assert_eq!(before, after, "--dry-run must not modify any row");
 }
 
-/// The pass refuses to run without a key: reporting success while doing
-/// nothing would be a silent misfire.
+// md:fn refuses_to_run_without_a_key
 #[sqlx::test(migrations = "../../migrations")]
 async fn refuses_to_run_without_a_key(pool: PgPool) {
     let cipher = Cipher::from_key(None).unwrap();
