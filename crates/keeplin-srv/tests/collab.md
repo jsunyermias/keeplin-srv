@@ -85,10 +85,15 @@ Marker `// md:fn recv_until`. Receive frames until a predicate matches (skipping
 presence chatter and other noise), panicking after a bounded wait — the suite's
 convergence primitive on the socket side.
 
-### fn join / fn insert_op / fn update_op
-Markers `// md:fn join`, `// md:fn insert_op`, `// md:fn update_op`. Frame builders
-for `Join` and single-op `Insert`/`Update` envelopes (vv, writer, timestamp
-explicit).
+### fn join
+Marker `// md:fn join`. Frame builder for `Join`.
+
+### fn insert_op
+Marker `// md:fn insert_op`. Frame builder for a single-op `Insert` envelope (vv,
+writer, timestamp explicit).
+
+### fn update_op
+Marker `// md:fn update_op`. Frame builder for a single-op `Update` envelope.
 
 ### fn export_body
 Marker `// md:fn export_body`. `GET /api/notes/:id/export` → the materialised body.
@@ -98,9 +103,9 @@ Marker `// md:fn wait_export`. Poll the export until it equals the expected body
 (~5 s), panicking with the last seen value — ops apply asynchronously to the HTTP
 surface, and fixed sleeps are exactly what flakes on slow CI runners.
 
-### T1 / T2 / T3
-Marker `// md:Timestamps`. Three fixed, ordered RFC3339 timestamps used as
-deterministic op times.
+### Timestamps
+Marker `// md:Timestamps`. `T1`/`T2`/`T3`: three fixed, ordered RFC3339 timestamps
+used as deterministic op times.
 
 ---
 
@@ -228,10 +233,13 @@ pass).
 
 ## Capability-model tests (Front B)
 
-### fn share_caps / fn note_status
-Markers `// md:fn share_caps`, `// md:fn note_status`. Helpers: grant with an
-explicit capability bitmask (returning the status), and GET/PATCH/DELETE a note
-returning the status.
+### fn share_caps
+Marker `// md:fn share_caps`. Helper: grant with an explicit capability bitmask,
+returning the HTTP status.
+
+### fn note_status
+Marker `// md:fn note_status`. Helper: GET/PATCH/DELETE a note, returning the HTTP
+status.
 
 ### fn capability_grants_enforce_hierarchy_and_escalation
 Marker `// md:fn capability_grants_enforce_hierarchy_and_escalation`. READ-only B:
@@ -256,9 +264,13 @@ the **notebook** (read) cascades read onto the child note (GET 200, PATCH still
 403); revoking the notebook share re-cascades and B loses access — the destructive
 cascade in both directions.
 
-### fn notebook_share_caps / fn move_note_status
-Markers `// md:fn notebook_share_caps`, `// md:fn move_note_status`. Helpers
-returning status codes for notebook grants and note moves.
+### fn notebook_share_caps
+Marker `// md:fn notebook_share_caps`. Helper returning the status of a notebook
+grant with explicit capabilities.
+
+### fn move_note_status
+Marker `// md:fn move_note_status`. Helper returning the status of a note-move
+PATCH.
 
 ### fn note_move_requires_write_on_destination_notebook
 Marker `// md:fn note_move_requires_write_on_destination_notebook`. Issue #13:

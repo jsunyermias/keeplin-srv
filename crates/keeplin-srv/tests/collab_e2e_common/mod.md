@@ -75,18 +75,19 @@ the same pattern every suite uses — no Docker, no external server.
 
 ---
 
-## fn register / fn login
+## fn register
 
-**Identification** — two pub async fns; markers `// md:fn register`,
-`// md:fn login`.
-
-**What it does** — REST account setup over the real HTTP surface: `register` POSTs
-`/api/register` (fixed password `password123`); `login` POSTs `/api/login` with a
-device name and returns the **device token** string.
-
+**Identification** — pub async fn; marker `// md:fn register`. POSTs
+`/api/register` over the real HTTP surface (fixed password `password123`).
 **Dependencies** — `reqwest`, `serde_json`. **Used by** — all three e2e binaries.
+**Repeated context** — none.
 
-**Repeated context** — One login = one device = one token (device-as-actor); the
+## fn login
+
+**Identification** — pub async fn; marker `// md:fn login`. POSTs `/api/login`
+with a device name and returns the **device token** string. **Dependencies** —
+`reqwest`, `serde_json`. **Used by** — all three e2e binaries.
+**Repeated context** — one login = one device = one token (device-as-actor); the
 e2e binaries create a second device by calling `login` again with another name.
 
 ---

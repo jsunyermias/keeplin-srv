@@ -65,12 +65,16 @@ on an ephemeral loopback port with `ConnectInfo`, on a spawned task.
 
 ---
 
-## fn register / fn login
+## fn register
 
-**Identification** — helpers; markers `// md:fn register`, `// md:fn login`.
-REST account setup (register asserts 200); `login` returns the device token.
+**Identification** — helper; marker `// md:fn register`. REST registration over real
+HTTP (asserts 200). **Dependencies** — `reqwest`. **Used by** — the HTTP-level
+tests. **Repeated context** — none.
 
-**Dependencies** — `reqwest`. **Used by** — the HTTP-level tests.
+## fn login
+
+**Identification** — helper; marker `// md:fn login`. REST login returning the
+device token. **Dependencies** — `reqwest`. **Used by** — the HTTP-level tests.
 **Repeated context** — none.
 
 ---

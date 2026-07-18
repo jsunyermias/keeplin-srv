@@ -246,18 +246,24 @@ None` = tombstone. **Used by** `entity_history`, `http.rs` history handlers.
 
 ---
 
-## Notebook / Tag / ResourceMeta
+## Notebook
 
-**Identification** — three REST row structs; markers `// md:Notebook`, `// md:Tag`,
-`// md:ResourceMeta`.
+**Identification** — REST row struct; marker `// md:Notebook`. A notebook as served
+over REST (metadata only; `vv`/`last_writer` are internal to resolution and not
+exposed). **Used by** — `list_notebooks`, `http.rs`. **Repeated context** —
+server-as-source-of-truth; client DB is a cache.
 
-**What it does** — The materialised domain entities as served over REST (metadata
-only; `vv`/`last_writer` are internal to resolution and not exposed). `ResourceMeta`
-excludes the binary payload — fetched separately from `resource_blobs` via
-`GET /api/resources/:id/data`.
+## Tag
 
-**Used by** — the `list_*` reads and `http.rs`. **Repeated context** —
-server-as-source-of-truth for these entities; client DB is a cache.
+**Identification** — REST row struct; marker `// md:Tag`. Same shape and context for
+tags. **Used by** — `list_tags`, `http.rs`.
+
+## ResourceMeta
+
+**Identification** — REST row struct; marker `// md:ResourceMeta`. Resource metadata
+as served over REST; excludes the binary payload — fetched separately from
+`resource_blobs` via `GET /api/resources/:id/data`. **Used by** — `list_resources`,
+`http.rs`.
 
 ---
 

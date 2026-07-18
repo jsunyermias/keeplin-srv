@@ -69,15 +69,16 @@ extractor), on a spawned task.
 
 ---
 
-## fn register / fn login
+## fn register
 
-**Identification** — helpers; markers `// md:fn register`, `// md:fn login`.
+**Identification** — helper; marker `// md:fn register`. REST registration (fixed
+password). **Dependencies** — `reqwest`. **Used by** — every quota test.
+**Repeated context** — none.
 
-**What it does** — REST account setup (fixed password); `login` returns the device
-token.
+## fn login
 
-**Dependencies** — `reqwest`. **Used by** — every quota test.
-
+**Identification** — helper; marker `// md:fn login`. REST login returning the
+device token. **Dependencies** — `reqwest`. **Used by** — every quota test.
 **Repeated context** — none.
 
 ---

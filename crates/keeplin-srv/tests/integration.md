@@ -60,10 +60,13 @@ Marker `// md:fn spawn_server`. Real router on an ephemeral port with
 Marker `// md:fn spawn_instance`. Same, **plus `bus::spawn`** — a bus-enabled
 instance for the cross-instance relay test (issue #45).
 
-### fn register / fn login
+### fn register
 
-Markers `// md:fn register`, `// md:fn login`. REST account setup (register asserts
-200); `login` returns the device sync token.
+Marker `// md:fn register`. REST registration over real HTTP (asserts 200).
+
+### fn login
+
+Marker `// md:fn login`. REST login returning the device sync token.
 
 ### fn device
 
