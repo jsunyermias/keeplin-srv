@@ -110,14 +110,14 @@ async fn seed_note(addr: SocketAddr, title: &str, body: &str) -> (String, Uuid) 
 
 /// Every stored value of the two encrypted columns, raw (no decryption).
 async fn raw_values(pool: &PgPool) -> (Vec<String>, Vec<String>) {
-    let titles = sqlx::query("SELECT title FROM notes ORDER BY id")
+    let titles = sqlx::query("SELECT title FROM notes ORDER BY title")
         .fetch_all(pool)
         .await
         .unwrap()
         .into_iter()
         .map(|r| r.get::<String, _>("title"))
         .collect();
-    let contents = sqlx::query("SELECT content FROM lines ORDER BY id")
+    let contents = sqlx::query("SELECT content FROM lines ORDER BY content")
         .fetch_all(pool)
         .await
         .unwrap()

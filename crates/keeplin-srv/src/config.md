@@ -1,48 +1,298 @@
 # `config.rs` — runtime configuration
 
-## Purpose
+Self-contained companion for `crates/keeplin-srv/src/config.rs`. It documents **every
+code block of the source file, in source order** — a reader with only this file must be
+able to understand `config.rs` without opening anything else, so project-wide
+conventions are deliberately re-explained here (hyper-redundancy is intended).
 
-Defines `Config`, the process settings read once from environment variables at startup
-(`Config::from_env()`). Sensitive values (`JWT_SECRET`, `DATABASE_URL`) never have code
-defaults that would be safe to ship; everything else has a sane default via the `env_parse`
-helper.
+**How to navigate**: every block in `config.rs` carries exactly one marker comment of
+the form `// md:<Header> > … > <Block header>`, whose path is the header chain of the
+section documenting it here (starting below the file title). Grep the marker text to
+jump code → doc; grep the section's block name (or the marker path) in the `.rs` to
+jump doc → code. Each block section covers five fixed points: **Identification**,
+**What it does**, **Dependencies**, **Used by**, **Repeated context**.
 
-## Configuration / key reference
+---
+
+## Overview
+
+**Identification** — file-level notion only: this file has no imports; its first code
+block is `struct Config` itself. No separate `// md:Overview` marker exists — the file
+starts at `// md:Config`.
+
+**What it does** — Defines `Config`, the process settings read **once** from
+environment variables at startup (`Config::from_env()`), plus the `JWT_SECRET`
+strength gate. Sensitive values (`DATABASE_URL`, `JWT_SECRET`) have **no** shippable
+code defaults — the server refuses to start without real ones; every other knob has a
+backward-compatible default, so a fresh deployment runs with only those two set.
+
+**Dependencies** — `std::env` only (plus `tracing` for the dev-insecure warning).
+
+**Used by** — `main.rs` (`Config::from_env` at boot), `bin/reencrypt.rs` (same
+config, same `.env`), `state.rs` (`AppState.config`), and every integration test's
+`test_config()` helper (which builds a `Config` literal instead of reading the
+environment).
+
+**Repeated context** — Configuration conventions of the crate: **`0` disables** every
+optional limit/retention knob; booleans parse from `true`/`false`; all knobs are
+read exactly once at boot (no hot reload); `.env.example` mirrors these keys as a
+copy-paste starting point. Rotating `JWT_SECRET` invalidates every issued device
+token (all devices must log in again).
+
+---
+
+## Config
+
+**Identification** — struct; marker `// md:Config`.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Config { /* 27 public fields, see table */ }
+```
+
+**What it does** — The full settings surface. Env var → field → default → meaning:
 
 | Env var | Field | Default | Meaning |
 |---------|-------|---------|---------|
 | `PORT` | `port` | `3000` | HTTP/WS listen port |
-| `DATABASE_URL` | `database_url` | — (required) | PostgreSQL connection string; panics if unset |
-| `JWT_SECRET` | `jwt_secret` | — (required) | HMAC secret for signing device tokens. The server **refuses to start** if it is unset, empty, shorter than 16 chars, or the known dev placeholder (issue #19); set `KEEPLIN_DEV_INSECURE=1` to allow a weak/placeholder secret for local dev only |
-| `KEEPLIN_DEV_INSECURE` | — | `false` | `1`/`true` downgrades the `JWT_SECRET` strength check to a warning (local dev only — tokens become forgeable) |
-| `TOKEN_TTL_DAYS` | `token_ttl_days` | `365` | Device-token lifetime |
-| `CHANGES_RETENTION_DAYS` | `retention_days` | `0` (off) | Prune delivered relay-journal rows older than N days |
-| `LINES_GC_DAYS` | `lines_gc_days` | `30` | Compact line tombstones older than N days (design §6.4) |
-| `RESOURCE_PURGE_DAYS` | `resource_purge_days` | `0` (off) | Reclaim the blob bytes of resources soft-deleted more than N days ago; the metadata tombstone is kept (issue #24) |
-| `DB_MAX_CONNECTIONS` | `db_max_connections` | `10` | PostgreSQL pool size |
-| `DB_ACQUIRE_TIMEOUT_SECS` | `db_acquire_timeout_secs` | `10` | Fail a request instead of blocking forever when the pool is exhausted |
+| `DATABASE_URL` | `database_url` | — (required) | PostgreSQL connection string; `from_env` panics if unset |
+| `JWT_SECRET` | `jwt_secret` | — (required) | HMAC secret signing device tokens; refused if unset/empty/short/placeholder (issue #19) unless `KEEPLIN_DEV_INSECURE=1` |
+| `TOKEN_TTL_DAYS` | `token_ttl_days` | `365` | Device-token lifetime. Long on purpose: tokens live in daemon config files; revocation is by device deletion, not expiry |
+| `CHANGES_RETENTION_DAYS` | `retention_days` | `0` (off) | Prune relay-journal rows older than N days once every device of the owning user has received them |
+| `LINES_GC_DAYS` | `lines_gc_days` | `30` | Compact line tombstones soft-deleted more than N days ago (design §6.4) |
+| `RESOURCE_PURGE_DAYS` | `resource_purge_days` | `0` (off) | Reclaim blob bytes of resources soft-deleted > N days ago; metadata tombstone kept (issue #24); mirrors the client's `resource_purge_days` |
+| `DB_MAX_CONNECTIONS` | `db_max_connections` | `10` | PostgreSQL pool cap |
+| `DB_ACQUIRE_TIMEOUT_SECS` | `db_acquire_timeout_secs` | `10` | Fail fast instead of blocking when the pool is exhausted |
 | `DB_IDLE_TIMEOUT_SECS` | `db_idle_timeout_secs` | `600` | Reap idle pooled connections |
 | `DB_MAX_LIFETIME_SECS` | `db_max_lifetime_secs` | `1800` | Recycle pooled connections after this age |
-| `RATE_LIMIT_PER_MIN` | `rate_limit_per_min` | `0` (off) | Per-client-IP request budget/minute |
-| `SHUTDOWN_GRACE_SECS` | `shutdown_grace_secs` | `20` | Drain window before force-exit |
-| `LOG_JSON` | `log_json` | `false` | Emit JSON logs (one object/line) |
-| `MAX_UPLOAD_BYTES` | `max_upload_bytes` | `104857600` (100 MiB) | Max size of a resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
-| `MAX_USER_STORAGE_BYTES` | `max_user_storage_bytes` | `0` (off) | Total resource-blob bytes per user; a blob upload over it → `507` |
-| `MAX_NOTES_PER_USER` | `max_notes_per_user` | `0` (off) | Max live notes a user may own; creating past it → `507` |
-| `REGISTRATION_ENABLED` | `registration_enabled` | `true` | When `false`, `POST /api/register` returns `403` — close open signups on a private deployment (issue #21) |
-| `HISTORY_VISIBILITY` | `history_since_access` | `creation` | `creation`: everyone with read access sees an entity's full history; `access`: a **collaborator** sees only versions from when they were granted access (the owner always sees all) — issue #27 |
+| `RATE_LIMIT_PER_MIN` | `rate_limit_per_min` | `0` (off) | Per-client-IP token bucket; behind a proxy leave `0` and limit at the proxy (all requests share the proxy IP) |
+| `SHUTDOWN_GRACE_SECS` | `shutdown_grace_secs` | `20` | Drain window before force-exit (bounds long-lived WebSockets) |
+| `LOG_JSON` | `log_json` | `false` | JSON logs (one object/line) for aggregation |
+| `MAX_UPLOAD_BYTES` | `max_upload_bytes` | `104857600` (100 MiB) | Max resource binary upload (`PUT /api/resources/:id/data`); `413` over it |
+| `MAX_NOTE_BODY_BYTES` | `max_note_body_bytes` | `26214400` (25 MiB) | Max materialised note body on the read path (`GET /api/notes/:id`, export); `413` instead of building it in memory (issue #44); `0` disables |
+| `MAX_USER_STORAGE_BYTES` | `max_user_storage_bytes` | `0` (off) | Total live resource-blob bytes per user; upload over it → `507` |
+| `MAX_NOTES_PER_USER` | `max_notes_per_user` | `0` (off) | Max live notes a user may own; create past it → `507` |
+| `REGISTRATION_ENABLED` | `registration_enabled` | `true` | `false` → `POST /api/register` answers `403` (close open signups, issue #21) |
+| `AT_REST_KEY` | `at_rest_key` | `None` (off) | Base64 32-byte key for at-rest encryption of `notes.title`/`lines.content` (issue keeplin#110); unset = plaintext (backward compatible) |
+| `MAIL_WEBHOOK_URL` | `mail_webhook_url` | `None` (off) | Where email delivery is delegated (issue #49); unset → email flows answer `501` |
+| `MAIL_WEBHOOK_TOKEN` | `mail_webhook_token` | `None` | Optional bearer sent on webhook posts |
+| `EMAIL_TOKEN_TTL_SECS` | `email_token_ttl_secs` | `3600` | Lifetime of a verification/reset token |
+| `EMAIL_VERIFICATION_REQUIRED` | `email_verification_required` | `false` | `true` → login refuses unverified accounts (`403`); only sane with a webhook configured |
+| `LOGIN_MAX_FAILURES` | `login_max_failures` | `10` | Failed logins per email before a temporary lockout (DB-backed, holds across replicas); `0` disables |
+| `LOGIN_LOCKOUT_SECS` | `login_lockout_secs` | `300` | Lockout duration; also the staleness window (older failures restart the counter) |
+| `HISTORY_VISIBILITY` | `history_since_access` | `creation` (`false`) | `access` → `true`: a collaborator sees only versions since they were granted access; owner always sees all (issue #27) |
 
-## Notes & gotchas
+(`KEEPLIN_DEV_INSECURE` is read by `dev_insecure()`, not stored in the struct.)
 
-- `DATABASE_URL` and `JWT_SECRET` are hard requirements — `from_env` panics if either is
-  missing (or if `JWT_SECRET` is weak), on purpose: a guessable signing key lets anyone forge
-  a token for any user, so the server must not run without a real secret. Use
-  `KEEPLIN_DEV_INSECURE=1` only for local `cargo run`.
-- Leave `RATE_LIMIT_PER_MIN=0` behind a reverse proxy: every request would carry the proxy's
-  IP and share one bucket. Rate-limit at the proxy instead.
-- Rotating `JWT_SECRET` invalidates every issued token (all devices must log in again).
+**Dependencies** — none (plain data).
+
+**Used by** — `AppState.config` (`state.rs`) and through it every subsystem;
+`main.rs` reads the pool/logging/port knobs directly; the eight test files build it
+literally via their `test_config()` helpers.
+
+**Repeated context** — `Clone` because `main.rs` clones it into `AppState` while
+retaining values for its own wiring. Field-level meanings above are the single
+reference table; `.env.example` mirrors it.
+
+---
+
+## fn env_parse
+
+**Identification** — private generic helper; marker `// md:fn env_parse`.
+
+```rust
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T
+```
+
+**What it does** — Reads `key` from the environment and parses it; any absence or
+parse failure yields `default` silently. Used for every knob with a sane default —
+deliberately forgiving, in contrast with the hard-required secrets.
+
+**Dependencies** — `std::env`.
+
+**Used by** — `Config::from_env` (this file) for most fields.
+
+**Repeated context** — Silent fallback is acceptable *only* for tunables whose
+default is safe; anything security-relevant goes through the strict paths below.
+
+---
+
+## JWT secret constants
+
+**Identification** — logical section: the two consts; marker
+`// md:JWT secret constants`.
+
+```rust
+const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
+const MIN_JWT_SECRET_LEN: usize = 16;
+```
+
+**What it does** — `DEV_JWT_SECRET` is the historical dev placeholder; it is public
+in the source, so a token signed with it is forgeable by anyone — it must never
+authenticate a real deployment. `MIN_JWT_SECRET_LEN` (16 bytes) is the minimum
+acceptable secret length; shorter secrets are brute-forceable.
+
+**Dependencies** — none.
+
+**Used by** — `is_weak_secret`, `resolve_jwt_secret`, the unit tests (this file).
+
+**Repeated context** — Issue #19: a guessable signing key lets anyone forge a token
+for any user; these constants define the reject list.
+
+---
+
+## fn dev_insecure
+
+**Identification** — private function; marker `// md:fn dev_insecure`.
+
+```rust
+fn dev_insecure() -> bool
+```
+
+**What it does** — Whether the operator explicitly opted into insecure local-dev
+behaviour: `KEEPLIN_DEV_INSECURE` set to `1` or `true` (case-insensitive).
+
+**Dependencies** — `std::env`.
+
+**Used by** — `resolve_jwt_secret` (this file).
+
+**Repeated context** — The escape hatch is explicit and loud (a `warn` log) —
+mirroring the daemon's security-issues gate philosophy: insecure modes exist only as
+conscious opt-ins.
+
+---
+
+## fn is_weak_secret
+
+**Identification** — private function; marker `// md:fn is_weak_secret`.
+
+```rust
+fn is_weak_secret(s: &str) -> bool
+```
+
+**What it does** — A secret that must not authenticate a real deployment: empty (or
+whitespace-only), the public dev placeholder, or shorter than `MIN_JWT_SECRET_LEN`.
+
+**Dependencies** — the constants (this file).
+
+**Used by** — `resolve_jwt_secret`, unit tests (this file).
+
+**Repeated context** — none.
+
+---
+
+## fn resolve_jwt_secret
+
+**Identification** — private function; marker `// md:fn resolve_jwt_secret`.
+
+```rust
+fn resolve_jwt_secret() -> String
+```
+
+**What it does** — Resolves `JWT_SECRET`, refusing to start on a missing, empty,
+too-short, or placeholder value (issue #19): a strong secret is returned as-is; a
+weak/missing one **panics** with an actionable message — unless
+`KEEPLIN_DEV_INSECURE=1`, which downgrades the refusal to a loud warning and falls
+back to the provided weak value or, if none, the dev placeholder (local development
+only; tokens are forgeable).
+
+**Dependencies** — `dev_insecure`, `is_weak_secret`, `DEV_JWT_SECRET` (this file);
+`tracing`.
+
+**Used by** — `Config::from_env` (this file).
+
+**Repeated context** — Fail-fast startup: like `DATABASE_URL`'s `expect` and
+`AT_REST_KEY` validation in `main.rs`, a security-critical misconfiguration aborts
+the boot rather than degrading silently.
+
+---
+
+## impl Config
+
+**Identification** — inherent impl block; marker `// md:impl Config`. Contains
+`fn from_env` (next section).
+
+**What it does** — Construction from the environment; the struct has no other
+behaviour.
+
+**Dependencies** — `Config` (this file).
+
+**Used by** — see `fn from_env`.
+
+**Repeated context** — none beyond the method's own (below).
+
+### fn from_env
+
+**Identification** — associated function; marker `// md:impl Config > fn from_env`.
+
+```rust
+pub fn from_env() -> Self
+```
+
+**What it does** — Reads every field per the table under *Config*: `DATABASE_URL`
+via `expect` (hard requirement), `jwt_secret` via `resolve_jwt_secret` (strength
+gate), the optional strings (`AT_REST_KEY`, `MAIL_WEBHOOK_URL`, `MAIL_WEBHOOK_TOKEN`)
+filtered so blank means unset, `HISTORY_VISIBILITY` mapped `access` →
+`history_since_access = true` (anything else → `false`), and everything else through
+`env_parse` with its default. Panics only on the two hard requirements.
+
+**Dependencies** — `env_parse`, `resolve_jwt_secret` (this file); `std::env`.
+
+**Used by** — `main.rs` and `bin/reencrypt.rs` (the two binaries). Tests do **not**
+call it — they build `Config` literals so the environment can't leak into test
+behaviour.
+
+**Repeated context** — Blank-string filtering on the optional values matches how
+operators comment out env vars; `0`-disables is uniform across the numeric knobs.
+
+---
+
+## mod tests
+
+**Identification** — `#[cfg(test)]` unit-test module; marker `// md:mod tests`. Two
+tests, below.
+
+**What it does** — Pins the `JWT_SECRET` strength gate (pure functions only — no
+environment mutation, so the tests are parallel-safe).
+
+**Dependencies** — `super::*`.
+
+**Used by** — `cargo test` only.
+
+**Repeated context** — Issue #19's contract in executable form.
+
+### fn weak_secrets_are_rejected
+
+**Identification** — `#[test]`; marker
+`// md:mod tests > fn weak_secrets_are_rejected`.
+
+**What it does** — Empty, whitespace-only, the dev placeholder, `"short"`, and a
+15-char string are all weak.
+
+**Dependencies / Used by** — `is_weak_secret`; `cargo test`.
+
+**Repeated context** — none.
+
+### fn a_strong_secret_is_accepted
+
+**Identification** — `#[test]`; marker
+`// md:mod tests > fn a_strong_secret_is_accepted`.
+
+**What it does** — A 16-char string (the exact minimum) and a long random-looking
+secret pass the gate.
+
+**Dependencies / Used by** — `is_weak_secret`; `cargo test`.
+
+**Repeated context** — none.
+
+---
 
 ## Graph context
+
+Repo-tooling metadata, not a code block (no marker in the source). Kept in every
+companion because CI (`scripts/check-docs.sh`) enforces it: this file is LAYER 2 of the
+navigation model, the Graphify graph (`graphify-out/graph.json`) is LAYER 1; refresh
+with `graphify update .` after refactors.
 
 <!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
      EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
@@ -73,14 +323,21 @@ helper.
 - `crates/keeplin-srv/tests/reencrypt.rs` — re-encrypt pass tests (EXTRACTED: references×1; e.g. `test_config()`)
 - `crates/keeplin-srv/tests/soak.rs` — multi-instance collaborative soak/load drill (EXTRACTED: references×1; e.g. `test_config()`)
 
-**Invariants** (restated on purpose; a change to this file must keep these true)
+## Coverage checklist
 
-- Every knob comes from the environment with a backward-compatible default; a fresh deployment must run with only `DATABASE_URL` + `JWT_SECRET` set.
-- A weak/placeholder `JWT_SECRET` aborts startup unless `KEEPLIN_DEV_INSECURE=1` explicitly opts into insecure local dev.
-- `0` disables every optional limit/retention knob; `HISTORY_VISIBILITY` maps `access` → `history_since_access = true`, anything else → full history.
+Every code block of `config.rs`, in source order, each documented above (five points)
+and carrying its marker in the code:
 
-## Related files
-
-- `.env.example` — a copy-paste starting point mirroring these keys.
-- `main.md` — how each field is applied at startup.
-- `ratelimit.md` / `auth.md` — consumers of the rate-limit and token knobs.
+| # | Block (source order) | Marker in code | Documented in section |
+|---|----------------------|----------------|-----------------------|
+| 1 | `struct Config` | `// md:Config` | Config |
+| 2 | `fn env_parse` | `// md:fn env_parse` | fn env_parse |
+| 3 | `DEV_JWT_SECRET` / `MIN_JWT_SECRET_LEN` | `// md:JWT secret constants` | JWT secret constants |
+| 4 | `fn dev_insecure` | `// md:fn dev_insecure` | fn dev_insecure |
+| 5 | `fn is_weak_secret` | `// md:fn is_weak_secret` | fn is_weak_secret |
+| 6 | `fn resolve_jwt_secret` | `// md:fn resolve_jwt_secret` | fn resolve_jwt_secret |
+| 7 | `impl Config` | `// md:impl Config` | impl Config |
+| 8 | `fn from_env` | `// md:impl Config > fn from_env` | impl Config › fn from_env |
+| 9 | `mod tests` | `// md:mod tests` | mod tests |
+| 10 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
+| 11 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |

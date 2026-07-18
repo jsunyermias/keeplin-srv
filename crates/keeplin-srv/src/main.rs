@@ -1,3 +1,4 @@
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,12 +7,12 @@ use anyhow::Context;
 use keeplin_srv::{config::Config, http::router, state::AppState};
 use tracing_subscriber::EnvFilter;
 
+// md:fn main
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let config = Config::from_env();
 
-    // Structured (JSON) logging in production, pretty logging in development.
     let env_filter = EnvFilter::from_default_env().add_directive("keeplin_srv=info".parse()?);
     if config.log_json {
         tracing_subscriber::fmt()
@@ -22,9 +23,6 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
-    // Bounded pool: cap connections, fail fast instead of blocking forever when
-    // the pool is exhausted, and reap idle/old connections so zombies do not
-    // accumulate.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.db_max_connections)
         .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
@@ -39,15 +37,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("run database migrations")?;
 
-    // Fail fast on a malformed AT_REST_KEY rather than deep inside a request.
     keeplin_srv::crypto::Cipher::from_key(config.at_rest_key.as_deref())
         .map_err(|e| anyhow::anyhow!("AT_REST_KEY: {e}"))?;
 
     let state = Arc::new(AppState::new(config.clone(), pool));
 
-    // Clear any presence rows this instance left behind on a previous run before
-    // starting to listen (issue #45); instance ids are per-process, so also rely
-    // on the age-based sweep for other crashed instances.
     if let Err(e) = state
         .store
         .delete_instance_presence(state.instance_id)
@@ -55,12 +49,8 @@ async fn main() -> anyhow::Result<()> {
     {
         tracing::warn!(error = %e, "startup presence cleanup failed");
     }
-    // Cross-instance bus: deliver collab ops/presence and relay wakes between
-    // replicas over Postgres LISTEN/NOTIFY (issue #45).
     keeplin_srv::bus::spawn(state.clone());
 
-    // The maintenance loop also sweeps stale presence and prunes the collab
-    // outbox, which must run regardless of the retention settings.
     tokio::spawn(maintenance_loop(
         state.clone(),
         config.retention_days,
@@ -80,7 +70,6 @@ async fn main() -> anyhow::Result<()> {
         rate_limit_per_min = config.rate_limit_per_min,
         "Keeplin sync server listening"
     );
-    // `ConnectInfo` is required so the rate limiter can key on the peer IP.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -93,10 +82,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve on `SIGTERM` (containers/systemd) or `Ctrl-C`, then arm a watchdog:
-/// graceful shutdown drains in-flight REST requests, but long-lived WebSocket
-/// connections would otherwise keep the process alive forever, so after
-/// `grace` seconds the process force-exits.
+// md:fn shutdown_signal
 async fn shutdown_signal(grace: u64) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -127,19 +113,13 @@ async fn shutdown_signal(grace: u64) {
     });
 }
 
-/// Hourly maintenance: prune relay journal rows already delivered to every connected
-/// device (when `retention_days > 0`), compact old line tombstones (design §6.4, when
-/// `lines_gc_days > 0`), and reclaim the payloads of long-deleted resources (when
-/// `resource_purge_days > 0`).
+// md:fn maintenance_loop
 async fn maintenance_loop(
     state: Arc<AppState>,
     retention_days: u64,
     lines_gc_days: u64,
     resource_purge_days: u64,
 ) {
-    // Presence heartbeat/sweep runs on a shorter cadence than the hourly
-    // retention work so a crashed instance's ghost presence clears promptly
-    // (issue #45).
     const PRESENCE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
     const PRESENCE_TTL_SECS: i64 = 150;
     const COLLAB_EVENT_TTL_SECS: i64 = 300;
@@ -148,8 +128,6 @@ async fn maintenance_loop(
     loop {
         tokio::select! {
             _ = presence_tick.tick() => {
-                // Keep this instance's own rows fresh, then drop rows no live
-                // instance is heartbeating, and prune the delivered outbox.
                 if let Err(e) = state.store.touch_instance_presence(state.instance_id).await {
                     tracing::warn!(error = %e, "presence heartbeat failed");
                 }
@@ -173,8 +151,7 @@ async fn maintenance_loop(
     }
 }
 
-/// The hourly retention pass, split out so the maintenance loop can also run the
-/// shorter presence/outbox cadence.
+// md:fn run_retention
 async fn run_retention(
     state: &Arc<AppState>,
     retention_days: u64,
@@ -205,15 +182,12 @@ async fn run_retention(
             Err(e) => tracing::warn!(error = %e, "resource blob purge failed"),
         }
     }
-    // Login-failure rows a day old are long past any lockout window; drop them
-    // so the table stays bounded by recent activity.
     let stale = chrono::Utc::now() - chrono::Duration::hours(24);
     match state.store.prune_login_attempts(stale).await {
         Ok(0) => {}
         Ok(rows) => tracing::debug!(rows, "pruned stale login attempts"),
         Err(e) => tracing::warn!(error = %e, "login attempt prune failed"),
     }
-    // Email-flow tokens expired a day ago are dead weight (used or not).
     match state.store.prune_email_tokens(stale).await {
         Ok(0) => {}
         Ok(rows) => tracing::debug!(rows, "pruned expired email tokens"),

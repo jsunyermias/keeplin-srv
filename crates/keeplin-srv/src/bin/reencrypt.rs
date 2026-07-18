@@ -1,22 +1,8 @@
-//! `keeplin-reencrypt` — one-off administrative binary that rewrites plaintext
-//! `notes.title` / `lines.content` rows to at-rest-encrypted form
-//! (issue keeplin#110 follow-up). All the actual work lives in
-//! `keeplin_srv::reencrypt`; this binary only parses flags, loads the same
-//! `Config` the server uses, opens the pool, and reports the outcome.
-//!
-//! Usage (same environment as the server, `AT_REST_KEY` required):
-//!
-//! ```text
-//! keeplin-reencrypt [--dry-run] [--batch-size N]
-//! ```
-//!
-//! Safe to run against a live server: new writes are already encrypted, and
-//! the pass skips any row that changes under it. Idempotent and resumable —
-//! re-run after an interruption and it picks up where it left off.
-
+// md:Overview
 use anyhow::Context;
 use keeplin_srv::{config::Config, crypto::Cipher, reencrypt};
 
+// md:fn parse_args
 fn parse_args() -> anyhow::Result<reencrypt::Options> {
     let mut opts = reencrypt::Options::default();
     let mut args = std::env::args().skip(1);
@@ -46,6 +32,7 @@ fn parse_args() -> anyhow::Result<reencrypt::Options> {
     Ok(opts)
 }
 
+// md:fn main
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -65,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
         "AT_REST_KEY must be set: without it there is nothing to re-encrypt to"
     );
 
-    // A small pool is plenty: the pass is a single sequential scan per column.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&config.database_url)

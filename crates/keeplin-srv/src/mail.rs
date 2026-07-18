@@ -1,35 +1,16 @@
-//! Delegated email delivery (issue #49).
-//!
-//! keeplin-srv is **not a mail client**: it never speaks SMTP and holds no
-//! provider SDK. When an email flow (verification, password reset) needs a
-//! message delivered, the server POSTs a small JSON payload to the operator's
-//! own mail service — the **mail webhook** — which composes and sends the
-//! actual email with whatever provider it likes:
-//!
-//! ```json
-//! {
-//!   "kind": "verify_email" | "password_reset",
-//!   "to": "user@example.com",
-//!   "display_name": "User",
-//!   "token": "<single-use token to embed in the link>",
-//!   "expires_at": "2026-07-13T00:00:00Z"
-//! }
-//! ```
-//!
-//! `MAIL_WEBHOOK_TOKEN`, when set, is sent as a bearer so the webhook can
-//! authenticate the server. Without `MAIL_WEBHOOK_URL` the mailer is disabled
-//! and the flows answer `501` — an explicit deferral, never silent mail loss.
-
+// md:Overview
 use chrono::{DateTime, Utc};
 
-/// The two email flows the server can ask the webhook to deliver.
+// md:MailKind
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailKind {
     VerifyEmail,
     PasswordReset,
 }
 
+// md:impl MailKind
 impl MailKind {
+    // md:impl MailKind > fn as_str
     pub fn as_str(self) -> &'static str {
         match self {
             MailKind::VerifyEmail => "verify_email",
@@ -38,7 +19,7 @@ impl MailKind {
     }
 }
 
-/// Posts email-flow payloads to the operator's mail webhook. Cheap to clone.
+// md:Mailer
 #[derive(Clone)]
 pub struct Mailer {
     webhook_url: Option<String>,
@@ -46,7 +27,9 @@ pub struct Mailer {
     http: reqwest::Client,
 }
 
+// md:impl Mailer
 impl Mailer {
+    // md:impl Mailer > fn new
     pub fn new(webhook_url: Option<String>, webhook_token: Option<String>) -> Self {
         Self {
             webhook_url,
@@ -55,15 +38,12 @@ impl Mailer {
         }
     }
 
-    /// Whether delivery is configured. Flows check this up front and answer
-    /// `501` when it is not, so the deferral is visible to callers.
+    // md:impl Mailer > fn enabled
     pub fn enabled(&self) -> bool {
         self.webhook_url.is_some()
     }
 
-    /// Deliver one flow message. An unreachable/erroring webhook is reported as
-    /// an error so the caller can surface a `500` rather than pretend the mail
-    /// went out (the token would otherwise be stranded).
+    // md:impl Mailer > fn send
     pub async fn send(
         &self,
         kind: MailKind,
