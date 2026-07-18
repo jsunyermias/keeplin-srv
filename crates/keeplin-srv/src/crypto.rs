@@ -1,49 +1,25 @@
-//! At-rest encryption of the sensitive note fields — line content and note
-//! title (issue keeplin#110).
-//!
-//! Collaborative editing needs the plaintext in the server's memory to merge
-//! line ops, so this does **not** make notes end-to-end encrypted; it protects
-//! the data **at rest** in PostgreSQL. A database dump, a stolen backup, or SQL
-//! read access sees ciphertext, not note contents. It does not defend against a
-//! compromised running server or a malicious operator (both hold the key).
-//!
-//! Design:
-//! - AES-256-GCM with a fresh random 96-bit nonce per value.
-//! - The key comes from `AT_REST_KEY` (base64, 32 bytes). If unset, encryption
-//!   is **disabled** and values are stored as-is — so the feature is opt-in and
-//!   an existing deployment keeps working.
-//! - A stored value is tagged `enc:v1:<base64(nonce‖ciphertext)>`. Untagged
-//!   values are plaintext. Both forms decrypt correctly, so enabling the key on
-//!   a running database is safe: old rows stay readable and new writes are
-//!   encrypted. The one-off `keeplin-reencrypt` binary (`src/reencrypt.rs`)
-//!   migrates the old plaintext rows to `enc:v1:` — see RUNBOOK.md.
-
+// md:Overview
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
 use base64::Engine as _;
 
 use crate::error::AppError;
 
-/// Storage tag prefixing every encrypted value. Public so the re-encrypt pass
-/// (`src/reencrypt.rs`) can select the rows that still lack it (`NOT LIKE
-/// 'enc:v1:%'`) without duplicating the literal.
+// md:Constants
 pub const ENC_PREFIX: &str = "enc:v1:";
 const TAG: &str = ENC_PREFIX;
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
-/// The at-rest cipher. Cheap to clone; holds the parsed key (or nothing, when
-/// encryption is disabled).
+// md:Cipher
 #[derive(Clone)]
 pub struct Cipher {
     cipher: Option<Aes256Gcm>,
 }
 
+// md:impl Cipher
 impl Cipher {
-    /// Build from the optional base64 `AT_REST_KEY`. `None`/empty disables
-    /// encryption (values pass through). A present-but-invalid key is a
-    /// configuration error and is returned as such so the server refuses to
-    /// start rather than silently storing plaintext.
+    // md:impl Cipher > fn from_key
     pub fn from_key(key: Option<&str>) -> Result<Self, String> {
         let raw = match key.map(str::trim).filter(|k| !k.is_empty()) {
             None => return Ok(Self { cipher: None }),
@@ -64,12 +40,12 @@ impl Cipher {
         })
     }
 
+    // md:impl Cipher > fn enabled
     pub fn enabled(&self) -> bool {
         self.cipher.is_some()
     }
 
-    /// Encrypt a value for storage. When disabled, returns the plaintext
-    /// unchanged. When enabled, returns `enc:v1:<base64(nonce‖ciphertext)>`.
+    // md:impl Cipher > fn encrypt
     pub fn encrypt(&self, plaintext: &str) -> Result<String, AppError> {
         let Some(cipher) = &self.cipher else {
             return Ok(plaintext.to_string());
@@ -83,10 +59,7 @@ impl Cipher {
         Ok(format!("{TAG}{}", B64.encode(blob)))
     }
 
-    /// Decrypt a stored value. An untagged value is returned as-is (plaintext,
-    /// or a value written before the key was enabled). A tagged value is
-    /// decrypted; a failure (wrong key, corruption) is an error rather than a
-    /// silent wrong answer.
+    // md:impl Cipher > fn decrypt
     pub fn decrypt(&self, stored: &str) -> Result<String, AppError> {
         let Some(rest) = stored.strip_prefix(TAG) else {
             return Ok(stored.to_string());
@@ -110,14 +83,17 @@ impl Cipher {
     }
 }
 
+// md:mod tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // md:mod tests > fn test_key
     fn test_key() -> String {
         B64.encode([7u8; 32])
     }
 
+    // md:mod tests > fn disabled_is_passthrough
     #[test]
     fn disabled_is_passthrough() {
         let c = Cipher::from_key(None).unwrap();
@@ -126,6 +102,7 @@ mod tests {
         assert_eq!(c.decrypt("hello").unwrap(), "hello");
     }
 
+    // md:mod tests > fn round_trips_and_tags
     #[test]
     fn round_trips_and_tags() {
         let c = Cipher::from_key(Some(&test_key())).unwrap();
@@ -135,15 +112,16 @@ mod tests {
         assert_eq!(c.decrypt(&ct).unwrap(), "secret note line");
     }
 
+    // md:mod tests > fn nonce_is_random_per_value
     #[test]
     fn nonce_is_random_per_value() {
         let c = Cipher::from_key(Some(&test_key())).unwrap();
         assert_ne!(c.encrypt("x").unwrap(), c.encrypt("x").unwrap());
     }
 
+    // md:mod tests > fn reads_legacy_plaintext_when_enabled
     #[test]
     fn reads_legacy_plaintext_when_enabled() {
-        // Enabling the key on an existing DB must not break old plaintext rows.
         let c = Cipher::from_key(Some(&test_key())).unwrap();
         assert_eq!(
             c.decrypt("old plaintext title").unwrap(),
@@ -151,6 +129,7 @@ mod tests {
         );
     }
 
+    // md:mod tests > fn wrong_key_fails_loudly
     #[test]
     fn wrong_key_fails_loudly() {
         let a = Cipher::from_key(Some(&B64.encode([1u8; 32]))).unwrap();
@@ -159,6 +138,7 @@ mod tests {
         assert!(b.decrypt(&ct).is_err());
     }
 
+    // md:mod tests > fn bad_key_length_rejected
     #[test]
     fn bad_key_length_rejected() {
         assert!(Cipher::from_key(Some(&B64.encode([0u8; 16]))).is_err());

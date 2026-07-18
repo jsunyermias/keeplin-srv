@@ -1,7 +1,9 @@
+// md:Overview
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+// md:AppError
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("database error: {0}")]
@@ -41,7 +43,9 @@ pub enum AppError {
     Internal(String),
 }
 
+// md:impl AppError
 impl AppError {
+    // md:impl AppError > fn status
     fn status(&self) -> axum::http::StatusCode {
         use axum::http::StatusCode;
         match self {
@@ -60,11 +64,7 @@ impl AppError {
         }
     }
 
-    /// The message sent to the client. Internal failures (database, unexpected
-    /// internal errors) are collapsed to a generic string so their detail —
-    /// which can name tables/columns/constraints — is not leaked in the
-    /// response; the full error is logged server-side instead (issue #46).
-    /// Caller-facing variants keep their specific, safe message.
+    // md:impl AppError > fn client_message
     fn client_message(&self) -> String {
         match self {
             AppError::Database(_) | AppError::Internal(_) => "internal error".to_string(),
@@ -73,11 +73,11 @@ impl AppError {
     }
 }
 
+// md:impl IntoResponse for AppError
 impl IntoResponse for AppError {
+    // md:impl IntoResponse for AppError > fn into_response
     fn into_response(self) -> Response {
         let status = self.status();
-        // Log the full detail (including the sqlx/internal message) for operators,
-        // but never put it in the client body.
         if status.is_server_error() {
             tracing::error!(error = %self, "request failed");
         }

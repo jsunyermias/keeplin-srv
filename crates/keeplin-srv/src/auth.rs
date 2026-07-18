@@ -1,3 +1,4 @@
+// md:Overview
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -16,14 +17,16 @@ use uuid::Uuid;
 
 use crate::{error::AppError, state::AppState};
 
+// md:Claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: Uuid, // user_id
+    pub sub: Uuid,
     pub device_id: Uuid,
     pub email: String,
     pub exp: usize,
 }
 
+// md:AuthedUser
 #[derive(Debug, Clone)]
 pub struct AuthedUser {
     pub user_id: Uuid,
@@ -31,6 +34,7 @@ pub struct AuthedUser {
     pub email: String,
 }
 
+// md:fn hash_password
 pub fn hash_password(password: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -40,6 +44,7 @@ pub fn hash_password(password: &str) -> Result<String, AppError> {
     Ok(hash.to_string())
 }
 
+// md:fn verify_password
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
     let parsed = PasswordHash::new(hash)
         .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
@@ -47,9 +52,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
     Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
-/// A valid Argon2 hash of a fixed dummy password, computed once. `login` verifies against
-/// it when the email has no account so that a missing account and a wrong password take the
-/// same time, closing the user-enumeration timing side-channel (issue #32).
+// md:fn dummy_password_hash
 pub fn dummy_password_hash() -> &'static str {
     use std::sync::OnceLock;
     static HASH: OnceLock<String> = OnceLock::new();
@@ -59,6 +62,7 @@ pub fn dummy_password_hash() -> &'static str {
     })
 }
 
+// md:fn create_token
 pub fn create_token(
     user_id: Uuid,
     device_id: Uuid,
@@ -80,6 +84,7 @@ pub fn create_token(
     )
 }
 
+// md:fn verify_token
 pub fn verify_token(token: &str, secret: &str) -> Result<AuthedUser, AppError> {
     let token_data = decode::<Claims>(
         token,
@@ -98,6 +103,7 @@ pub fn verify_token(token: &str, secret: &str) -> Result<AuthedUser, AppError> {
     })
 }
 
+// md:fn auth_mw
 pub async fn auth_mw(
     state: State<Arc<AppState>>,
     mut req: Request<Body>,
@@ -112,9 +118,6 @@ pub async fn auth_mw(
         .and_then(|h| h.strip_prefix("Bearer "))
         .ok_or(AppError::MissingToken)?;
     let user = verify_token(token, &state.config.jwt_secret)?;
-    // Deleting a device revokes its token immediately: the claim must still
-    // reference a live device of the same user, not just carry a valid
-    // signature.
     match state.store.get_device(user.device_id).await? {
         Some(device) if device.user_id == user.user_id => {}
         _ => return Err(AppError::InvalidToken),
@@ -123,6 +126,7 @@ pub async fn auth_mw(
     Ok(next.run(req).await)
 }
 
+// md:impl FromRequestParts for AuthedUser
 #[async_trait::async_trait]
 impl<S> FromRequestParts<S> for AuthedUser
 where
@@ -130,6 +134,7 @@ where
 {
     type Rejection = AppError;
 
+    // md:impl FromRequestParts for AuthedUser > fn from_request_parts
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         parts
             .extensions
