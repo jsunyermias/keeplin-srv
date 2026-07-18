@@ -1,13 +1,4 @@
-//! End-to-end tests of the sync relay against the **real client**: two (or
-//! three) keeplin-core `DbBackend` instances speaking the genuine wire
-//! protocol — the `auth` handshake sent on construction, `send_changes`
-//! envelopes, and `receive_changes` draining — through a keeplin-srv instance
-//! backed by a throwaway Postgres database (`#[sqlx::test]`).
-//!
-//! This mirrors keeplin-core's own `ws_sync.rs` suite, but replaces its
-//! test-only in-memory relay with this production server, adding what the toy
-//! relay lacked: authentication, persistence, and offline catch-up.
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -22,6 +13,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// md:fn test_config
 fn test_config() -> Config {
     Config {
         port: 0,
@@ -54,6 +46,7 @@ fn test_config() -> Config {
     }
 }
 
+// md:fn spawn_server
 async fn spawn_server(pool: PgPool) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(), pool));
     let app: Router = router(state);
@@ -70,8 +63,7 @@ async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
-/// Spawn a server instance with the cross-instance bus running, for the
-/// multi-instance relay test (issue #45).
+// md:fn spawn_instance
 async fn spawn_instance(pool: PgPool) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(), pool));
     keeplin_srv::bus::spawn(state.clone());
@@ -89,6 +81,7 @@ async fn spawn_instance(pool: PgPool) -> SocketAddr {
     addr
 }
 
+// md:fn register
 async fn register(addr: SocketAddr, email: &str) {
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/api/register"))
@@ -99,7 +92,7 @@ async fn register(addr: SocketAddr, email: &str) {
     assert_eq!(resp.status(), 200);
 }
 
-/// Log a device in and return its sync token.
+// md:fn login
 async fn login(addr: SocketAddr, email: &str, device_name: &str) -> String {
     let body: Value = reqwest::Client::new()
         .post(format!("http://{addr}/api/login"))
@@ -113,9 +106,7 @@ async fn login(addr: SocketAddr, email: &str, device_name: &str) -> String {
     body["token"].as_str().unwrap().to_string()
 }
 
-/// Build a server-mode `DbBackend` (the real keeplin client) pointed at the
-/// relay with `token`. The temp dir is leaked so the database outlives the
-/// backend for the duration of the test.
+// md:fn device
 async fn device(addr: SocketAddr, token: &str) -> DbBackend {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("device.db");
@@ -125,19 +116,18 @@ async fn device(addr: SocketAddr, token: &str) -> DbBackend {
         .unwrap()
 }
 
+// md:fn epoch
 fn epoch() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(0, 0).unwrap()
 }
 
-/// Push every local change of `dev` to the relay.
+// md:fn push
 async fn push(dev: &DbBackend) {
     let changes = dev.get_changes_since(epoch()).await.unwrap();
     dev.send_changes(changes).await.unwrap();
 }
 
-/// Repeatedly `receive_changes` (each call drains ~100 ms), applying every
-/// received change, until note `id` is present and — when `want_body` is
-/// `Some` — its body matches. Returns whether it converged.
+// md:fn sync_until
 async fn sync_until(dev: &DbBackend, id: Uuid, want_body: Option<&str>) -> bool {
     for _ in 0..50 {
         let remote = dev.receive_changes().await.unwrap();
@@ -155,8 +145,7 @@ async fn sync_until(dev: &DbBackend, id: Uuid, want_body: Option<&str>) -> bool 
     false
 }
 
-// ── Live relay between two connected devices ─────────────────────────────────
-
+// md:fn note_syncs_live_between_two_devices
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_syncs_live_between_two_devices(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -178,9 +167,7 @@ async fn note_syncs_live_between_two_devices(pool: PgPool) {
     assert_eq!(read.body, "over the wire");
 }
 
-/// A batch pushed to one instance is delivered live to a device connected to a
-/// *different* instance, via the cross-instance relay wake over the bus (issue
-/// #45) — not just on the next reconnect.
+// md:fn relay_batch_propagates_across_instances
 #[sqlx::test(migrations = "../../migrations")]
 async fn relay_batch_propagates_across_instances(pool: PgPool) {
     let addr_a = spawn_instance(pool.clone()).await;
@@ -200,6 +187,7 @@ async fn relay_batch_propagates_across_instances(pool: PgPool) {
     );
 }
 
+// md:fn update_propagates_and_converges
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_propagates_and_converges(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -225,8 +213,7 @@ async fn update_propagates_and_converges(pool: PgPool) {
     );
 }
 
-// ── Offline catch-up: the journal, not just live fan-out ────────────────────
-
+// md:fn device_connecting_later_receives_backlog
 #[sqlx::test(migrations = "../../migrations")]
 async fn device_connecting_later_receives_backlog(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -237,10 +224,8 @@ async fn device_connecting_later_receives_backlog(pool: PgPool) {
     let id = note.id;
     a.create_note(note).await.unwrap();
     push(&a).await;
-    // Give the relay a moment to persist the batch before B connects.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // B logs in and connects only now: the note must arrive from the journal.
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
     assert!(
         sync_until(&b, id, None).await,
@@ -248,8 +233,7 @@ async fn device_connecting_later_receives_backlog(pool: PgPool) {
     );
 }
 
-// ── Isolation and safety properties ──────────────────────────────────────────
-
+// md:fn users_do_not_see_each_others_changes
 #[sqlx::test(migrations = "../../migrations")]
 async fn users_do_not_see_each_others_changes(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -269,6 +253,7 @@ async fn users_do_not_see_each_others_changes(pool: PgPool) {
     );
 }
 
+// md:fn duplicate_batches_are_deduplicated
 #[sqlx::test(migrations = "../../migrations")]
 async fn duplicate_batches_are_deduplicated(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -278,22 +263,17 @@ async fn duplicate_batches_are_deduplicated(pool: PgPool) {
     let note = Note::new("Once", "sent twice");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    // The same local changes pushed twice → two envelopes with different
-    // batch_ids but... a genuine client retry re-sends the *same* payload; the
-    // relay's dedup key is (batch_id, index), so pushing the identical journal
-    // twice produces two batches. B must still converge to exactly one note.
     push(&a).await;
     push(&a).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
     assert!(sync_until(&b, id, None).await, "B must receive the note");
-    // Applying the duplicate create is idempotent on the client, so the state
-    // stays consistent.
     let read = b.read_note(id).await.unwrap();
     assert_eq!(read.title, "Once");
 }
 
+// md:fn sender_never_receives_its_own_changes_back
 #[sqlx::test(migrations = "../../migrations")]
 async fn sender_never_receives_its_own_changes_back(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -312,8 +292,7 @@ async fn sender_never_receives_its_own_changes_back(pool: PgPool) {
     );
 }
 
-// ── Handshake rejections ─────────────────────────────────────────────────────
-
+// md:fn invalid_token_gets_no_data
 #[sqlx::test(migrations = "../../migrations")]
 async fn invalid_token_gets_no_data(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -326,9 +305,6 @@ async fn invalid_token_gets_no_data(pool: PgPool) {
     push(&a).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // A client with a garbage token connects "successfully" (the TCP/WS
-    // upgrade succeeds) but the server closes after the handshake and no
-    // changes ever arrive.
     let intruder = device(addr, "not-a-valid-jwt").await;
     assert!(
         !sync_until(&intruder, id, None).await,
@@ -336,8 +312,7 @@ async fn invalid_token_gets_no_data(pool: PgPool) {
     );
 }
 
-// ── HTTP surface ─────────────────────────────────────────────────────────────
-
+// md:fn register_login_and_device_listing
 #[sqlx::test(migrations = "../../migrations")]
 async fn register_login_and_device_listing(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -345,7 +320,6 @@ async fn register_login_and_device_listing(pool: PgPool) {
 
     register(addr, "a@example.com").await;
 
-    // Duplicate registration is rejected with 409.
     let dup = client
         .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": "a@example.com", "password": "password123" }))
@@ -356,7 +330,6 @@ async fn register_login_and_device_listing(pool: PgPool) {
 
     let token = login(addr, "a@example.com", "laptop").await;
 
-    // A second device can be added with the first device's token.
     let second: Value = client
         .post(format!("http://{addr}/api/devices"))
         .bearer_auth(&token)
@@ -381,7 +354,6 @@ async fn register_login_and_device_listing(pool: PgPool) {
         .unwrap();
     assert_eq!(devices.as_array().unwrap().len(), 2);
 
-    // Wrong password fails.
     let bad = client
         .post(format!("http://{addr}/api/login"))
         .json(
@@ -393,11 +365,7 @@ async fn register_login_and_device_listing(pool: PgPool) {
     assert_eq!(bad.status(), 401);
 }
 
-// ── Server-side history (Front D stage 2) ────────────────────────────────────
-
-/// The server journal holds every device's changes, so `GET /api/…/history` serves the
-/// full cross-device version history — including to a fresh device whose local journal is
-/// empty. Newest first; a delete is a tombstone (`entity: null`); scoped per account.
+// md:fn history_endpoints_serve_versions_from_the_server_journal
 #[sqlx::test(migrations = "../../migrations")]
 async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -406,8 +374,6 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
     let a = device(addr, &token).await;
     let device_id = a.get_device_id().await.unwrap();
 
-    // Device A authors three note versions (create, edit, delete) and a notebook rename,
-    // then pushes the lot in one batch.
     let note = a.create_note(Note::new("T", "v1")).await.unwrap();
     let mut edited = note.clone();
     edited.body = "v2".into();
@@ -439,8 +405,6 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
         }
     };
 
-    // `send_changes` returns once the frame is on the wire; the server journals it
-    // asynchronously, so poll until the batch has landed.
     let mut versions = Value::Null;
     for _ in 0..50 {
         versions = get(format!("/api/notes/{}/history", note.id)).await;
@@ -450,7 +414,6 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    // Note history: newest first — tombstone, v2, v1 — each stamped with the sync device.
     let versions = versions.as_array().unwrap();
     assert_eq!(
         versions.len(),
@@ -462,19 +425,15 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
     assert_eq!(versions[2]["entity"]["body"], "v1");
     assert_eq!(versions[0]["device_id"], device_id.as_str());
 
-    // The count cap bounds the reply.
     let capped = get(format!("/api/notes/{}/history?limit=1", note.id)).await;
     assert_eq!(capped.as_array().unwrap().len(), 1);
 
-    // Notebook history mirrors the note shape.
     let versions = get(format!("/api/notebooks/{}/history", nb.id)).await;
     let versions = versions.as_array().unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[0]["entity"]["title"], "new");
     assert_eq!(versions[1]["entity"]["title"], "old");
 
-    // This note only ever travelled the relay (no server-side `notes` row), so it is private
-    // to A's account: another user's history read is scoped to their own (empty) journal.
     register(addr, "b@example.com").await;
     let token_b = login(addr, "b@example.com", "phone").await;
     let other: Value = client
@@ -488,8 +447,6 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
         .unwrap();
     assert!(other.as_array().unwrap().is_empty());
 
-    // A materialised notebook, by contrast, is gated on read access: B cannot see A's
-    // notebook history at all.
     let denied = client
         .get(format!("http://{addr}/api/notebooks/{}/history", nb.id))
         .bearer_auth(&token_b)
@@ -499,10 +456,7 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
     assert_eq!(denied.status(), 403, "no access to the notebook → 403");
 }
 
-// ── Account management (issue #31) ───────────────────────────────────────────
-
-/// Self-service password change requires the current password; the new one then works and
-/// the old one stops. And "sign out everywhere" revokes every device token at once.
+// md:fn password_change_and_logout_everywhere
 #[sqlx::test(migrations = "../../migrations")]
 async fn password_change_and_logout_everywhere(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -510,7 +464,6 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "laptop").await;
 
-    // Wrong current password is rejected.
     let bad = client
         .post(format!("http://{addr}/api/account/password"))
         .bearer_auth(&token)
@@ -520,7 +473,6 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
         .unwrap();
     assert_eq!(bad.status(), 401);
 
-    // Correct current password changes it.
     let ok = client
         .post(format!("http://{addr}/api/account/password"))
         .bearer_auth(&token)
@@ -530,7 +482,6 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
         .unwrap();
     assert_eq!(ok.status(), 200);
 
-    // Old password no longer logs in; the new one does.
     let old = client
         .post(format!("http://{addr}/api/login"))
         .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
@@ -546,7 +497,6 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
         .unwrap();
     assert_eq!(new.status(), 200);
 
-    // "Sign out everywhere" revokes the current token immediately.
     let logout = client
         .delete(format!("http://{addr}/api/devices"))
         .bearer_auth(&token)
@@ -563,8 +513,7 @@ async fn password_change_and_logout_everywhere(pool: PgPool) {
     assert_eq!(denied.status(), 401, "revoked token must stop working");
 }
 
-/// Account deletion requires the current password and then removes the account: the token
-/// stops working, the notes are gone, and the email can be registered afresh (issue #31).
+// md:fn delete_account_requires_password_and_cascades
 #[sqlx::test(migrations = "../../migrations")]
 async fn delete_account_requires_password_and_cascades(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -572,7 +521,6 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "laptop").await;
 
-    // Create a note so we can prove ownership is torn down with the account.
     let created = client
         .post(format!("http://{addr}/api/notes"))
         .bearer_auth(&token)
@@ -582,7 +530,6 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         .unwrap();
     assert_eq!(created.status(), 200);
 
-    // Wrong password is rejected and the account survives.
     let bad = client
         .delete(format!("http://{addr}/api/account"))
         .bearer_auth(&token)
@@ -599,7 +546,6 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         .unwrap();
     assert_eq!(still.status(), 200, "account must survive a failed delete");
 
-    // Correct password deletes the account.
     let gone = client
         .delete(format!("http://{addr}/api/account"))
         .bearer_auth(&token)
@@ -609,7 +555,6 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         .unwrap();
     assert_eq!(gone.status(), 200);
 
-    // The token no longer authenticates (its device row cascaded away).
     let denied = client
         .get(format!("http://{addr}/api/notes"))
         .bearer_auth(&token)
@@ -622,7 +567,6 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
         "deleted account's token must stop working"
     );
 
-    // The email is free again — the user row (and its unique email) is gone.
     let reused = client
         .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": "a@example.com", "password": "password123" }))
@@ -636,9 +580,7 @@ async fn delete_account_requires_password_and_cascades(pool: PgPool) {
     );
 }
 
-/// `GET /api/notes?limit=&cursor=` returns a bounded page and an `X-Next-Cursor`
-/// header; following it walks every note exactly once, and omitting `limit`
-/// still returns them all (back-compatible) (issue #29).
+// md:fn list_notes_paginates_with_cursor
 #[sqlx::test(migrations = "../../migrations")]
 async fn list_notes_paginates_with_cursor(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -646,8 +588,6 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "laptop").await;
 
-    // Create seven notes. Their updated_at values may tie, so the id tiebreaker
-    // is what keeps the keyset walk total and duplicate-free.
     let total = 7;
     for i in 0..total {
         let resp = client
@@ -660,7 +600,6 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
         assert_eq!(resp.status(), 200);
     }
 
-    // Page through with limit=3, following X-Next-Cursor until it stops.
     let mut seen: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     let mut pages = 0;
@@ -691,14 +630,12 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
         assert!(pages < 10, "pagination must terminate");
     }
 
-    // Every note seen exactly once: 3 + 3 + 1 across three pages.
     assert_eq!(pages, 3);
     assert_eq!(seen.len(), total);
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), total, "no note may repeat across pages");
 
-    // No limit → the whole list, and no next-cursor header.
     let all = client
         .get(format!("http://{addr}/api/notes"))
         .bearer_auth(&token)
@@ -709,7 +646,6 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
     let all_notes: Vec<Value> = all.json().await.unwrap();
     assert_eq!(all_notes.len(), total);
 
-    // A garbage cursor is a client error, not a silent empty page.
     let bad = client
         .get(format!("http://{addr}/api/notes"))
         .bearer_auth(&token)
@@ -720,10 +656,7 @@ async fn list_notes_paginates_with_cursor(pool: PgPool) {
     assert_eq!(bad.status(), 400);
 }
 
-// ── Metrics: Prometheus exposition ────────────────────────────────────────────
-
-/// `?format=prometheus` renders the text exposition format with the expected
-/// gauges; the default stays JSON.
+// md:fn metrics_render_prometheus_format
 #[sqlx::test(migrations = "../../migrations")]
 async fn metrics_render_prometheus_format(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -754,7 +687,6 @@ async fn metrics_render_prometheus_format(pool: PgPool) {
     );
     assert!(body.contains("keeplin_collab_sessions"));
 
-    // Default stays JSON (back-compatible).
     let json_resp: Value = client
         .get(format!("http://{addr}/api/metrics"))
         .bearer_auth(&token)
@@ -767,10 +699,7 @@ async fn metrics_render_prometheus_format(pool: PgPool) {
     assert_eq!(json_resp["users"], 1);
 }
 
-// ── Email flows: verification + password reset (issue #49) ───────────────────
-
-/// A mock of the operator's mail webhook: captures every payload the server
-/// posts, standing in for the external mail service keeplin delegates to.
+// md:fn spawn_mail_webhook
 async fn spawn_mail_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
     let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
     let captured = inbox.clone();
@@ -792,7 +721,7 @@ async fn spawn_mail_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>
     (addr, inbox)
 }
 
-/// Pull the most recent captured token of `kind`, waiting for delivery.
+// md:fn webhook_token
 async fn webhook_token(inbox: &Arc<tokio::sync::Mutex<Vec<Value>>>, kind: &str) -> String {
     for _ in 0..50 {
         if let Some(t) = inbox
@@ -810,11 +739,7 @@ async fn webhook_token(inbox: &Arc<tokio::sync::Mutex<Vec<Value>>>, kind: &str) 
     panic!("no {kind} payload reached the mail webhook");
 }
 
-/// Full delegated-mail lifecycle: registration triggers a verification mail,
-/// unverified login is refused under EMAIL_VERIFICATION_REQUIRED, confirming
-/// the token unlocks login; a password reset delivers a token that sets a new
-/// password, signs out every device, and cannot be replayed. An unknown email
-/// gets the same uniform 200 with no mail sent (no oracle).
+// md:fn email_verification_and_password_reset_flows
 #[sqlx::test(migrations = "../../migrations")]
 async fn email_verification_and_password_reset_flows(pool: PgPool) {
     let (mail_addr, inbox) = spawn_mail_webhook().await;
@@ -824,11 +749,9 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
     let addr = spawn_server_with_config(pool, config).await;
     let client = reqwest::Client::new();
 
-    // Registration fires the verification mail through the webhook.
     register(addr, "a@example.com").await;
     let verify_token = webhook_token(&inbox, "verify_email").await;
 
-    // Unverified: login is refused even with the right password.
     let denied = client
         .post(format!("http://{addr}/api/login"))
         .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
@@ -837,7 +760,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
         .unwrap();
     assert_eq!(denied.status(), 400, "unverified account must not log in");
 
-    // Confirm (unauthenticated: the token is the proof) → login works.
     let confirmed = client
         .post(format!("http://{addr}/api/account/verify/confirm"))
         .json(&json!({ "token": verify_token }))
@@ -847,7 +769,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
     assert_eq!(confirmed.status(), 200);
     let token1 = login(addr, "a@example.com", "laptop").await;
 
-    // Password reset: request → uniform 200; the webhook receives the token.
     let requested = client
         .post(format!("http://{addr}/api/account/reset/request"))
         .json(&json!({ "email": "a@example.com" }))
@@ -857,7 +778,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
     assert_eq!(requested.status(), 200);
     let reset_token = webhook_token(&inbox, "password_reset").await;
 
-    // Confirm with a new password.
     let reset = client
         .post(format!("http://{addr}/api/account/reset/confirm"))
         .json(&json!({ "token": reset_token, "new_password": "brand-new-pass1" }))
@@ -866,7 +786,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
         .unwrap();
     assert_eq!(reset.status(), 200);
 
-    // The reset revoked every device: the pre-reset token stops working.
     let revoked = client
         .get(format!("http://{addr}/api/devices"))
         .bearer_auth(&token1)
@@ -875,7 +794,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
         .unwrap();
     assert_eq!(revoked.status(), 401, "reset must sign out everywhere");
 
-    // Old password fails; the new one logs in.
     let old = client
         .post(format!("http://{addr}/api/login"))
         .json(&json!({ "email": "a@example.com", "password": "password123", "device_name": "x" }))
@@ -893,7 +811,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
         .unwrap();
     assert_eq!(new.status(), 200);
 
-    // A consumed token cannot be replayed.
     let replay = client
         .post(format!("http://{addr}/api/account/reset/confirm"))
         .json(&json!({ "token": reset_token, "new_password": "another-pass-123" }))
@@ -902,7 +819,6 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
         .unwrap();
     assert_eq!(replay.status(), 400, "single-use token must not replay");
 
-    // Unknown email: same uniform 200, and nothing new reaches the webhook.
     let before = inbox.lock().await.len();
     let ghost = client
         .post(format!("http://{addr}/api/account/reset/request"))
@@ -919,7 +835,7 @@ async fn email_verification_and_password_reset_flows(pool: PgPool) {
     );
 }
 
-/// Without MAIL_WEBHOOK_URL the flows answer 501 — an explicit deferral.
+// md:fn email_flows_answer_501_when_unconfigured
 #[sqlx::test(migrations = "../../migrations")]
 async fn email_flows_answer_501_when_unconfigured(pool: PgPool) {
     let addr = spawn_server(pool).await;
@@ -944,16 +860,12 @@ async fn email_flows_answer_501_when_unconfigured(pool: PgPool) {
     assert_eq!(verify.status(), 501);
 }
 
-// ── Login brute-force lockout ─────────────────────────────────────────────────
-
-/// After `LOGIN_MAX_FAILURES` wrong passwords the email is locked: even the
-/// correct password gets `429` until the window passes; a successful login
-/// clears the counter; an unknown email behaves identically (no oracle).
+// md:fn login_lockout_blocks_brute_force
 #[sqlx::test(migrations = "../../migrations")]
 async fn login_lockout_blocks_brute_force(pool: PgPool) {
     let mut config = test_config();
     config.login_max_failures = 3;
-    config.login_lockout_secs = 2; // short, so the test can outlive the lock
+    config.login_lockout_secs = 2;
     let addr = spawn_server_with_config(pool, config).await;
     let client = reqwest::Client::new();
     register(addr, "a@example.com").await;
@@ -972,42 +884,32 @@ async fn login_lockout_blocks_brute_force(pool: PgPool) {
         }
     };
 
-    // Three wrong passwords: 401, 401, 401 — and the third arms the lock.
     for _ in 0..3 {
         assert_eq!(try_login("a@example.com", "wrong-password").await, 401);
     }
-    // Locked: even the CORRECT password is refused with 429.
     assert_eq!(
         try_login("a@example.com", "password123").await,
         429,
         "locked account must refuse even the correct password"
     );
 
-    // The lockout expires; the correct password works and clears the history.
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     assert_eq!(try_login("a@example.com", "password123").await, 200);
-    // A single new failure is just a 401 again (counter restarted by success).
     assert_eq!(try_login("a@example.com", "wrong-password").await, 401);
     assert_eq!(try_login("a@example.com", "password123").await, 200);
 
-    // Unknown email accumulates identically — same 401s, same 429 — so lockout
-    // behaviour is not an account-existence oracle.
     for _ in 0..3 {
         assert_eq!(try_login("ghost@example.com", "whatever123").await, 401);
     }
     assert_eq!(try_login("ghost@example.com", "whatever123").await, 429);
 }
 
-// ── Email normalization (issue #43) ──────────────────────────────────────────
-
-/// Registration lowercases/trims the email, so login is case-insensitive and a
-/// case-variant re-registration collides; malformed emails are rejected.
+// md:fn email_is_normalized_and_validated
 #[sqlx::test(migrations = "../../migrations")]
 async fn email_is_normalized_and_validated(pool: PgPool) {
     let addr = spawn_server(pool).await;
     let client = reqwest::Client::new();
 
-    // Register with mixed case and surrounding whitespace.
     let reg = client
         .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": "  John.Doe@Example.COM ", "password": "password123" }))
@@ -1016,7 +918,6 @@ async fn email_is_normalized_and_validated(pool: PgPool) {
         .unwrap();
     assert_eq!(reg.status(), 200);
 
-    // Login with the lowercased form works (case-insensitive).
     let login = client
         .post(format!("http://{addr}/api/login"))
         .json(&json!({ "email": "john.doe@example.com", "password": "password123", "device_name": "x" }))
@@ -1025,7 +926,6 @@ async fn email_is_normalized_and_validated(pool: PgPool) {
         .unwrap();
     assert_eq!(login.status(), 200, "login must be case-insensitive");
 
-    // A case-variant re-registration is the same account → conflict.
     let dup = client
         .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": "JOHN.DOE@EXAMPLE.com", "password": "password123" }))
@@ -1034,7 +934,6 @@ async fn email_is_normalized_and_validated(pool: PgPool) {
         .unwrap();
     assert_eq!(dup.status(), 409, "case-variant email must collide");
 
-    // A malformed email is rejected up front.
     let bad = client
         .post(format!("http://{addr}/api/register"))
         .json(&json!({ "email": "not-an-email", "password": "password123" }))
@@ -1044,20 +943,16 @@ async fn email_is_normalized_and_validated(pool: PgPool) {
     assert_eq!(bad.status(), 400);
 }
 
-// ── Note body size cap (issue #44) ───────────────────────────────────────────
-
-/// A note whose materialised body exceeds `max_note_body_bytes` is refused with
-/// `413` rather than built in memory; a small note is unaffected.
+// md:fn oversized_note_body_is_refused
 #[sqlx::test(migrations = "../../migrations")]
 async fn oversized_note_body_is_refused(pool: PgPool) {
     let mut config = test_config();
-    config.max_note_body_bytes = 32; // tiny cap for the test
+    config.max_note_body_bytes = 32;
     let addr = spawn_server_with_config(pool, config).await;
     let client = reqwest::Client::new();
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "laptop").await;
 
-    // A small note is fine.
     let small = client
         .post(format!("http://{addr}/api/import"))
         .bearer_auth(&token)
@@ -1078,7 +973,6 @@ async fn oversized_note_body_is_refused(pool: PgPool) {
         .unwrap();
     assert_eq!(got.status(), 200);
 
-    // A note whose body exceeds the cap is refused on read.
     let big_body = "x".repeat(100);
     let big = client
         .post(format!("http://{addr}/api/import"))
@@ -1101,14 +995,9 @@ async fn oversized_note_body_is_refused(pool: PgPool) {
     assert_eq!(refused.status(), 413, "oversized body must be 413");
 }
 
-// ── At-rest encryption of note content/title (keeplin#110) ───────────────────
-
-/// With `AT_REST_KEY` set, the server transparently returns plaintext to the
-/// authorised caller, but the `notes.title` and `lines.content` columns hold
-/// ciphertext — so a database dump / SQL read never sees note contents.
+// md:fn note_content_is_encrypted_at_rest
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_content_is_encrypted_at_rest(pool: PgPool) {
-    // base64 of 32 zero bytes — a valid AES-256 key for the test.
     let key = format!("{}=", "A".repeat(43));
     let mut config = test_config();
     config.at_rest_key = Some(key);
@@ -1130,7 +1019,6 @@ async fn note_content_is_encrypted_at_rest(pool: PgPool) {
         .unwrap()
         .to_string();
 
-    // The authorised caller gets plaintext back (server decrypts transparently).
     let exported: Value = client
         .get(format!("http://{addr}/api/notes/{note_id}/export"))
         .bearer_auth(&token)
@@ -1143,7 +1031,6 @@ async fn note_content_is_encrypted_at_rest(pool: PgPool) {
     assert_eq!(exported["title"], "Secret Title");
     assert_eq!(exported["body"], "line one\nline two");
 
-    // The raw columns hold ciphertext, not the plaintext.
     let note_uuid: Uuid = note_id.parse().unwrap();
     let raw_title: String = sqlx::query_scalar("SELECT title FROM notes WHERE id = $1")
         .bind(note_uuid)
@@ -1168,8 +1055,7 @@ async fn note_content_is_encrypted_at_rest(pool: PgPool) {
     }
 }
 
-// ── Per-entity history + visibility window (issue #27) ───────────────────────
-
+// md:fn spawn_server_with_config
 async fn spawn_server_with_config(pool: PgPool, config: Config) -> SocketAddr {
     let state = Arc::new(AppState::new(config, pool));
     let app: Router = router(state);
@@ -1186,6 +1072,7 @@ async fn spawn_server_with_config(pool: PgPool, config: Config) -> SocketAddr {
     addr
 }
 
+// md:fn notebook_history
 async fn notebook_history(addr: SocketAddr, token: &str, nb: Uuid) -> Vec<Value> {
     reqwest::Client::new()
         .get(format!("http://{addr}/api/notebooks/{nb}/history"))
@@ -1201,18 +1088,16 @@ async fn notebook_history(addr: SocketAddr, token: &str, nb: Uuid) -> Vec<Value>
         .unwrap_or_default()
 }
 
-/// A shared notebook has one timeline: a collaborator with read access sees the owner's
-/// edits, not only their own (issue #27 — history is per-entity, not per-user).
+// md:fn notebook_history_is_visible_to_shared_collaborators
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     use keeplin_core::storage::NotebookRepository;
-    let addr = spawn_server(pool).await; // default policy: from creation
+    let addr = spawn_server(pool).await;
     register(addr, "a@example.com").await;
     register(addr, "b@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "dev-a").await).await;
     let ta = login(addr, "a@example.com", "rest-a").await;
 
-    // A creates + renames a notebook through the relay (materialises on the server).
     let nb = a
         .create_notebook(keeplin_core::models::Notebook::new("old"))
         .await
@@ -1222,7 +1107,6 @@ async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     a.update_notebook(renamed).await.unwrap();
     push(&a).await;
 
-    // A shares the notebook with B (read).
     let client = reqwest::Client::new();
     let mut shared = false;
     for _ in 0..50 {
@@ -1242,7 +1126,6 @@ async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     }
     assert!(shared, "A could share the materialised notebook with B");
 
-    // B sees A's two versions — the owner's edits, not B's own (B authored none).
     let tb = login(addr, "b@example.com", "dev-b").await;
     let mut versions = Vec::new();
     for _ in 0..50 {
@@ -1261,8 +1144,7 @@ async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     assert_eq!(versions[1]["entity"]["title"], "old");
 }
 
-/// With `HISTORY_VISIBILITY=access` a collaborator only sees versions from after they were
-/// granted access; the owner still sees everything (issue #27).
+// md:fn history_visibility_since_access_windows_a_collaborator
 #[sqlx::test(migrations = "../../migrations")]
 async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     use keeplin_core::storage::NotebookRepository;
@@ -1275,16 +1157,13 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     let ta = login(addr, "a@example.com", "rest-a").await;
     let client = reqwest::Client::new();
 
-    // Version 1 (before B has access).
     let nb = a
         .create_notebook(keeplin_core::models::Notebook::new("v1"))
         .await
         .unwrap();
     push(&a).await;
-    // Let the create land before the share is granted.
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
-    // Grant B access now.
     let code = client
         .post(format!("http://{addr}/api/notebooks/{}/share", nb.id))
         .bearer_auth(&ta)
@@ -1296,9 +1175,6 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     assert_eq!(code, 200);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // Version 2 (after B has access). An honest client stamps `updated_at` on
-    // every edit (it is the conflict-resolution timestamp); the access window
-    // compares exactly this value against the share's grant time.
     let mut renamed = nb.clone();
     renamed.title = "v2".into();
     renamed.updated_at = chrono::Utc::now();
@@ -1306,7 +1182,6 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     push(&a).await;
 
     let tb = login(addr, "b@example.com", "dev-b").await;
-    // B eventually sees v2 (post-access) but never v1 (pre-access).
     let mut b_versions = Vec::new();
     for _ in 0..50 {
         b_versions = notebook_history(addr, &tb, nb.id).await;
@@ -1320,15 +1195,9 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
         "collaborator sees only post-access versions, got {b_versions:?}"
     );
 
-    // The reinstall/re-push loophole: a client that reinstalls and re-pushes its journal
-    // from epoch creates NEW journal rows (fresh received_at) for pre-access content. The
-    // window filters on the payload's own causal `updated_at`, so the re-delivered v1 —
-    // authored before the share — must NOT leak to B.
-    push(&a).await; // the whole journal from epoch again, v1 included
+    push(&a).await;
     let mut a_versions = Vec::new();
     for _ in 0..50 {
-        // Wait until the re-pushed rows have landed: the owner's unwindowed
-        // view grows past the original two versions.
         a_versions = notebook_history(addr, &ta, nb.id).await;
         if a_versions.len() > 2 {
             break;

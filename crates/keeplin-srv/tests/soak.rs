@@ -1,25 +1,4 @@
-//! Multi-instance collaborative **soak/load test** (production-readiness item:
-//! prove the #45 cross-instance path under real concurrency, not just the
-//! happy path).
-//!
-//! `#[ignore]`d: it is a load test, not a unit of CI. Run it explicitly —
-//!
-//! ```bash
-//! DATABASE_URL=postgres://… cargo test --release --test soak -- --ignored --nocapture
-//! # knobs: SOAK_EDITORS (default 8), SOAK_OPS (default 25 per editor)
-//! ```
-//!
-//! Scenario:
-//! 1. Two server instances (with the LISTEN/NOTIFY bus) share one database.
-//! 2. `SOAK_EDITORS` editors — each its own device/login — join one shared
-//!    note, half on each instance, and concurrently insert `SOAK_OPS` lines
-//!    each.
-//! 3. **Phase 1**: every op must converge on both instances (export equality +
-//!    total line count); throughput and convergence time are reported.
-//! 4. **Phase 2 — replica death**: instance B is killed mid-session. The
-//!    editors on A keep writing; everything must still converge on A. This is
-//!    the "kill a replica mid-edit" drill.
-
+// md:Overview
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,6 +13,7 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+// md:fn test_config
 fn test_config() -> Config {
     Config {
         port: 0,
@@ -66,7 +46,7 @@ fn test_config() -> Config {
     }
 }
 
-/// Spawn a bus-enabled instance; the JoinHandle lets phase 2 kill it.
+// md:fn spawn_instance
 async fn spawn_instance(pool: PgPool) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let state = Arc::new(AppState::new(test_config(), pool));
     keeplin_srv::bus::spawn(state.clone());
@@ -84,6 +64,7 @@ async fn spawn_instance(pool: PgPool) -> (SocketAddr, tokio::task::JoinHandle<()
     (addr, handle)
 }
 
+// md:fn env_or
 fn env_or(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -91,6 +72,7 @@ fn env_or(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// md:fn ws_connect
 async fn ws_connect(addr: SocketAddr, token: &str) -> Ws {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws?token={token}"))
         .await
@@ -98,6 +80,7 @@ async fn ws_connect(addr: SocketAddr, token: &str) -> Ws {
     ws
 }
 
+// md:fn export_body
 async fn export_body(addr: SocketAddr, token: &str, note_id: &str) -> String {
     reqwest::Client::new()
         .get(format!("http://{addr}/api/notes/{note_id}/export"))
@@ -113,7 +96,7 @@ async fn export_body(addr: SocketAddr, token: &str, note_id: &str) -> String {
         .to_string()
 }
 
-/// Merge an op/order version vector into the editor's causal view.
+// md:fn merge_vv
 fn merge_vv(into: &mut serde_json::Map<String, Value>, vv: &Value) {
     if let Some(map) = vv.as_object() {
         for (k, v) in map {
@@ -126,11 +109,7 @@ fn merge_vv(into: &mut serde_json::Map<String, Value>, vv: &Value) {
     }
 }
 
-/// One editor: join the note, then insert `ops` lines at the head
-/// (order-contended on purpose), signing each op **causally** the way the real
-/// client does: the version vector sent is everything this editor has seen
-/// (Welcome + broadcasts) plus its own bumped component. A causally-stale
-/// insert is dropped by design; a causal one must be applied.
+// md:fn editor
 async fn editor(addr: SocketAddr, token: String, device_id: String, note_id: String, ops: usize) {
     let mut ws = ws_connect(addr, &token).await;
     ws.send(Message::Text(
@@ -138,8 +117,6 @@ async fn editor(addr: SocketAddr, token: String, device_id: String, note_id: Str
     ))
     .await
     .unwrap();
-    // Wait for the Welcome (seeding the causal view) so ops cannot race the
-    // subscription.
     let mut seen = serde_json::Map::new();
     loop {
         match tokio::time::timeout(Duration::from_secs(30), ws.next())
@@ -177,7 +154,6 @@ async fn editor(addr: SocketAddr, token: String, device_id: String, note_id: Str
             }],
         });
         ws.send(Message::Text(msg.to_string())).await.unwrap();
-        // Absorb pending broadcasts into the causal view without blocking.
         while let Ok(Some(Ok(Message::Text(text)))) =
             tokio::time::timeout(Duration::from_millis(2), ws.next()).await
         {
@@ -192,19 +168,13 @@ async fn editor(addr: SocketAddr, token: String, device_id: String, note_id: Str
             }
         }
     }
-    // Keep draining briefly so the server can flush broadcasts to us.
     let _ = tokio::time::timeout(Duration::from_millis(500), async {
         while ws.next().await.is_some() {}
     })
     .await;
 }
 
-/// Poll the exports until every instance returns the **identical** body twice
-/// in a row (quiescent and cross-instance consistent — the #45 guarantee).
-/// Returns (settle time, line count). Note: under head-of-note contention the
-/// server legitimately drops causally-concurrent-and-older inserts (design
-/// §5); the real client re-diffs and self-heals, so the soak asserts
-/// *consistency*, and reports the applied/sent ratio as a metric.
+// md:fn wait_quiescent_identical
 async fn wait_quiescent_identical(
     addrs: &[SocketAddr],
     token: &str,
@@ -235,6 +205,7 @@ async fn wait_quiescent_identical(
     ))
 }
 
+// md:fn soak_two_instances_under_concurrent_editors
 #[sqlx::test(migrations = "../../migrations")]
 #[ignore = "load test — run explicitly with --ignored --nocapture"]
 async fn soak_two_instances_under_concurrent_editors(pool: PgPool) {
@@ -245,7 +216,6 @@ async fn soak_two_instances_under_concurrent_editors(pool: PgPool) {
     let (addr_b, handle_b) = spawn_instance(pool.clone()).await;
     println!("soak: instance A={addr_a}  B={addr_b}");
 
-    // Owner + shared note; every editor gets its own device token.
     let client = reqwest::Client::new();
     client
         .post(format!("http://{addr_a}/api/register"))
@@ -287,7 +257,6 @@ async fn soak_two_instances_under_concurrent_editors(pool: PgPool) {
         .unwrap();
     let note_id = note["id"].as_str().unwrap().to_string();
 
-    // ── Phase 1: concurrent editors split across both instances ────────────
     let started = Instant::now();
     let mut tasks = Vec::new();
     for e in 0..editors {
@@ -325,7 +294,6 @@ async fn soak_two_instances_under_concurrent_editors(pool: PgPool) {
         100.0 * applied as f64 / sent as f64
     );
 
-    // ── Phase 2: kill instance B mid-session, keep editing on A ───────────
     handle_b.abort();
     println!("soak phase 2: instance B killed");
     let survivors = (editors / 2).max(1);
