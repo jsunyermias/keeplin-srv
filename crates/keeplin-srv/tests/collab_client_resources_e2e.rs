@@ -1,11 +1,4 @@
-//! Real-client e2e of the **out-of-band resource blob path**: the daemon's
-//! collaborative stack (`CollabBackend<DbBackend>`) creates a resource, the
-//! metadata travels the `/api/sync` relay **without** the binary, the bytes
-//! travel `PUT /api/resources/:id/data`, and a second device reads them back
-//! through the client's server-download fallback. Lives in its own test
-//! binary so its background client tasks cannot interfere with other tests
-//! (issue #51) — see `collab_e2e_common/mod.rs`.
-
+// md:Overview
 #[path = "collab_e2e_common/mod.rs"]
 mod common;
 
@@ -13,6 +6,7 @@ use common::*;
 use keeplin_core::{models::Resource, storage::ResourceRepository, storage::SyncBackend};
 use sqlx::{PgPool, Row};
 
+// md:fn resource_blob_travels_out_of_band_through_the_real_client
 #[sqlx::test(migrations = "../../migrations")]
 async fn resource_blob_travels_out_of_band_through_the_real_client(pool: PgPool) {
     let addr = spawn_server(pool.clone()).await;
@@ -20,13 +14,10 @@ async fn resource_blob_travels_out_of_band_through_the_real_client(pool: PgPool)
     let token_a = login(addr, "a@example.com", "dev-a").await;
     let a = collab_device(addr, &token_a).await;
 
-    // Create a resource through the real client: it eagerly relays the
-    // blob-stripped metadata, then PUTs the binary out-of-band.
     let bytes: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
     let meta = Resource::new("photo", "image/png", "photo.png", bytes.len() as u64);
     let created = a.create_resource(meta, bytes.clone()).await.unwrap();
 
-    // The server serves the binary back on the blob endpoint.
     let client = reqwest::Client::new();
     let mut served = Vec::new();
     for _ in 0..CONVERGE_TRIES {
@@ -47,8 +38,6 @@ async fn resource_blob_travels_out_of_band_through_the_real_client(pool: PgPool)
     }
     assert_eq!(served, bytes, "server must serve the out-of-band blob");
 
-    // The relay journal never carried the binary: every journaled
-    // ResourceCreate for this resource is blob-stripped.
     let rows = sqlx::query(
         "SELECT payload FROM changes WHERE payload->>'op' = 'resource_create'
            AND payload->'resource'->>'id' = $1",
@@ -69,8 +58,6 @@ async fn resource_blob_travels_out_of_band_through_the_real_client(pool: PgPool)
         );
     }
 
-    // A second device receives the metadata over the relay and reads the
-    // bytes through the client's server-download fallback.
     let b = collab_device(addr, &login(addr, "a@example.com", "dev-b").await).await;
     let mut fetched = Vec::new();
     for _ in 0..CONVERGE_TRIES {

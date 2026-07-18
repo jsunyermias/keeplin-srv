@@ -1,32 +1,177 @@
 # `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
 
-## Purpose
+Self-contained companion for `crates/keeplin-srv/tests/collab_e2e_common/mod.rs`. It
+documents **every code block of the source file, in source order** — a reader with only
+this file must be able to understand the harness without opening anything else, so
+project-wide conventions are deliberately re-explained here (hyper-redundancy is
+intended).
 
-Shared setup for the `collab_client_*_e2e` test binaries. Each e2e test lives in its **own**
-integration-test binary (cargo runs test binaries sequentially), so the real client's
-background tasks — reconnect loops, the second `/api/sync` connection — die with the process
-instead of hammering the shared `#[sqlx::test]` PostgreSQL harness while the next test runs;
-that cross-test interference is what made these tests flaky in one binary (issue #51).
+**How to navigate**: every block carries exactly one marker comment
+`// md:<Header> > … > <Block header>` whose path is the header chain of its section
+here; grep it in either direction. Each section covers **Identification**,
+**What it does**, **Dependencies**, **Used by**, **Repeated context**.
 
-## Helpers
+---
 
-| Utility | Purpose |
-|---------|---------|
-| `test_config()` | standard test `Config` (registration open, no quotas/rate limit/at-rest key) |
-| `spawn_server(pool)` | boot the real router on an ephemeral port with `ConnectInfo` |
-| `register` / `login` | REST account setup; `login` returns the device token |
-| `collab_device(addr, token)` | the exact stack the daemon mounts in server+collab mode: `DbBackend` (relay, `/api/sync`) wrapped in `CollabBackend` (`/api/ws`), `start`ed with itself as stack top — `start` runs the `GET /version` handshake and must negotiate cleanly against this matching server |
-| `CONVERGE_TRIES` | generous polling bound (~30 s): real-client convergence tracks database throughput; a tight bound flakes under a busy CI database |
-| `wait_server_body` | poll `GET /api/notes/:id/export` until the materialised body matches |
-| `wait_local_body` | poll a client's local note body until it matches |
+## Overview
 
-## Invariant
+**Identification** — file-level block: the `#![allow(dead_code)]` inner attribute and
+imports. Marker `// md:Overview`.
 
-Every new real-client e2e scenario gets its **own** `tests/<name>_e2e.rs` binary including
-this module via `#[path = "collab_e2e_common/mod.rs"]` — never add a second e2e scenario to
-an existing binary.
+**What it does** — Shared setup for the `collab_client_*_e2e` test binaries. Each e2e
+test lives in its **own** integration-test binary (cargo runs test binaries
+sequentially), so the real client's background tasks — reconnect loops, the second
+`/api/sync` connection — die with the process instead of hammering the shared
+`#[sqlx::test]` PostgreSQL harness while the next test runs; that cross-test
+interference is what made these tests flaky in one binary (issue #51).
+`#![allow(dead_code)]` because each binary uses only a subset of the harness.
+
+**Dependencies** — `keeplin_core` (`CollabBackend`, `CollabConfig`, `DbBackend`,
+storage traits), `keeplin_srv` (`Config`, `router`, `AppState`), `axum`, `sqlx`,
+`reqwest`, `tempfile`, `tokio`, `serde_json`, `uuid`.
+
+**Used by** — included via `#[path = "collab_e2e_common/mod.rs"] mod common;` by
+`collab_client_e2e.rs`, `collab_client_reconnect_e2e.rs`,
+`collab_client_resources_e2e.rs`.
+
+**Repeated context** — Harness invariant: every new real-client e2e scenario gets its
+**own** `tests/<name>_e2e.rs` binary including this module via `#[path]` — never a
+second scenario in an existing binary (issue #51).
+
+---
+
+## fn test_config
+
+**Identification** — pub fn; marker `// md:fn test_config`.
+
+**What it does** — The standard test `Config` literal: registration open, no
+quotas/rate limit/at-rest key/mail webhook/lockout, 5-connection pool, ephemeral
+port. Built literally (never `from_env`) so the environment cannot leak into test
+behaviour.
+
+**Dependencies** — `keeplin_srv::config::Config`. **Used by** — `spawn_server`.
+
+**Repeated context** — Every test suite in the repo has its own `test_config()`
+twin; a new `Config` field must be added to all of them (compile error makes the
+omission loud).
+
+---
+
+## fn spawn_server
+
+**Identification** — pub async fn; marker `// md:fn spawn_server`.
+
+**What it does** — Boots the real router (`AppState::new(test_config(), pool)` →
+`router`) on an ephemeral loopback port, served with
+`into_make_service_with_connect_info::<SocketAddr>()` (required by the rate-limit
+middleware's `ConnectInfo` extractor even when limiting is off), on a spawned task.
+Returns the bound address.
+
+**Dependencies** — `test_config` (this file); `AppState::new`, `router`
+(`keeplin-srv`); `tokio`. **Used by** — all three e2e binaries.
+
+**Repeated context** — In-process server on a `#[sqlx::test]` throwaway database:
+the same pattern every suite uses — no Docker, no external server.
+
+---
+
+## fn register / fn login
+
+**Identification** — two pub async fns; markers `// md:fn register`,
+`// md:fn login`.
+
+**What it does** — REST account setup over the real HTTP surface: `register` POSTs
+`/api/register` (fixed password `password123`); `login` POSTs `/api/login` with a
+device name and returns the **device token** string.
+
+**Dependencies** — `reqwest`, `serde_json`. **Used by** — all three e2e binaries.
+
+**Repeated context** — One login = one device = one token (device-as-actor); the
+e2e binaries create a second device by calling `login` again with another name.
+
+---
+
+## fn collab_device
+
+**Identification** — pub async fn; marker `// md:fn collab_device`.
+
+```rust
+pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<DbBackend>>
+```
+
+**What it does** — Builds the **exact client stack the daemon mounts** in
+server+collab mode: a `DbBackend` (relay, `ws://…/api/sync`) on a fresh temp SQLite
+file, wrapped in `CollabBackend` (`/api/ws` line channel, REST `api_url`), then
+`start`ed with itself as the top of the stack. `start` runs the `GET /version`
+protocol handshake — this server is the matching keeplin-srv, so it must negotiate
+cleanly (`expect("protocol handshake")`). The tempdir is `std::mem::forget`-leaked
+so the SQLite file outlives the call.
+
+**Dependencies** — keeplin-core `DbBackend::new`, `CollabBackend::new`/`start`,
+`CollabConfig`; `tempfile`. **Used by** — all three e2e binaries.
+
+**Repeated context** — Protocol-compatibility contract: `PROTOCOL_VERSION`
+(server `http.rs`) is mirrored by keeplin-core's `compat.rs` and enforced at client
+startup; this helper is where a drift between the pinned client and this server
+fails loudly in CI.
+
+---
+
+## CONVERGE_TRIES
+
+**Identification** — pub const; marker `// md:CONVERGE_TRIES`.
+`pub const CONVERGE_TRIES: usize = 300;`
+
+**What it does** — The convergence-poll bound (~30 s at 100 ms per try). Generous on
+purpose: these tests drive the *real* client (its own async connect/reconnect plus
+a second `/api/sync` connection), so convergence latency tracks database
+throughput; under a busy CI database a tight deadline flakes even though the client
+converges fine.
+
+**Dependencies** — none. **Used by** — the wait helpers below and the resources e2e
+binary directly.
+
+**Repeated context** — Do not tighten: that reintroduces the CI flake issue #51
+work eliminated.
+
+---
+
+## fn wait_server_body
+
+**Identification** — pub async fn; marker `// md:fn wait_server_body`.
+
+**What it does** — Polls `GET /api/notes/:id/export` (bearer token) until the
+materialised body equals `want`, tolerating the transient 404/empty window before
+the note's lines exist; panics with the last observed body after `CONVERGE_TRIES`.
+
+**Dependencies** — `reqwest`, `CONVERGE_TRIES`. **Used by** — the write-through and
+reconnect binaries.
+
+**Repeated context** — Export returns the server's derived body (live lines joined
+with `\n`) — the strongest server-side convergence signal available over REST.
+
+---
+
+## fn wait_local_body
+
+**Identification** — pub async fn; marker `// md:fn wait_local_body`.
+
+**What it does** — Polls a client's local `read_note(note_id).body` until it equals
+`want`; panics with the last observed value after `CONVERGE_TRIES`.
+
+**Dependencies** — keeplin-core `NoteRepository::read_note`, `CONVERGE_TRIES`.
+**Used by** — the reconnect binary.
+
+**Repeated context** — none.
+
+---
 
 ## Graph context
+
+Repo-tooling metadata, not a code block (no marker in the source). Kept in every
+companion because CI (`scripts/check-docs.sh`) enforces it: this file is LAYER 2 of
+the navigation model, the Graphify graph (`graphify-out/graph.json`) is LAYER 1;
+refresh with `graphify update .` after refactors.
 
 <!-- Data source: graphify-out/graph.json (AST pass; `graphify update .` refreshes it).
      EXTRACTED = mechanically from the graph; INFERRED = authored judgement. -->
@@ -48,18 +193,20 @@ an existing binary.
 
 **Direct dependents** (files whose symbols reference this one)
 
-- `crates/keeplin-srv/tests/collab_client_e2e.rs` — real daemon client ↔ real server (EXTRACTED: calls×2; e.g. `collab_client_writes_note_through_to_the_server()`)
-- `crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client) (EXTRACTED: calls×3; e.g. `reconnecting_client_rebuilds_note_from_snapshot()`)
-- `crates/keeplin-srv/tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (real client) (EXTRACTED: calls×1; e.g. `resource_blob_travels_out_of_band_through_the_real_client()`)
+- `crates/keeplin-srv/tests/collab_client_e2e.rs` — real daemon client ↔ real server (EXTRACTED: calls×2)
+- `crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (EXTRACTED: calls×3)
+- `crates/keeplin-srv/tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (EXTRACTED: calls×1)
 
-**Invariants** (restated on purpose; a change to this file must keep these true)
+## Coverage checklist
 
-- Every real-client e2e scenario gets its OWN test binary including this module via `#[path]` (issue #51) — never share a binary between scenarios.
-- `collab_device` builds the exact daemon stack (`DbBackend` + `CollabBackend`) and `start` must negotiate the `/version` handshake cleanly.
-- Convergence polls stay generous (`CONVERGE_TRIES`); tightening them reintroduces CI flake.
-
-## Related files
-
-- `tests/collab_client_e2e.rs` — write-through scenario.
-- `tests/collab_client_reconnect_e2e.rs` — snapshot-rebuild scenario.
-- `tests/collab_client_resources_e2e.rs` — out-of-band resource blob scenario.
+| # | Block (source order) | Marker in code |
+|---|----------------------|----------------|
+| 1 | `#![allow(dead_code)]` + imports | `// md:Overview` |
+| 2 | `fn test_config` | `// md:fn test_config` |
+| 3 | `fn spawn_server` | `// md:fn spawn_server` |
+| 4 | `fn register` | `// md:fn register` |
+| 5 | `fn login` | `// md:fn login` |
+| 6 | `fn collab_device` | `// md:fn collab_device` |
+| 7 | `CONVERGE_TRIES` | `// md:CONVERGE_TRIES` |
+| 8 | `fn wait_server_body` | `// md:fn wait_server_body` |
+| 9 | `fn wait_local_body` | `// md:fn wait_local_body` |

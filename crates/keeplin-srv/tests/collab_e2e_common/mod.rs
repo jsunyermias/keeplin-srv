@@ -1,12 +1,5 @@
-//! Shared harness for the real-client end-to-end tests.
-//!
-//! Each e2e test lives in its **own** integration-test binary (cargo runs test
-//! binaries sequentially), so the real client's background tasks — reconnect
-//! loops, the second `/api/sync` connection — die with the process instead of
-//! hammering the shared `#[sqlx::test]` PostgreSQL harness while the next test
-//! runs. That cross-test interference is what made these tests flaky when they
-//! shared one binary (issue #51).
-#![allow(dead_code)] // each test binary uses a subset of this shared harness
+// md:Overview
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,6 +16,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// md:fn test_config
 pub fn test_config() -> Config {
     Config {
         port: 0,
@@ -55,6 +49,7 @@ pub fn test_config() -> Config {
     }
 }
 
+// md:fn spawn_server
 pub async fn spawn_server(pool: PgPool) -> SocketAddr {
     let state = Arc::new(AppState::new(test_config(), pool));
     let app: Router = router(state);
@@ -71,6 +66,7 @@ pub async fn spawn_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
+// md:fn register
 pub async fn register(addr: SocketAddr, email: &str) {
     reqwest::Client::new()
         .post(format!("http://{addr}/api/register"))
@@ -80,6 +76,7 @@ pub async fn register(addr: SocketAddr, email: &str) {
         .unwrap();
 }
 
+// md:fn login
 pub async fn login(addr: SocketAddr, email: &str, device: &str) -> String {
     let body: Value = reqwest::Client::new()
         .post(format!("http://{addr}/api/login"))
@@ -93,9 +90,7 @@ pub async fn login(addr: SocketAddr, email: &str, device: &str) -> String {
     body["token"].as_str().unwrap().to_string()
 }
 
-/// Build the exact client stack the daemon mounts in server+collab mode: a
-/// `DbBackend` (relay) wrapped in `CollabBackend` (the `/api/ws` line channel),
-/// started with itself as the top of the stack.
+// md:fn collab_device
 pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<DbBackend>> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dev.db");
@@ -115,21 +110,14 @@ pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<D
         .unwrap(),
     );
     let top: Arc<dyn StorageBackend> = collab.clone();
-    // `start` runs the GET /version handshake; this server is the matching
-    // keeplin-srv, so it must negotiate cleanly.
     collab.start(top).await.expect("protocol handshake");
     collab
 }
 
-/// How long the convergence polls wait. Generous on purpose: these tests drive
-/// the *real* client (its own async connect/reconnect + a second `/api/sync`
-/// connection), so convergence latency tracks database throughput. Under a busy
-/// CI database a tight deadline flakes even though the client converges fine — so
-/// wait ~30s rather than assert an artificial 10s bound.
+// md:CONVERGE_TRIES
 pub const CONVERGE_TRIES: usize = 300;
 
-/// Poll the server's export endpoint until the materialised body equals `want`,
-/// tolerating the transient `404`/empty window before the note's lines exist.
+// md:fn wait_server_body
 pub async fn wait_server_body(addr: SocketAddr, token: &str, note_id: Uuid, want: &str) {
     let client = reqwest::Client::new();
     let mut last = String::new();
@@ -154,7 +142,7 @@ pub async fn wait_server_body(addr: SocketAddr, token: &str, note_id: Uuid, want
     panic!("server body never became {want:?}; last {last:?}");
 }
 
-/// Poll a client's local note body until it equals `want`.
+// md:fn wait_local_body
 pub async fn wait_local_body(dev: &Arc<CollabBackend<DbBackend>>, note_id: Uuid, want: &str) {
     let mut last = String::new();
     for _ in 0..CONVERGE_TRIES {
