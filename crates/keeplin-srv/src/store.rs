@@ -1,3 +1,4 @@
+// md:Overview
 use chrono::{DateTime, Utc};
 use keeplin_core::storage::note_log::VersionVector;
 use serde::Serialize;
@@ -6,28 +7,26 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
-/// Opaque keyset-pagination cursor: the ordering timestamp of the last row a
-/// caller received plus its id as a tiebreaker (issue #29). Serialised as
-/// `"<micros>_<uuid>"` — URL-safe and dependency-free — so clients treat it as a
-/// token they echo back rather than parse. Keyset paging (not `OFFSET`) keeps
-/// the cost of deep pages flat and is stable under concurrent inserts.
+// md:PageCursor
 #[derive(Debug, Clone, Copy)]
 pub struct PageCursor {
     pub ts: DateTime<Utc>,
     pub id: Uuid,
 }
 
+// md:impl PageCursor
 impl PageCursor {
+    // md:impl PageCursor > fn new
     pub fn new(ts: DateTime<Utc>, id: Uuid) -> Self {
         Self { ts, id }
     }
 
+    // md:impl PageCursor > fn encode
     pub fn encode(&self) -> String {
         format!("{}_{}", self.ts.timestamp_micros(), self.id)
     }
 
-    /// Parse a cursor previously produced by [`encode`]. Returns `None` for any
-    /// malformed token so the handler can answer `400` rather than trust it.
+    // md:impl PageCursor > fn decode
     pub fn decode(token: &str) -> Option<Self> {
         let (micros, id) = token.split_once('_')?;
         let ts = DateTime::from_timestamp_micros(micros.parse().ok()?)?;
@@ -38,7 +37,7 @@ impl PageCursor {
     }
 }
 
-/// SHA-256 hex of an email-flow token — the only form that is ever stored.
+// md:fn token_hash
 fn token_hash(raw: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -46,9 +45,7 @@ fn token_hash(raw: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Split an optional cursor into the `(timestamp, id)` binds the paginated
-/// queries expect. `None` maps to `(NULL, NULL)`, which the `$3 IS NULL`
-/// guard turns into "no keyset filter" — i.e. start from the first page.
+// md:fn split_cursor
 fn split_cursor(cursor: Option<PageCursor>) -> (Option<DateTime<Utc>>, Option<Uuid>) {
     match cursor {
         Some(c) => (Some(c.ts), Some(c.id)),
@@ -56,6 +53,7 @@ fn split_cursor(cursor: Option<PageCursor>) -> (Option<DateTime<Utc>>, Option<Uu
     }
 }
 
+// md:User
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
@@ -64,10 +62,10 @@ pub struct User {
     pub password_hash: String,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
-    /// When the user proved ownership of their email (issue #49); `None` = never.
     pub email_verified_at: Option<DateTime<Utc>>,
 }
 
+// md:Note
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Note {
     pub id: Uuid,
@@ -82,8 +80,7 @@ pub struct Note {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-/// A partial note-metadata update: `None` = leave unchanged, `Some(inner)` =
-/// set (so `Some(None)` clears a nullable field).
+// md:NotePatch
 #[derive(Debug, Default)]
 pub struct NotePatch {
     pub title: Option<String>,
@@ -93,28 +90,29 @@ pub struct NotePatch {
     pub todo_completed: Option<Option<DateTime<Utc>>>,
 }
 
+// md:NOTE_COLS
 const NOTE_COLS: &str = "id, title, owner_id, notebook_id, is_todo, todo_due, todo_completed, \
                          created_at, updated_at, deleted_at";
 
+// md:NoteShare
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct NoteShare {
     pub note_id: Uuid,
     pub user_id: Uuid,
-    /// The grantee's capability bitmask (see `permissions::Capabilities`), already normalised.
     pub capabilities: i32,
     pub created_at: DateTime<Utc>,
 }
 
+// md:NotebookShare
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct NotebookShare {
     pub notebook_id: Uuid,
     pub user_id: Uuid,
-    /// The grantee's capability bitmask (see `permissions::Capabilities`), already normalised.
     pub capabilities: i32,
     pub created_at: DateTime<Utc>,
 }
 
-/// One collaborative line: an independently versioned entity with soft-delete.
+// md:Line
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Line {
     pub id: Uuid,
@@ -127,7 +125,7 @@ pub struct Line {
     pub last_writer: String,
 }
 
-/// The versioned order of a note's lines (`NoteLines` in the design doc).
+// md:NoteOrder
 #[derive(Debug, Clone)]
 pub struct NoteOrder {
     pub note_id: Uuid,
@@ -137,7 +135,7 @@ pub struct NoteOrder {
     pub last_writer: String,
 }
 
-/// One row of the cross-instance op fan-out outbox (issue #45).
+// md:CollabEvent
 #[derive(Debug, Clone)]
 pub struct CollabEvent {
     pub seq: i64,
@@ -148,8 +146,7 @@ pub struct CollabEvent {
     pub ops: serde_json::Value,
 }
 
-/// One merged presence entry across instances (issue #45); `cursor` is the
-/// opaque `protocol::Cursor` as stored JSON.
+// md:PresenceRow
 #[derive(Debug, Clone)]
 pub struct PresenceRow {
     pub user_id: Uuid,
@@ -157,6 +154,7 @@ pub struct PresenceRow {
     pub cursor: Option<serde_json::Value>,
 }
 
+// md:UserDevice
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct UserDevice {
     pub id: Uuid,
@@ -166,8 +164,7 @@ pub struct UserDevice {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
-/// One journal row as fetched for delivery: the sequence number, the device
-/// that pushed it (echo suppression) and the opaque `Change` payload.
+// md:ChangeRow
 #[derive(Debug, Clone)]
 pub struct ChangeRow {
     pub seq: i64,
@@ -175,15 +172,16 @@ pub struct ChangeRow {
     pub payload: serde_json::Value,
 }
 
-/// Which journaled entity kind a history query targets (see [`Store::entity_history`]).
+// md:HistoryKind
 #[derive(Debug, Clone, Copy)]
 pub enum HistoryKind {
     Note,
     Notebook,
 }
 
+// md:impl HistoryKind
 impl HistoryKind {
-    /// The JSON key carrying the snapshot in create/update payloads.
+    // md:impl HistoryKind > fn snapshot_key
     fn snapshot_key(self) -> &'static str {
         match self {
             Self::Note => "note",
@@ -191,8 +189,7 @@ impl HistoryKind {
         }
     }
 
-    /// The `op` tags of create/update payloads (note ops include the v1 short aliases the
-    /// client still accepts on read).
+    // md:impl HistoryKind > fn upsert_ops
     fn upsert_ops(self) -> &'static [&'static str] {
         match self {
             Self::Note => &["note_create", "note_update", "create", "update"],
@@ -200,7 +197,7 @@ impl HistoryKind {
         }
     }
 
-    /// The `op` tags of delete payloads.
+    // md:impl HistoryKind > fn delete_ops
     fn delete_ops(self) -> &'static [&'static str] {
         match self {
             Self::Note => &["note_delete", "delete"],
@@ -209,9 +206,7 @@ impl HistoryKind {
     }
 }
 
-/// One reconstructed version for the history endpoints: when it was written, by which sync
-/// device, and the snapshot exactly as the device pushed it (opaque — client-encrypted fields
-/// stay ciphertext; the client decrypts). `entity` is `None` for a tombstone (a delete).
+// md:EntityVersionRow
 #[derive(Debug, Clone, Serialize)]
 pub struct EntityVersionRow {
     pub timestamp: DateTime<Utc>,
@@ -219,8 +214,7 @@ pub struct EntityVersionRow {
     pub entity: Option<serde_json::Value>,
 }
 
-/// A notebook as served over REST (metadata only; `vv`/`last_writer` are
-/// internal to resolution and not exposed).
+// md:Notebook
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Notebook {
     pub id: Uuid,
@@ -231,6 +225,7 @@ pub struct Notebook {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+// md:Tag
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Tag {
     pub id: Uuid,
@@ -240,8 +235,7 @@ pub struct Tag {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-/// Resource metadata as served over REST. The binary payload is fetched
-/// separately from `resource_blobs` via `GET /api/resources/:id/data`.
+// md:ResourceMeta
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ResourceMeta {
     pub id: Uuid,
@@ -253,9 +247,7 @@ pub struct ResourceMeta {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-/// Decide whether an `incoming` versioned write should replace the stored one,
-/// reusing keeplin-core's exact resolution (dominates + `(timestamp, device)`
-/// tiebreak) so the server converges to the same winner as every client.
+// md:fn incoming_wins
 fn incoming_wins(
     local_vv: &VersionVector,
     local_ts: DateTime<Utc>,
@@ -278,17 +270,16 @@ fn incoming_wins(
     )
 }
 
+// md:Store
 #[derive(Clone)]
 pub struct Store {
     pool: Pool<Postgres>,
-    /// At-rest cipher for note content/title (issue keeplin#110). Disabled
-    /// (passthrough) unless `AT_REST_KEY` is configured.
     cipher: crate::crypto::Cipher,
 }
 
+// md:impl Store
 impl Store {
-    /// Build a store with encryption **disabled** (plaintext). Used by tests and
-    /// as the default; production wires a real cipher via [`with_cipher`].
+    // md:impl Store > fn new
     pub fn new(pool: Pool<Postgres>) -> Self {
         Self {
             pool,
@@ -296,13 +287,12 @@ impl Store {
         }
     }
 
-    /// Build a store with a configured at-rest cipher.
+    // md:impl Store > fn with_cipher
     pub fn with_cipher(pool: Pool<Postgres>, cipher: crate::crypto::Cipher) -> Self {
         Self { pool, cipher }
     }
 
-    // ── Users ────────────────────────────────────────────────────────────────
-
+    // md:impl Store > fn create_user
     pub async fn create_user(
         &self,
         email: &str,
@@ -327,6 +317,7 @@ impl Store {
         Ok(user)
     }
 
+    // md:impl Store > fn get_user_by_email
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
@@ -338,6 +329,7 @@ impl Store {
         Ok(user)
     }
 
+    // md:impl Store > fn get_user_by_id
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
@@ -349,7 +341,7 @@ impl Store {
         Ok(user)
     }
 
-    /// Replace a user's password hash (issue #31 — self-service password change).
+    // md:impl Store > fn update_password
     pub async fn update_password(&self, id: Uuid, password_hash: &str) -> Result<(), AppError> {
         sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
             .bind(id)
@@ -359,13 +351,7 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a user and everything they own (issue #31 — account deletion).
-    ///
-    /// Every foreign key back to `users` (devices, cursors, the change journal,
-    /// notes and their lines/order/shares, notebooks, tags, resources and their
-    /// blobs, note_tags) is declared `ON DELETE CASCADE`, so removing the row
-    /// tears down the whole account in one statement. Returns `false` if the
-    /// user did not exist.
+    // md:impl Store > fn delete_user
     pub async fn delete_user(&self, id: Uuid) -> Result<bool, AppError> {
         let result = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id)
@@ -374,12 +360,8 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    // ── Login lockout (brute-force protection) ───────────────────────────────
-
-    /// Whether login attempts for `email` are currently locked out.
+    // md:impl Store > fn login_locked
     pub async fn login_locked(&self, email: &str) -> Result<bool, AppError> {
-        // COALESCE: a row whose lock was never armed has locked_until NULL, and
-        // NULL > now() is NULL, which must read as "not locked".
         let locked: Option<bool> = sqlx::query_scalar(
             "SELECT COALESCE(locked_until > now(), false) FROM login_attempts WHERE email = $1",
         )
@@ -389,11 +371,7 @@ impl Store {
         Ok(locked.unwrap_or(false))
     }
 
-    /// Record one failed login for `email` (whether or not an account exists —
-    /// uniform behaviour, no existence oracle). Restarts the counter when the
-    /// previous failure is older than the lockout window; arms `locked_until`
-    /// when the counter reaches `max_failures`. One atomic upsert, so
-    /// concurrent failures across replicas never lose a count (#45).
+    // md:impl Store > fn record_login_failure
     pub async fn record_login_failure(
         &self,
         email: &str,
@@ -423,7 +401,7 @@ impl Store {
         Ok(())
     }
 
-    /// A successful login clears the email's failure history.
+    // md:impl Store > fn clear_login_failures
     pub async fn clear_login_failures(&self, email: &str) -> Result<(), AppError> {
         sqlx::query("DELETE FROM login_attempts WHERE email = $1")
             .bind(email)
@@ -432,8 +410,7 @@ impl Store {
         Ok(())
     }
 
-    /// Drop failure rows whose last activity predates `older_than` (their lock,
-    /// if any, has long expired). Called from the maintenance loop.
+    // md:impl Store > fn prune_login_attempts
     pub async fn prune_login_attempts(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM login_attempts WHERE last_failed_at < $1")
             .bind(older_than)
@@ -442,16 +419,7 @@ impl Store {
         Ok(r.rows_affected())
     }
 
-    // ── Email-flow tokens (verification + password reset, issue #49) ─────────
-
-    /// Mint a single-use token for `kind`, valid `ttl_secs`. The raw token is
-    /// returned (to hand to the mail webhook, once); only its SHA-256 is stored,
-    /// so a database dump cannot be replayed into a takeover.
-    ///
-    /// Anti mail-bombing: refuses (`429`) once a user already has
-    /// [`MAX_LIVE_EMAIL_TOKENS`] unexpired, unused tokens of this kind, so
-    /// repeatedly hammering a request endpoint cannot flood someone's inbox
-    /// (the reset flow hides even this behind its uniform `200`).
+    // md:impl Store > fn create_email_token
     pub async fn create_email_token(
         &self,
         user_id: Uuid,
@@ -490,10 +458,7 @@ impl Store {
         Ok((token, expires_at))
     }
 
-    /// Consume a token: single-use and unexpired, atomically (`used_at` is set
-    /// in the same statement that checks it, so a token races itself safely
-    /// across replicas). Returns the owning user, or `None` for an unknown,
-    /// expired, or already-used token.
+    // md:impl Store > fn consume_email_token
     pub async fn consume_email_token(
         &self,
         kind: crate::mail::MailKind,
@@ -512,7 +477,7 @@ impl Store {
         Ok(user_id)
     }
 
-    /// Stamp the user's email as verified (idempotent; keeps the first time).
+    // md:impl Store > fn mark_email_verified
     pub async fn mark_email_verified(&self, user_id: Uuid) -> Result<(), AppError> {
         sqlx::query(
             "UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1",
@@ -523,7 +488,7 @@ impl Store {
         Ok(())
     }
 
-    /// Drop tokens that expired before `older_than` (used or not). Maintenance.
+    // md:impl Store > fn prune_email_tokens
     pub async fn prune_email_tokens(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM email_tokens WHERE expires_at < $1")
             .bind(older_than)
@@ -532,8 +497,7 @@ impl Store {
         Ok(r.rows_affected())
     }
 
-    // ── Devices ──────────────────────────────────────────────────────────────
-
+    // md:impl Store > fn create_device
     pub async fn create_device(
         &self,
         user_id: Uuid,
@@ -552,6 +516,7 @@ impl Store {
         Ok(device)
     }
 
+    // md:impl Store > fn get_device
     pub async fn get_device(&self, id: Uuid) -> Result<Option<UserDevice>, AppError> {
         let device = sqlx::query_as::<_, UserDevice>(
             r#"SELECT id, user_id, device_name, created_at, last_seen_at
@@ -563,6 +528,7 @@ impl Store {
         Ok(device)
     }
 
+    // md:impl Store > fn list_devices_by_user
     pub async fn list_devices_by_user(&self, user_id: Uuid) -> Result<Vec<UserDevice>, AppError> {
         let devices = sqlx::query_as::<_, UserDevice>(
             r#"SELECT id, user_id, device_name, created_at, last_seen_at
@@ -574,9 +540,7 @@ impl Store {
         Ok(devices)
     }
 
-    /// Delete one of `user_id`'s devices, revoking its token immediately
-    /// (the auth middleware and both WebSocket handshakes re-check device
-    /// existence). Returns whether a row was deleted.
+    // md:impl Store > fn delete_device
     pub async fn delete_device(&self, id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
         let result = sqlx::query("DELETE FROM user_devices WHERE id = $1 AND user_id = $2")
             .bind(id)
@@ -586,8 +550,7 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Delete every device of `user_id`, revoking all their tokens at once — a
-    /// "sign out everywhere" (issue #31). Returns how many devices were removed.
+    // md:impl Store > fn delete_all_devices
     pub async fn delete_all_devices(&self, user_id: Uuid) -> Result<u64, AppError> {
         let result = sqlx::query("DELETE FROM user_devices WHERE user_id = $1")
             .bind(user_id)
@@ -596,6 +559,7 @@ impl Store {
         Ok(result.rows_affected())
     }
 
+    // md:impl Store > fn touch_device
     pub async fn touch_device(&self, device_id: Uuid) -> Result<(), AppError> {
         sqlx::query("UPDATE user_devices SET last_seen_at = now() WHERE id = $1")
             .bind(device_id)
@@ -604,14 +568,7 @@ impl Store {
         Ok(())
     }
 
-    // ── Change journal ───────────────────────────────────────────────────────
-
-    /// Append a batch of changes to the user's journal. Duplicate re-sends of
-    /// the same `(batch_id, batch_index)` are silently skipped, so a client
-    /// that retries a batch after a reconnect never creates duplicate rows.
-    ///
-    /// Returns the sequence numbers actually inserted (empty for a pure
-    /// duplicate batch, in which case the caller should skip the fan-out).
+    // md:impl Store > fn append_changes
     pub async fn append_changes(
         &self,
         user_id: Uuid,
@@ -646,10 +603,7 @@ impl Store {
         Ok(seqs)
     }
 
-    /// Fetch up to `limit` journal rows for `user_id` with `seq > after_seq`,
-    /// in sequence order. Rows from every device are returned (including the
-    /// caller's own) so the delivery cursor can advance past them; the caller
-    /// filters out its own rows before sending.
+    // md:impl Store > fn changes_after
     pub async fn changes_after(
         &self,
         user_id: Uuid,
@@ -678,38 +632,7 @@ impl Store {
             .collect())
     }
 
-    /// An entity's past versions, newest first — the server-side counterpart of the client's
-    /// `HistoryRepository` (the client's local `entity_changes` holds only changes that
-    /// originated on that device; the server journal holds every device's, across every user).
-    ///
-    /// History is **per-entity**, not per-user: a note edited by several collaborators has one
-    /// timeline, so every user with read access sees every editor's versions (issue #27). The
-    /// caller's read authorization is enforced by the HTTP handler *before* this is called;
-    /// this query matches by entity id across all users' journal rows. Two independent lower
-    /// bounds window the visible versions:
-    ///
-    /// - `not_before` compares against the journal row's `received_at` (the retention age
-    ///   bound: rows older than the retention window are on their way out anyway).
-    /// - `authored_not_before` compares against the **payload's own causal timestamp** — the
-    ///   snapshot's `updated_at` for create/update, the top-level `deleted_at` for tombstones,
-    ///   falling back to `received_at` for legacy payloads without one (the same value the
-    ///   returned `timestamp` field has always used). The HTTP layer sets it to the share's
-    ///   grant time under the `access` visibility policy. It deliberately does **not** use
-    ///   `received_at`: journal re-delivery (a reinstalled client re-pushing from epoch)
-    ///   creates fresh rows with fresh `received_at` for pre-access content, which would
-    ///   defeat the window and leak old versions to a collaborator. A forged `updated_at`
-    ///   can still cheat the window — this is an honest-client boundary (see SECURITY.md).
-    ///   The cast goes through `keeplin_try_timestamptz` (migration 0013) so one malformed
-    ///   client-supplied timestamp degrades to the fallback instead of failing every read.
-    ///
-    /// The payloads stay opaque: only the envelope (`op`, snapshot key, `deleted_at`) is
-    /// inspected, and the snapshot is returned verbatim (client-encrypted fields remain
-    /// ciphertext).
-    /// `user_scope`: `None` reads the entity's history across **all** users' journal rows
-    /// (per-entity history for a server-materialised, potentially shared entity — the HTTP
-    /// handler has already authorised read access). `Some(user_id)` restricts to that user's
-    /// own rows (a relay-only entity with no server-side owner/share model is private to the
-    /// account, so it is read per-user).
+    // md:impl Store > fn entity_history
     pub async fn entity_history(
         &self,
         kind: HistoryKind,
@@ -762,8 +685,6 @@ impl Store {
                     (parse_ts(&snapshot["updated_at"]), Some(snapshot))
                 };
                 EntityVersionRow {
-                    // The edit's own instant when the payload carries one; the arrival
-                    // time otherwise (old records) — same ordering either way.
                     timestamp: timestamp.unwrap_or(received_at),
                     device_id: row.get("sync_device_id"),
                     entity,
@@ -772,8 +693,7 @@ impl Store {
             .collect())
     }
 
-    // ── Delivery cursors ─────────────────────────────────────────────────────
-
+    // md:impl Store > fn get_cursor
     pub async fn get_cursor(&self, device_id: Uuid) -> Result<i64, AppError> {
         let row = sqlx::query("SELECT last_seq FROM device_cursors WHERE device_id = $1")
             .bind(device_id)
@@ -782,8 +702,7 @@ impl Store {
         Ok(row.map(|r| r.get::<i64, _>("last_seq")).unwrap_or(0))
     }
 
-    /// Advance a device's delivery cursor. `GREATEST` guards against a stale
-    /// connection racing a newer one backwards.
+    // md:impl Store > fn advance_cursor
     pub async fn advance_cursor(&self, device_id: Uuid, seq: i64) -> Result<(), AppError> {
         sqlx::query(
             r#"INSERT INTO device_cursors (device_id, last_seq, updated_at)
@@ -799,21 +718,7 @@ impl Store {
         Ok(())
     }
 
-    // ── Retention ────────────────────────────────────────────────────────────
-
-    /// Delete journal rows older than `older_than` that every **connected** device of the
-    /// owning user has already passed (seq <= the minimum delivery cursor among devices that
-    /// have a cursor row).
-    ///
-    /// Only devices that have actually connected (and thus have a `device_cursors` row) count
-    /// toward the minimum — a device that was logged in but never connected no longer blocks
-    /// pruning forever (issue #23). This is safe because a fresh or long-absent device does
-    /// **not** replay the journal from seq 0: it cold-rehydrates the materialised entities
-    /// over REST (notebooks/tags/resources) and rebuilds note state from collaborative
-    /// snapshots, so pruned *delivered, aged-out* rows are never needed to reconstruct state
-    /// (see the `materialised_entities_survive_journal_pruning` test). Only rows older than
-    /// the retention window are eligible, so recent changes a new device might still want are
-    /// untouched. A user with no connected devices prunes nothing (MIN over no rows → 0).
+    // md:impl Store > fn prune_delivered_changes
     pub async fn prune_delivered_changes(
         &self,
         older_than: DateTime<Utc>,
@@ -834,12 +739,7 @@ impl Store {
         Ok(result.rows_affected())
     }
 
-    /// Reclaim the binary payloads of resources soft-deleted before `older_than`, returning
-    /// how many blobs were freed. The resource **metadata tombstone is kept** (it must keep
-    /// competing in conflict resolution so the delete converges); only the dead bytes in
-    /// `resource_blobs` are released. Mirrors the client's `purge_deleted_resources`
-    /// (issue #24). A generous window avoids racing a concurrent revive on a peer that has
-    /// not synced yet.
+    // md:impl Store > fn purge_deleted_resource_blobs
     pub async fn purge_deleted_resource_blobs(
         &self,
         older_than: DateTime<Utc>,
@@ -857,11 +757,7 @@ impl Store {
         Ok(result.rows_affected())
     }
 
-    /// Compact old line tombstones (design §6.4): delete lines soft-deleted
-    /// before `older_than` and drop their ids from each note's order. By then
-    /// every device has long converged past the delete (snapshots rebuild all
-    /// client state), so the tombstone no longer needs to compete in
-    /// resolution. Returns the number of lines reclaimed.
+    // md:impl Store > fn gc_line_tombstones
     pub async fn gc_line_tombstones(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let rows = sqlx::query(
             r#"DELETE FROM lines
@@ -883,13 +779,6 @@ impl Store {
                 .push(row.get("id"));
         }
         for (note_id, dead) in by_note {
-            // Read-modify-write the order under a row lock so a concurrent collaborative
-            // `Insert`/`Move` (which rewrites the whole order via `set_note_order`) cannot be
-            // clobbered by this compaction (issue #25). `SELECT … FOR UPDATE` holds the lock
-            // from read to write; a concurrent order UPDATE blocks until this commits and then
-            // lands on top, so its change survives. Compaction only removes dead ids, so a
-            // membership drop the concurrent write does not know about is re-applied by the
-            // next GC pass — never a lost edit.
             let mut tx = self.pool.begin().await?;
             let existing: Option<(Json<Vec<Uuid>>,)> = sqlx::query_as(
                 "SELECT order_json FROM note_line_order WHERE note_id = $1 FOR UPDATE",
@@ -903,8 +792,6 @@ impl Store {
                     .into_iter()
                     .filter(|id| !dead.contains(id))
                     .collect();
-                // Only the membership changes; the order's version metadata is
-                // untouched (compaction is not an edit).
                 sqlx::query("UPDATE note_line_order SET order_json = $2 WHERE note_id = $1")
                     .bind(note_id)
                     .bind(Json(kept))
@@ -916,14 +803,13 @@ impl Store {
         Ok(rows.len() as u64)
     }
 
-    /// Lightweight database round-trip for the readiness probe (issue #36): succeeds only if
-    /// a pooled connection can be acquired and the database answers.
+    // md:impl Store > fn ping
     pub async fn ping(&self) -> Result<(), AppError> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
     }
 
-    /// Aggregate row counts for `/api/metrics`.
+    // md:impl Store > fn counts
     pub async fn counts(&self) -> Result<(i64, i64, i64, i64), AppError> {
         let row = sqlx::query(
             r#"SELECT
@@ -942,12 +828,7 @@ impl Store {
         ))
     }
 
-    // ── Notes ────────────────────────────────────────────────────────────────
-
-    /// Create a note and its (empty) versioned line order in one transaction.
-    ///
-    /// `id` may be supplied by the client (a keeplin daemon keeps its local
-    /// note id when it uploads a note); a duplicate id maps to `Conflict`.
+    // md:impl Store > fn create_note
     pub async fn create_note(
         &self,
         id: Option<Uuid>,
@@ -980,6 +861,7 @@ impl Store {
         Ok(note)
     }
 
+    // md:impl Store > fn get_note
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
         let mut note = sqlx::query_as::<_, Note>(&format!(
             "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
@@ -993,12 +875,7 @@ impl Store {
         Ok(note)
     }
 
-    /// Notes the user owns, notes shared with them, plus notes filed in notebooks they own
-    /// (the notebook owner's implicit `manage` — see `permissions::resolve_note_access`).
-    /// Notes visible to `user_id` (owned, shared, or filed in a notebook they
-    /// own), newest first. Paginated by keyset on `(updated_at, id)` (issue #29):
-    /// `limit` of `None` returns everything (back-compatible); a `cursor` returns
-    /// the page strictly older than it.
+    // md:impl Store > fn list_notes_for_user
     pub async fn list_notes_for_user(
         &self,
         user_id: Uuid,
@@ -1032,7 +909,7 @@ impl Store {
         Ok(notes)
     }
 
-    /// Apply a partial metadata update; absent fields stay untouched.
+    // md:impl Store > fn update_note_meta
     pub async fn update_note_meta(
         &self,
         id: Uuid,
@@ -1068,7 +945,7 @@ impl Store {
         self.decrypt_note_title(note)
     }
 
-    /// Decrypt the `title` of an optional note read straight from the database.
+    // md:impl Store > fn decrypt_note_title
     fn decrypt_note_title(&self, note: Option<Note>) -> Result<Option<Note>, AppError> {
         match note {
             Some(mut n) => {
@@ -1079,6 +956,7 @@ impl Store {
         }
     }
 
+    // md:impl Store > fn soft_delete_note
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
@@ -1091,8 +969,7 @@ impl Store {
         self.decrypt_note_title(note)
     }
 
-    /// Transfer a note's ownership to `new_owner` (ownership is separate from capability
-    /// grants and transferable only by the current owner — enforced at the HTTP layer).
+    // md:impl Store > fn set_note_owner
     pub async fn set_note_owner(
         &self,
         id: Uuid,
@@ -1110,8 +987,7 @@ impl Store {
         self.decrypt_note_title(note)
     }
 
-    // ── Shares ───────────────────────────────────────────────────────────────
-
+    // md:impl Store > fn create_or_update_share
     pub async fn create_or_update_share(
         &self,
         note_id: Uuid,
@@ -1132,6 +1008,7 @@ impl Store {
         Ok(share)
     }
 
+    // md:impl Store > fn get_share
     pub async fn get_share(
         &self,
         note_id: Uuid,
@@ -1148,7 +1025,7 @@ impl Store {
         Ok(share)
     }
 
-    /// List every share on a note (for owners/`share_read` grantees to see who has access).
+    // md:impl Store > fn list_shares
     pub async fn list_shares(&self, note_id: Uuid) -> Result<Vec<NoteShare>, AppError> {
         let shares = sqlx::query_as::<_, NoteShare>(
             r#"SELECT note_id, user_id, capabilities, created_at
@@ -1160,6 +1037,7 @@ impl Store {
         Ok(shares)
     }
 
+    // md:impl Store > fn delete_share
     pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
         sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
             .bind(note_id)
@@ -1169,9 +1047,7 @@ impl Store {
         Ok(())
     }
 
-    // ── Notebook ownership & shares (Front B stage 1b) ─────────────────────────
-
-    /// The notebook's owner (`notebooks.user_id`), or `None` if it does not exist.
+    // md:impl Store > fn notebook_owner
     pub async fn notebook_owner(&self, notebook_id: Uuid) -> Result<Option<Uuid>, AppError> {
         let owner: Option<(Uuid,)> =
             sqlx::query_as("SELECT user_id FROM notebooks WHERE id = $1 AND deleted_at IS NULL")
@@ -1181,8 +1057,7 @@ impl Store {
         Ok(owner.map(|r| r.0))
     }
 
-    /// Transfer a notebook's ownership. The cascade to child notes is triggered separately by
-    /// the caller (so the new owner's grants propagate).
+    // md:impl Store > fn set_notebook_owner
     pub async fn set_notebook_owner(
         &self,
         notebook_id: Uuid,
@@ -1199,6 +1074,7 @@ impl Store {
         Ok(row.map(|r| r.0))
     }
 
+    // md:impl Store > fn get_notebook_share
     pub async fn get_notebook_share(
         &self,
         notebook_id: Uuid,
@@ -1215,6 +1091,7 @@ impl Store {
         Ok(share)
     }
 
+    // md:impl Store > fn list_notebook_shares
     pub async fn list_notebook_shares(
         &self,
         notebook_id: Uuid,
@@ -1229,8 +1106,7 @@ impl Store {
         Ok(shares)
     }
 
-    /// Grant/update a notebook share **and** cascade the notebook's grants onto every note it
-    /// contains (destructive: a note's own `note_shares` are replaced), all in one transaction.
+    // md:impl Store > fn create_or_update_notebook_share
     pub async fn create_or_update_notebook_share(
         &self,
         notebook_id: Uuid,
@@ -1254,7 +1130,7 @@ impl Store {
         Ok(share)
     }
 
-    /// Revoke a notebook share and re-cascade so the removal propagates to child notes.
+    // md:impl Store > fn delete_notebook_share
     pub async fn delete_notebook_share(
         &self,
         notebook_id: Uuid,
@@ -1271,8 +1147,7 @@ impl Store {
         Ok(())
     }
 
-    /// Re-cascade a notebook's grants onto its notes without changing the grants themselves
-    /// (used after an ownership transfer).
+    // md:impl Store > fn cascade_notebook_to_notes
     pub async fn cascade_notebook_to_notes(&self, notebook_id: Uuid) -> Result<(), AppError> {
         let mut tx = self.pool.begin().await?;
         cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
@@ -1280,8 +1155,7 @@ impl Store {
         Ok(())
     }
 
-    /// Adopt a notebook's grants onto **one** note — the move case. Destructive: the note's
-    /// existing `note_shares` are replaced with the notebook's.
+    // md:impl Store > fn apply_notebook_shares_to_note
     pub async fn apply_notebook_shares_to_note(
         &self,
         note_id: Uuid,
@@ -1293,13 +1167,12 @@ impl Store {
         Ok(())
     }
 
-    // ── Lines ────────────────────────────────────────────────────────────────
-
+    // md:impl Store > fn get_line
     pub async fn get_line(&self, id: Uuid) -> Result<Option<Line>, AppError> {
         self.get_line_on(&self.pool, id).await
     }
 
-    /// As [`get_line`], on a caller-supplied executor (issue #45).
+    // md:impl Store > fn get_line_on
     pub async fn get_line_on<'e, E>(&self, exec: E, id: Uuid) -> Result<Option<Line>, AppError>
     where
         E: sqlx::Executor<'e, Database = Postgres>,
@@ -1317,7 +1190,7 @@ impl Store {
         Ok(line)
     }
 
-    /// Every line of the note, tombstones included (snapshots need them).
+    // md:impl Store > fn list_lines
     pub async fn list_lines(&self, note_id: Uuid) -> Result<Vec<Line>, AppError> {
         let mut lines = sqlx::query_as::<_, Line>(
             r#"SELECT id, note_id, content, created_at, updated_at, deleted_at, vv, last_writer
@@ -1332,6 +1205,7 @@ impl Store {
         Ok(lines)
     }
 
+    // md:impl Store > fn insert_line
     pub async fn insert_line(
         &self,
         id: Uuid,
@@ -1353,7 +1227,7 @@ impl Store {
         .await
     }
 
-    /// As [`insert_line`], on a caller-supplied executor (issue #45).
+    // md:impl Store > fn insert_line_on
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_line_on<'e, E>(
         &self,
@@ -1385,9 +1259,7 @@ impl Store {
         Ok(line)
     }
 
-    /// Overwrite a line's content + version metadata (an applied `Update`).
-    /// Also clears `deleted_at`: a causally newer edit revives a tombstone,
-    /// same as keeplin-core's note semantics.
+    // md:impl Store > fn update_line
     pub async fn update_line(
         &self,
         id: Uuid,
@@ -1400,7 +1272,7 @@ impl Store {
             .await
     }
 
-    /// As [`update_line`], on a caller-supplied executor (issue #45).
+    // md:impl Store > fn update_line_on
     pub async fn update_line_on<'e, E>(
         &self,
         exec: E,
@@ -1432,8 +1304,7 @@ impl Store {
         Ok(line)
     }
 
-    /// Tombstone a line (an applied `Delete`). The row is kept for
-    /// convergence and remains in the note's order until garbage collection.
+    // md:impl Store > fn soft_delete_line
     pub async fn soft_delete_line(
         &self,
         id: Uuid,
@@ -1446,7 +1317,7 @@ impl Store {
             .await
     }
 
-    /// As [`soft_delete_line`], on a caller-supplied executor (issue #45).
+    // md:impl Store > fn soft_delete_line_on
     pub async fn soft_delete_line_on<'e, E>(
         &self,
         exec: E,
@@ -1478,15 +1349,12 @@ impl Store {
         Ok(line)
     }
 
-    // ── Line order (the NoteLines entity) ────────────────────────────────────
-
+    // md:impl Store > fn get_note_order
     pub async fn get_note_order(&self, note_id: Uuid) -> Result<Option<NoteOrder>, AppError> {
         self.get_note_order_on(&self.pool, note_id).await
     }
 
-    /// As [`get_note_order`], on a caller-supplied executor so the collaborative
-    /// op batch can read the order on the same connection that holds its advisory
-    /// lock (issue #45) rather than a separate pooled one.
+    // md:impl Store > fn get_note_order_on
     pub async fn get_note_order_on<'e, E>(
         &self,
         exec: E,
@@ -1511,6 +1379,7 @@ impl Store {
         }))
     }
 
+    // md:impl Store > fn set_note_order
     pub async fn set_note_order(
         &self,
         note_id: Uuid,
@@ -1523,7 +1392,7 @@ impl Store {
             .await
     }
 
-    /// As [`set_note_order`], on a caller-supplied executor (issue #45).
+    // md:impl Store > fn set_note_order_on
     pub async fn set_note_order_on<'e, E>(
         &self,
         exec: E,
@@ -1551,18 +1420,13 @@ impl Store {
         Ok(())
     }
 
-    // ── Cross-instance collaboration bus (issue #45) ─────────────────────────
-
-    /// The connection pool, so the bus can open a dedicated `PgListener`.
+    // md:impl Store > fn pool
     pub fn pool(&self) -> &Pool<Postgres> {
         &self.pool
     }
 
-    /// Fire a `LISTEN/NOTIFY` signal on `channel` with `payload`. Used to tell
-    /// other instances that a collab op/presence change or a relay batch landed.
+    // md:impl Store > fn notify
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), AppError> {
-        // `pg_notify` is the function form of NOTIFY and takes the payload as a
-        // bind parameter (the statement form would require interpolation).
         sqlx::query("SELECT pg_notify($1, $2)")
             .bind(channel)
             .bind(payload)
@@ -1571,11 +1435,7 @@ impl Store {
         Ok(())
     }
 
-    /// Hold a Postgres advisory lock keyed by `note_id` for the returned
-    /// transaction's lifetime, serialising a note's order read-modify-write
-    /// across instances (issue #45). The caller does its per-op writes on the
-    /// pool and then `commit()`s this transaction to release the lock; dropping
-    /// it (on error) rolls back and releases too.
+    // md:impl Store > fn lock_note_order
     pub async fn lock_note_order(
         &self,
         note_id: Uuid,
@@ -1588,9 +1448,7 @@ impl Store {
         Ok(tx)
     }
 
-    /// Append an applied op batch to the fan-out outbox and return its `seq`
-    /// (the note's server sequence number). Emitted with `pg_notify` by the
-    /// caller so every instance delivers it to its local subscribers.
+    // md:impl Store > fn insert_collab_event
     pub async fn insert_collab_event(
         &self,
         note_id: Uuid,
@@ -1613,7 +1471,7 @@ impl Store {
         Ok(seq)
     }
 
-    /// Load an outbox row by `seq` for delivery to local subscribers.
+    // md:impl Store > fn get_collab_event
     pub async fn get_collab_event(&self, seq: i64) -> Result<Option<CollabEvent>, AppError> {
         let row = sqlx::query(
             r#"SELECT note_id, origin_instance, origin_conn, user_id, ops
@@ -1632,7 +1490,7 @@ impl Store {
         }))
     }
 
-    /// Delete outbox rows older than `older_than` (delivery buffer, not history).
+    // md:impl Store > fn prune_collab_events
     pub async fn prune_collab_events(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM collab_events WHERE created_at < $1")
             .bind(older_than)
@@ -1641,7 +1499,7 @@ impl Store {
         Ok(r.rows_affected())
     }
 
-    /// Record (or refresh) this connection's presence on a note.
+    // md:impl Store > fn upsert_presence
     pub async fn upsert_presence(
         &self,
         note_id: Uuid,
@@ -1671,7 +1529,7 @@ impl Store {
         Ok(())
     }
 
-    /// Remove one connection's presence from one note (leave).
+    // md:impl Store > fn delete_presence
     pub async fn delete_presence(
         &self,
         note_id: Uuid,
@@ -1689,8 +1547,7 @@ impl Store {
         Ok(())
     }
 
-    /// The merged presence for a note across all instances: one row per live
-    /// subscriber connection (the caller dedups per user).
+    // md:impl Store > fn list_presence
     pub async fn list_presence(&self, note_id: Uuid) -> Result<Vec<PresenceRow>, AppError> {
         let rows = sqlx::query(
             r#"SELECT user_id, display_name, cursor
@@ -1711,8 +1568,7 @@ impl Store {
             .collect())
     }
 
-    /// Heartbeat: bump `updated_at` on all of this instance's presence rows so a
-    /// live instance's rows are never swept as stale.
+    // md:impl Store > fn touch_instance_presence
     pub async fn touch_instance_presence(&self, instance_id: Uuid) -> Result<(), AppError> {
         sqlx::query("UPDATE collab_presence SET updated_at = now() WHERE instance_id = $1")
             .bind(instance_id)
@@ -1721,8 +1577,7 @@ impl Store {
         Ok(())
     }
 
-    /// Drop presence rows not heartbeated since `older_than` — i.e. left behind
-    /// by a crashed/stopped instance.
+    // md:impl Store > fn sweep_presence
     pub async fn sweep_presence(&self, older_than: DateTime<Utc>) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM collab_presence WHERE updated_at < $1")
             .bind(older_than)
@@ -1731,7 +1586,7 @@ impl Store {
         Ok(r.rows_affected())
     }
 
-    /// Remove every presence row owned by an instance (startup/shutdown cleanup).
+    // md:impl Store > fn delete_instance_presence
     pub async fn delete_instance_presence(&self, instance_id: Uuid) -> Result<u64, AppError> {
         let r = sqlx::query("DELETE FROM collab_presence WHERE instance_id = $1")
             .bind(instance_id)
@@ -1740,18 +1595,7 @@ impl Store {
         Ok(r.rows_affected())
     }
 
-    // ── Domain entities materialised from the relay ──────────────────────────
-    //
-    // notebooks, tags, note↔tag associations and resource metadata arrive as
-    // `Change`s over `/api/sync`; the relay materialises them here so the server
-    // is their durable source of truth (the client DB is a cache). Every write
-    // resolves against the stored row with the exact keeplin-core rule, under a
-    // `SELECT … FOR UPDATE` lock so concurrent updates to the same entity are
-    // serialised. Each entity id is created on a single device, so the
-    // not-yet-present branch cannot race another creator.
-
-    /// Apply a notebook create/update if it wins resolution. Returns whether it
-    /// was written.
+    // md:impl Store > fn upsert_notebook
     pub async fn upsert_notebook(
         &self,
         user_id: Uuid,
@@ -1801,8 +1645,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Apply a notebook tombstone if it wins. An unknown notebook gets a minimal
-    /// tombstone so a later stale create/update cannot resurrect it.
+    // md:impl Store > fn delete_notebook
     pub async fn delete_notebook(
         &self,
         user_id: Uuid,
@@ -1853,6 +1696,7 @@ impl Store {
         Ok(true)
     }
 
+    // md:impl Store > fn upsert_tag
     pub async fn upsert_tag(
         &self,
         user_id: Uuid,
@@ -1899,6 +1743,7 @@ impl Store {
         Ok(true)
     }
 
+    // md:impl Store > fn delete_tag
     pub async fn delete_tag(
         &self,
         user_id: Uuid,
@@ -1948,7 +1793,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Apply a note↔tag add (`deleted_at = None`) or remove (`Some`) if it wins.
+    // md:impl Store > fn upsert_note_tag
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_note_tag(
         &self,
@@ -2003,9 +1848,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Apply resource metadata (create) if it wins. The binary payload is
-    /// uploaded separately; resolution uses `deleted_at ?? created_at` as the
-    /// timestamp, matching keeplin-core (resources carry no `updated_at`).
+    // md:impl Store > fn upsert_resource_meta
     pub async fn upsert_resource_meta(
         &self,
         user_id: Uuid,
@@ -2059,6 +1902,7 @@ impl Store {
         Ok(true)
     }
 
+    // md:impl Store > fn delete_resource
     pub async fn delete_resource(
         &self,
         id: Uuid,
@@ -2075,8 +1919,6 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?
         else {
-            // Unknown resource: nothing to tombstone here. A later create will
-            // arrive with its own vv and resolve normally.
             return Ok(false);
         };
         let lvv = row.get::<Json<VersionVector>, _>("vv").0;
@@ -2103,8 +1945,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Store (or replace) a resource's binary payload. The resource metadata
-    /// must already exist (enforced by the FK).
+    // md:impl Store > fn put_resource_blob
     pub async fn put_resource_blob(&self, resource_id: Uuid, data: &[u8]) -> Result<(), AppError> {
         sqlx::query(
             r#"INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2)
@@ -2117,6 +1958,7 @@ impl Store {
         Ok(())
     }
 
+    // md:impl Store > fn get_resource_blob
     pub async fn get_resource_blob(&self, resource_id: Uuid) -> Result<Option<Vec<u8>>, AppError> {
         let row = sqlx::query("SELECT data FROM resource_blobs WHERE resource_id = $1")
             .bind(resource_id)
@@ -2125,8 +1967,7 @@ impl Store {
         Ok(row.map(|r| r.get::<Vec<u8>, _>("data")))
     }
 
-    /// Does a resource metadata row exist for this user (used to authorise a
-    /// blob upload/download)?
+    // md:impl Store > fn resource_owned_by
     pub async fn resource_owned_by(
         &self,
         resource_id: Uuid,
@@ -2140,8 +1981,7 @@ impl Store {
         Ok(row.is_some())
     }
 
-    // ── Domain entity reads (cold rehydration / queries) ─────────────────────
-
+    // md:impl Store > fn list_notebooks
     pub async fn list_notebooks(
         &self,
         user_id: Uuid,
@@ -2165,6 +2005,7 @@ impl Store {
         .await?)
     }
 
+    // md:impl Store > fn list_tags
     pub async fn list_tags(
         &self,
         user_id: Uuid,
@@ -2188,6 +2029,7 @@ impl Store {
         .await?)
     }
 
+    // md:impl Store > fn list_resources
     pub async fn list_resources(
         &self,
         user_id: Uuid,
@@ -2211,7 +2053,7 @@ impl Store {
         .await?)
     }
 
-    /// Live tag ids attached to a note (association present and both ends live).
+    // md:impl Store > fn list_note_tag_ids
     pub async fn list_note_tag_ids(
         &self,
         user_id: Uuid,
@@ -2234,13 +2076,7 @@ impl Store {
             .collect())
     }
 
-    // ── Per-user quotas ──────────────────────────────────────────────────────
-
-    /// Total bytes of the user's **live** resource binaries, excluding one resource id.
-    /// Excluding the resource being written means an overwrite is measured by its new size,
-    /// not double-counted. Soft-deleted resources are excluded (`deleted_at IS NULL`) so a
-    /// user can recover quota by deleting attachments — their bytes are later reclaimed by
-    /// `purge_deleted_resource_blobs` (issue #24).
+    // md:impl Store > fn user_blob_bytes_excluding
     pub async fn user_blob_bytes_excluding(
         &self,
         user_id: Uuid,
@@ -2259,7 +2095,7 @@ impl Store {
         Ok(bytes)
     }
 
-    /// Number of the user's live (non-deleted) owned notes.
+    // md:impl Store > fn count_live_notes_for_user
     pub async fn count_live_notes_for_user(&self, user_id: Uuid) -> Result<i64, AppError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes WHERE owner_id = $1 AND deleted_at IS NULL",
@@ -2271,16 +2107,7 @@ impl Store {
     }
 }
 
-// ── Notebook→note cascade helpers (Front B stage 1b) ───────────────────────────
-//
-// The destructive cascade **replaces** the target notes' `note_shares` with a copy of the
-// notebook's `notebook_shares`. It never touches note ownership (that stays with each note's
-// `owner_id`, independent and transferable): the cascade governs the collaborator grants only.
-// The notebook owner's implicit `manage` over child notes is NOT materialised here — it is
-// resolved at access time by `permissions::resolve_note_access`, so an ownership transfer
-// needs no share rewrite.
-
-/// Replace one note's shares with the notebook's grants (the move case).
+// md:fn replace_note_shares_from_notebook_tx
 async fn replace_note_shares_from_notebook_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     note_id: Uuid,
@@ -2301,8 +2128,7 @@ async fn replace_note_shares_from_notebook_tx(
     Ok(())
 }
 
-/// Replace the shares of **every live note** in a notebook with the notebook's grants (the
-/// notebook-permission-change case).
+// md:fn cascade_notebook_to_notes_tx
 async fn cascade_notebook_to_notes_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     notebook_id: Uuid,
