@@ -1,15 +1,16 @@
 # `tests/collab_client_e2e.rs` — real daemon client ↔ real server
 
 Self-contained companion for `crates/keeplin-srv/tests/collab_client_e2e.rs`. It
-documents **every code block of the source file, in source order** — a reader with only
+documents **every code block of the source file, in source order, with its complete code embedded** — a reader with only
 this file must be able to understand the test binary without opening anything else, so
 project-wide conventions are deliberately re-explained here (hyper-redundancy is
 intended).
 
 **How to navigate**: every block carries exactly one marker comment
 `// md:<Header> > … > <Block header>` whose path is the header chain of its section
-here; grep it in either direction. Each section covers **Identification**,
-**What it does**, **Dependencies**, **Used by**, **Repeated context**.
+here; grep it in either direction. Each block section covers, in this fixed order:
+**Identification**, **Code**, **What it does**, **Dependencies**, **Used by**,
+**Repeated context**.
 
 ---
 
@@ -18,7 +19,10 @@ here; grep it in either direction. Each section covers **Identification**,
 **Identification** — file-level block: the `#[path] mod common;` declaration and
 imports. Marker `// md:Overview`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 #[path = "collab_e2e_common/mod.rs"]
 mod common;
 
@@ -58,6 +62,25 @@ keeplin (`CollabBackend`) concern tracked separately.
 
 **Identification** — `#[sqlx::test(migrations = "../../migrations")]` async test;
 marker `// md:fn collab_client_writes_note_through_to_the_server`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn collab_client_writes_note_through_to_the_server
+#[sqlx::test(migrations = "../../migrations")]
+async fn collab_client_writes_note_through_to_the_server(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let a = collab_device(addr, &token).await;
+
+    let note = a
+        .create_note(Note::new("Title", "hello world"))
+        .await
+        .unwrap();
+    wait_server_body(addr, &token, note.id, "hello world").await;
+}
+```
 
 **What it does** — The write-through scenario: spawn the server, register + login one
 account, build the real collab device, and `create_note(Note::new("Title",
