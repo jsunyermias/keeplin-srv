@@ -1,7 +1,7 @@
 # `http.rs` — the REST router and handlers
 
-Self-contained companion for `crates/keeplin-srv/src/http.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/http.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `http.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,16 +19,31 @@ use a compressed layout of the same five points.
 
 **Identification** — file-level block: the module's imports. Marker `// md:Overview`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use std::sync::Arc;
-use axum::{ body::Bytes, extract::{DefaultBodyLimit, Path, Query, State}, http::header,
-    middleware, response::{IntoResponse, Response}, routing::{get, post}, Json, Router };
+
+use axum::{
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::header,
+    middleware,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{ auth::{self, AuthedUser}, error::AppError,
+
+use crate::{
+    auth::{self, AuthedUser},
+    error::AppError,
     permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
     state::AppState,
-    store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice} };
+    store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
+};
 ```
 
 **What it does** — Builds the axum `Router` and implements every REST/JSON handler:
@@ -64,6 +79,13 @@ allocation/storage.
 **Identification** — const; marker `// md:MAX_PAGE_LIMIT`.
 `const MAX_PAGE_LIMIT: i64 = 500;`
 
+**Code** — complete and verbatim:
+
+```rust
+// md:MAX_PAGE_LIMIT
+const MAX_PAGE_LIMIT: i64 = 500;
+```
+
 **What it does** — Hard ceiling on `?limit=` so a client cannot ask for an unbounded
 page and defeat pagination (issue #29).
 
@@ -78,9 +100,15 @@ row (back-compatible); this cap only bounds explicit requests.
 
 **Identification** — struct; marker `// md:ListQuery`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:ListQuery
 #[derive(Debug, Deserialize)]
-struct ListQuery { limit: Option<i64>, cursor: Option<String> }
+struct ListQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
 ```
 
 **What it does** — The query string shared by the paginated list endpoints
@@ -98,12 +126,31 @@ struct ListQuery { limit: Option<i64>, cursor: Option<String> }
 
 **Identification** — impl block; marker `// md:impl ListQuery`. Contains `fn resolve`.
 
+**Code** — container: members documented as sub-blocks below: fn resolve.
+
 **What it does / Dependencies / Used by / Repeated context** — see `fn resolve`.
 
 ### fn resolve
 
 **Identification** — method; marker `// md:impl ListQuery > fn resolve`.
 `fn resolve(&self) -> Result<(Option<i64>, Option<PageCursor>), AppError>`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl ListQuery > fn resolve
+    fn resolve(&self) -> Result<(Option<i64>, Option<PageCursor>), AppError> {
+        let limit = self.limit.map(|l| l.clamp(1, MAX_PAGE_LIMIT));
+        let cursor = match self.cursor.as_deref() {
+            Some(token) => Some(
+                PageCursor::decode(token)
+                    .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?,
+            ),
+            None => None,
+        };
+        Ok((limit, cursor))
+    }
+```
 
 **What it does** — Clamps the requested limit to `[1, MAX_PAGE_LIMIT]` (or `None` for
 "all") and decodes the opaque cursor; a malformed cursor is `400 BadRequest`.
@@ -120,9 +167,27 @@ handlers.
 
 **Identification** — function; marker `// md:fn paginated`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn paginated<T: Serialize>(items: Vec<T>, limit: Option<i64>,
-                           cursor_of: impl Fn(&T) -> PageCursor) -> Response
+// md:fn paginated
+fn paginated<T: Serialize>(
+    items: Vec<T>,
+    limit: Option<i64>,
+    cursor_of: impl Fn(&T) -> PageCursor,
+) -> Response {
+    let next = match limit {
+        Some(l) if items.len() as i64 >= l => items.last().map(|it| cursor_of(it).encode()),
+        _ => None,
+    };
+    let mut resp = Json(items).into_response();
+    if let Some(token) = next {
+        if let Ok(value) = token.parse() {
+            resp.headers_mut().insert("x-next-cursor", value);
+        }
+    }
+    resp
+}
 ```
 
 **What it does** — Builds a list response: the JSON array (shape unchanged — always a
@@ -146,6 +211,84 @@ absence of the header = exhausted; malformed cursor = 400; `limit` capped at 500
 
 **Identification** — public function; marker `// md:fn router`.
 `pub fn router(state: Arc<AppState>) -> Router`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn router
+pub fn router(state: Arc<AppState>) -> Router {
+    let resource_data = Router::new()
+        .route(
+            "/api/resources/:id/data",
+            get(get_resource_data).put(put_resource_data),
+        )
+        .layer(DefaultBodyLimit::max(state.config.max_upload_bytes));
+
+    let protected = Router::new()
+        .route("/api/metrics", get(metrics))
+        .route(
+            "/api/devices",
+            post(create_device)
+                .get(list_devices)
+                .delete(delete_all_devices),
+        )
+        .route("/api/devices/:id", axum::routing::delete(delete_device))
+        .route("/api/account/password", post(change_password))
+        .route("/api/account", axum::routing::delete(delete_account))
+        .route("/api/account/verify/request", post(verify_request))
+        .route("/api/notes", post(create_note).get(list_notes))
+        .route(
+            "/api/notes/:id",
+            get(get_note).patch(update_note).delete(delete_note),
+        )
+        .route("/api/notes/:id/share", post(create_share).get(list_shares))
+        .route(
+            "/api/notes/:id/share/:user_id",
+            axum::routing::delete(delete_share),
+        )
+        .route("/api/notes/:id/transfer", post(transfer_ownership))
+        .route("/api/notes/:id/history", get(note_history))
+        .route("/api/notes/:id/export", get(export_note))
+        .route("/api/import", post(import_note))
+        .route("/api/notebooks", get(list_notebooks))
+        .route(
+            "/api/notebooks/:id/share",
+            post(create_notebook_share).get(list_notebook_shares),
+        )
+        .route(
+            "/api/notebooks/:id/share/:user_id",
+            axum::routing::delete(delete_notebook_share),
+        )
+        .route("/api/notebooks/:id/transfer", post(transfer_notebook))
+        .route("/api/notebooks/:id/history", get(notebook_history))
+        .route("/api/tags", get(list_tags))
+        .route("/api/resources", get(list_resources))
+        .route("/api/notes/:id/tags", get(list_note_tags))
+        .merge(resource_data)
+        .layer(middleware::from_fn_with_state(state.clone(), auth::auth_mw));
+
+    let limited = Router::new()
+        .route("/api/register", post(register))
+        .route("/api/login", post(login))
+        .route("/api/account/verify/confirm", post(verify_confirm))
+        .route("/api/account/reset/request", post(reset_request))
+        .route("/api/account/reset/confirm", post(reset_confirm))
+        .merge(protected)
+        .route("/api/ws", get(crate::collab::handler))
+        .route("/api/sync", get(crate::sync::handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::rate_limit_mw,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/version", get(version))
+        .merge(limited)
+        .with_state(state)
+}
+```
 
 **What it does** — Assembles the three-layer router:
 
@@ -205,6 +348,13 @@ peer IP); `main.rs` and all test spawns do this.
 **Identification** — public const; marker `// md:PROTOCOL_VERSION`.
 `pub const PROTOCOL_VERSION: u32 = 1;`
 
+**Code** — complete and verbatim:
+
+```rust
+// md:PROTOCOL_VERSION
+pub const PROTOCOL_VERSION: u32 = 1;
+```
+
 **What it does** — The wire-protocol version the server speaks. Bump on a **breaking**
 change to the relay/collab message shapes so a client can detect an incompatible
 server at connect (issues #39/#114). Mirrored by keeplin-core's `src/compat.rs`
@@ -227,6 +377,15 @@ against this server, so drift fails here, not in production.
 **Identification** — public function; marker `// md:fn compatible_with`.
 `pub fn compatible_with(client_protocol: u32) -> bool`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn compatible_with
+pub fn compatible_with(client_protocol: u32) -> bool {
+    client_protocol == PROTOCOL_VERSION
+}
+```
+
 **What it does** — The compatibility rule, defined once per repo and mirrored in
 keeplin-core's `compat::compatible_with`: **exact match**. Capabilities cover additive
 evolution, so a version bump is reserved for breaking changes.
@@ -242,10 +401,18 @@ contract consumer); `mod tests` pins it.
 
 **Identification** — const; marker `// md:CAPABILITIES`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:CAPABILITIES
 const CAPABILITIES: &[&str] = &[
-    "history", "history_visibility", "resource_purge", "readiness",
-    "account_management", "pagination", "email_flows",
+    "history",
+    "history_visibility",
+    "resource_purge",
+    "readiness",
+    "account_management",
+    "pagination",
+    "email_flows",
 ];
 ```
 
@@ -270,6 +437,20 @@ via the mail webhook, issue #49; endpoints answer 501 when unconfigured).
 **Identification** — handler; marker `// md:fn version`.
 `async fn version() -> Json<serde_json::Value>`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn version
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": "keeplin-srv",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": PROTOCOL_VERSION,
+        "capabilities": CAPABILITIES,
+    }))
+}
+```
+
 **What it does** — `GET /version`: the unauthenticated capability/version handshake —
 `{ name, version (crate), protocol_version, capabilities[] }` — so a client negotiates
 behaviour without guessing (issues #39/#114). Never rate-limited.
@@ -286,6 +467,15 @@ behaviour without guessing (issues #39/#114). Never rate-limited.
 **Identification** — handler; marker `// md:fn health`.
 `async fn health() -> &'static str`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn health
+async fn health() -> &'static str {
+    "ok"
+}
+```
+
 **What it does** — `GET /health`, liveness: the process is up. Returns the literal
 `"ok"`; cheap and dependency-free, so an orchestrator never restarts a healthy process
 just because the database blipped. Never rate-limited.
@@ -301,6 +491,24 @@ up; `/ready` = can actually serve.
 
 **Identification** — handler; marker `// md:fn ready`.
 `async fn ready(State(state)) -> impl IntoResponse`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn ready
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.store.ping().await {
+        Ok(()) => (axum::http::StatusCode::OK, "ready"),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "database unavailable",
+            )
+        }
+    }
+}
+```
 
 **What it does** — `GET /ready`, readiness: a lightweight database round-trip
 (`store.ping`); `200 ready`, or `503 database unavailable` (logged) so a load
@@ -320,14 +528,72 @@ orchestrator readiness probes; the Docker `HEALTHCHECK`.
 `struct MetricsQuery { format: Option<String> }` — the `?format=` selector for
 `metrics`. **Dependencies** serde; **Used by** `metrics`; **Repeated context** none.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:MetricsQuery
+#[derive(Debug, Deserialize)]
+struct MetricsQuery {
+    format: Option<String>,
+}
+```
+
 ---
 
 ## fn metrics
 
 **Identification** — handler; marker `// md:fn metrics`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn metrics(State(state), Query(q): Query<MetricsQuery>) -> Result<Response, AppError>
+// md:fn metrics
+async fn metrics(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Response, AppError> {
+    let (users, notes, lines, tombstones) = state.store.counts().await?;
+    let (collab_sessions, collab_connections) = state.collab.stats().await;
+    let relay_users = state.hub.live_users().await;
+
+    if q.format.as_deref() == Some("prometheus") {
+        let body = format!(
+            "# HELP keeplin_users Registered accounts (shared across replicas).\n\
+             # TYPE keeplin_users gauge\n\
+             keeplin_users {users}\n\
+             # HELP keeplin_notes Live notes (shared across replicas).\n\
+             # TYPE keeplin_notes gauge\n\
+             keeplin_notes {notes}\n\
+             # HELP keeplin_lines Live note lines (shared across replicas).\n\
+             # TYPE keeplin_lines gauge\n\
+             keeplin_lines {lines}\n\
+             # HELP keeplin_line_tombstones Soft-deleted lines awaiting GC (shared across replicas).\n\
+             # TYPE keeplin_line_tombstones gauge\n\
+             keeplin_line_tombstones {tombstones}\n\
+             # HELP keeplin_collab_sessions Live collaborative note sessions on this instance.\n\
+             # TYPE keeplin_collab_sessions gauge\n\
+             keeplin_collab_sessions {collab_sessions}\n\
+             # HELP keeplin_collab_connections Live collaborative connections on this instance.\n\
+             # TYPE keeplin_collab_connections gauge\n\
+             keeplin_collab_connections {collab_connections}\n\
+             # HELP keeplin_relay_live_users Users with a live relay connection on this instance.\n\
+             # TYPE keeplin_relay_live_users gauge\n\
+             keeplin_relay_live_users {relay_users}\n"
+        );
+        return Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response());
+    }
+
+    Ok(Json(serde_json::json!({
+        "users": users,
+        "notes": notes,
+        "lines": lines,
+        "line_tombstones": tombstones,
+        "collab_sessions": collab_sessions,
+        "collab_connections": collab_connections,
+        "relay_live_users": relay_users,
+    }))
+    .into_response())
+}
 ```
 
 **What it does** — `GET /api/metrics` (authenticated — issue #22): aggregate
@@ -355,6 +621,15 @@ anonymously.
 **Identification** — function; marker `// md:fn normalize_email`.
 `fn normalize_email(email: &str) -> String`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn normalize_email
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+```
+
 **What it does** — Canonicalises an email for storage and lookup: trim + lowercase,
 so `John@X.com`, `john@x.com` and `  john@x.com ` are one account and login is
 case-insensitive (issue #43).
@@ -371,6 +646,25 @@ case-insensitive (issue #43).
 
 **Identification** — function; marker `// md:fn is_valid_email`.
 `fn is_valid_email(email: &str) -> bool`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn is_valid_email
+fn is_valid_email(email: &str) -> bool {
+    let mut parts = email.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) => {
+            !local.is_empty()
+                && domain.len() >= 3
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        _ => false,
+    }
+}
+```
 
 **What it does** — Minimal structural check — exactly one `@`, a non-empty local
 part, a dotted domain (≥ 3 chars, not starting/ending with `.`). Deliberately not
@@ -392,6 +686,18 @@ column actually holds addresses.
 the part of the email before the `@`. **Dependencies** serde; **Used by** `register`;
 **Repeated context** none.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:RegisterBody
+#[derive(Debug, Deserialize)]
+struct RegisterBody {
+    email: String,
+    password: String,
+    display_name: Option<String>,
+}
+```
+
 ---
 
 ## RegisterResponse
@@ -401,15 +707,56 @@ the part of the email before the `@`. **Dependencies** serde; **Used by** `regis
 registering does not log in). **Dependencies** `User` (`store.rs`); **Used by**
 `register`; **Repeated context** none.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:RegisterResponse
+#[derive(Debug, serde::Serialize)]
+struct RegisterResponse {
+    user: User,
+}
+```
+
 ---
 
 ## fn register
 
 **Identification** — handler; marker `// md:fn register`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn register(State(state), Json(body): Json<RegisterBody>)
-    -> Result<Json<RegisterResponse>, AppError>
+// md:fn register
+async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RegisterBody>,
+) -> Result<Json<RegisterResponse>, AppError> {
+    if !state.config.registration_enabled {
+        return Err(AppError::Forbidden);
+    }
+    if body.password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let email = normalize_email(&body.email);
+    if !is_valid_email(&email) {
+        return Err(AppError::BadRequest("invalid email".into()));
+    }
+    let display_name = body
+        .display_name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| email.split('@').next().unwrap_or_default().to_string());
+    let hash = auth::hash_password(&body.password)?;
+    let user = state
+        .store
+        .create_user(&email, &hash, &display_name)
+        .await?;
+    if state.mailer.enabled() {
+        if let Err(e) = send_flow_mail(&state, &user, crate::mail::MailKind::VerifyEmail).await {
+            tracing::error!(error = %e, "verification mail on register failed");
+        }
+    }
+    Ok(Json(RegisterResponse { user }))
+}
 ```
 
 **What it does** — `POST /api/register`. Gate: `REGISTRATION_ENABLED=false` → `403`
@@ -438,6 +785,18 @@ the surface that stays oracle-free.
 `struct LoginBody { email, password, device_name }`. **Dependencies** serde;
 **Used by** `login`; **Repeated context** none.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:LoginBody
+#[derive(Debug, Deserialize)]
+struct LoginBody {
+    email: String,
+    password: String,
+    device_name: String,
+}
+```
+
 ---
 
 ## LoginResponse
@@ -449,15 +808,92 @@ device — the relay uses the device identity inside the token to know what each
 has already received. **Dependencies** uuid/serde; **Used by** `login`;
 **Repeated context** device-as-actor (see `auth.md` context).
 
+**Code** — complete and verbatim:
+
+```rust
+// md:LoginResponse
+#[derive(Debug, serde::Serialize)]
+struct LoginResponse {
+    token: String,
+    device_id: Uuid,
+}
+```
+
 ---
 
 ## fn login
 
 **Identification** — handler; marker `// md:fn login`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn login(State(state), Json(body): Json<LoginBody>)
-    -> Result<Json<LoginResponse>, AppError>
+// md:fn login
+async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LoginBody>,
+) -> Result<Json<LoginResponse>, AppError> {
+    let email = normalize_email(&body.email);
+
+    let lockout_enabled = state.config.login_max_failures > 0;
+    if lockout_enabled && state.store.login_locked(&email).await? {
+        return Err(AppError::TooManyAttempts);
+    }
+    let record_failure = || async {
+        if lockout_enabled {
+            state
+                .store
+                .record_login_failure(
+                    &email,
+                    state.config.login_max_failures,
+                    state.config.login_lockout_secs,
+                )
+                .await?;
+        }
+        Ok::<(), AppError>(())
+    };
+
+    let user = match state.store.get_user_by_email(&email).await? {
+        Some(user) => user,
+        None => {
+            let _ = auth::verify_password(&body.password, auth::dummy_password_hash());
+            record_failure().await?;
+            return Err(AppError::InvalidToken);
+        }
+    };
+
+    if !auth::verify_password(&body.password, &user.password_hash)? {
+        record_failure().await?;
+        return Err(AppError::InvalidToken);
+    }
+
+    if state.config.email_verification_required && user.email_verified_at.is_none() {
+        return Err(AppError::BadRequest("email not verified".into()));
+    }
+
+    if lockout_enabled {
+        state.store.clear_login_failures(&email).await?;
+    }
+
+    let device = state
+        .store
+        .create_device(user.id, &body.device_name)
+        .await?;
+
+    let token = auth::create_token(
+        user.id,
+        device.id,
+        &user.email,
+        &state.config.jwt_secret,
+        state.config.token_ttl_days,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok(Json(LoginResponse {
+        token,
+        device_id: device.id,
+    }))
+}
 ```
 
 **What it does** — `POST /api/login`, in order:
@@ -500,6 +936,16 @@ surface.
 `struct CreateDeviceBody { device_name }`. **Used by** `create_device`; otherwise
 trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:CreateDeviceBody
+#[derive(Debug, Deserialize)]
+struct CreateDeviceBody {
+    device_name: String,
+}
+```
+
 ---
 
 ## CreateDeviceResponse
@@ -508,11 +954,52 @@ trivial.
 `struct CreateDeviceResponse { token, device_id, device_name }`. **Used by**
 `create_device`; otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:CreateDeviceResponse
+#[derive(Debug, serde::Serialize)]
+struct CreateDeviceResponse {
+    token: String,
+    device_id: Uuid,
+    device_name: String,
+}
+```
+
 ---
 
 ## fn create_device
 
 **Identification** — handler; marker `// md:fn create_device`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn create_device
+async fn create_device(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<CreateDeviceBody>,
+) -> Result<Json<CreateDeviceResponse>, AppError> {
+    let device = state
+        .store
+        .create_device(user.user_id, &body.device_name)
+        .await?;
+    let token = auth::create_token(
+        user.user_id,
+        device.id,
+        &user.email,
+        &state.config.jwt_secret,
+        state.config.token_ttl_days,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(CreateDeviceResponse {
+        token,
+        device_id: device.id,
+        device_name: device.device_name,
+    }))
+}
+```
 
 **What it does** — `POST /api/devices` (authenticated): register an additional
 device for the caller and return its own token — equivalent to a fresh login without
@@ -530,6 +1017,22 @@ and two relay cursors.
 
 **Identification** — handler; marker `// md:fn delete_device`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_device
+async fn delete_device(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.store.delete_device(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
+
 **What it does** — `DELETE /api/devices/:id`: revoke one of the **caller's** devices
 (`404` if it isn't theirs). Its token stops working immediately on REST and on both
 WebSocket channels — the revocation checks re-read the device row per
@@ -546,6 +1049,19 @@ interaction: a deleted device also stops blocking journal pruning (issue #23).
 
 **Identification** — handler; marker `// md:fn list_devices`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_devices
+async fn list_devices(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<Vec<UserDevice>>, AppError> {
+    let devices = state.store.list_devices_by_user(user.user_id).await?;
+    Ok(Json(devices))
+}
+```
+
 **What it does** — `GET /api/devices`: the caller's device rows (ids, names,
 `created_at`/`last_seen_at`).
 
@@ -558,6 +1074,19 @@ interaction: a deleted device also stops blocking journal pruning (issue #23).
 ## fn delete_all_devices
 
 **Identification** — handler; marker `// md:fn delete_all_devices`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_all_devices
+async fn delete_all_devices(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.store.delete_all_devices(user.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "revoked": removed })))
+}
+```
 
 **What it does** — `DELETE /api/devices`: revoke **all** the caller's devices —
 "sign out everywhere" (issue #31). Every token, including the caller's current one,
@@ -576,11 +1105,48 @@ also called internally by `reset_confirm`.
 `struct ChangePasswordBody { current_password, new_password }`. **Used by**
 `change_password`; otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ChangePasswordBody
+#[derive(Debug, Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+```
+
 ---
 
 ## fn change_password
 
 **Identification** — handler; marker `// md:fn change_password`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn change_password
+async fn change_password(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if body.new_password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.current_password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    let hash = auth::hash_password(&body.new_password)?;
+    state.store.update_password(user.user_id, &hash).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `POST /api/account/password` (issue #31): min 8-char new
 password; re-verifies the **current** password (a stolen token alone cannot rotate
@@ -601,11 +1167,43 @@ are JWTs) — call `DELETE /api/devices` afterwards to also sign out everywhere.
 `struct DeleteAccountBody { password }`. **Used by** `delete_account`; otherwise
 trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:DeleteAccountBody
+#[derive(Debug, Deserialize)]
+struct DeleteAccountBody {
+    password: String,
+}
+```
+
 ---
 
 ## fn delete_account
 
 **Identification** — handler; marker `// md:fn delete_account`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_account
+async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<DeleteAccountBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    state.store.delete_user(user.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `DELETE /api/account` (issue #31): re-verifies the password, then
 deletes the user row; every owned entity (devices, notes, notebooks, tags,
@@ -624,8 +1222,25 @@ action, not a replicated edit.
 
 **Identification** — helper; marker `// md:fn send_flow_mail`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn send_flow_mail(state, user: &User, kind: MailKind) -> Result<(), AppError>
+// md:fn send_flow_mail
+async fn send_flow_mail(
+    state: &AppState,
+    user: &User,
+    kind: crate::mail::MailKind,
+) -> Result<(), AppError> {
+    let (token, expires_at) = state
+        .store
+        .create_email_token(user.id, kind, state.config.email_token_ttl_secs)
+        .await?;
+    state
+        .mailer
+        .send(kind, &user.email, &user.display_name, &token, expires_at)
+        .await
+        .map_err(AppError::Internal)
+}
 ```
 
 **What it does** — Mints a single-use flow token for `user` (the store keeps only
@@ -645,6 +1260,34 @@ hash, the user proves receipt by presenting the raw token back; kind-scoped
 
 **Identification** — handler; marker `// md:fn verify_request`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn verify_request
+async fn verify_request(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.mailer.enabled() {
+        return Err(AppError::NotImplemented(
+            "mail webhook not configured".into(),
+        ));
+    }
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if stored.email_verified_at.is_some() {
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "already_verified": true }),
+        ));
+    }
+    send_flow_mail(&state, &stored, crate::mail::MailKind::VerifyEmail).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
+
 **What it does** — `POST /api/account/verify/request` (authenticated): (re)send the
 caller's verification email. `501 NotImplemented` when no mail webhook is
 configured (explicit deferral); short-circuits with `already_verified: true` when
@@ -662,11 +1305,39 @@ the address is already stamped.
 **Identification** — DTO struct; marker `// md:TokenBody`.
 `struct TokenBody { token }`. **Used by** `verify_confirm`; otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:TokenBody
+#[derive(Debug, Deserialize)]
+struct TokenBody {
+    token: String,
+}
+```
+
 ---
 
 ## fn verify_confirm
 
 **Identification** — handler; marker `// md:fn verify_confirm`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn verify_confirm
+async fn verify_confirm(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TokenBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user_id = state
+        .store
+        .consume_email_token(crate::mail::MailKind::VerifyEmail, &body.token)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+    state.store.mark_email_verified(user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `POST /api/account/verify/confirm` — **unauthenticated**: the
 token *is* the proof. Consumes the (kind-scoped, single-use, hashed) token and
@@ -684,11 +1355,44 @@ stamps `email_verified_at`; unknown/expired/used → `400`.
 **Identification** — DTO struct; marker `// md:ResetRequestBody`.
 `struct ResetRequestBody { email }`. **Used by** `reset_request`; otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ResetRequestBody
+#[derive(Debug, Deserialize)]
+struct ResetRequestBody {
+    email: String,
+}
+```
+
 ---
 
 ## fn reset_request
 
 **Identification** — handler; marker `// md:fn reset_request`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn reset_request
+async fn reset_request(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResetRequestBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.mailer.enabled() {
+        return Err(AppError::NotImplemented(
+            "mail webhook not configured".into(),
+        ));
+    }
+    let email = normalize_email(&body.email);
+    if let Some(user) = state.store.get_user_by_email(&email).await? {
+        if let Err(e) = send_flow_mail(&state, &user, crate::mail::MailKind::PasswordReset).await {
+            tracing::error!(error = %e, "password reset mail failed");
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `POST /api/account/reset/request` — unauthenticated by nature.
 `501` when the webhook is unconfigured. Otherwise answers a **uniform `200`**
@@ -708,11 +1412,48 @@ delivery failure is only logged, for the same reason.
 `struct ResetConfirmBody { token, new_password }`. **Used by** `reset_confirm`;
 otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ResetConfirmBody
+#[derive(Debug, Deserialize)]
+struct ResetConfirmBody {
+    token: String,
+    new_password: String,
+}
+```
+
 ---
 
 ## fn reset_confirm
 
 **Identification** — handler; marker `// md:fn reset_confirm`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn reset_confirm
+async fn reset_confirm(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResetConfirmBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if body.new_password.len() < 8 {
+        return Err(AppError::BadRequest("password too short".into()));
+    }
+    let user_id = state
+        .store
+        .consume_email_token(crate::mail::MailKind::PasswordReset, &body.token)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+    let hash = auth::hash_password(&body.new_password)?;
+    state.store.update_password(user_id, &hash).await?;
+    state.store.delete_all_devices(user_id).await?;
+    if let Some(user) = state.store.get_user_by_id(user_id).await? {
+        state.store.clear_login_failures(&user.email).await?;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `POST /api/account/reset/confirm`: min 8-char password; consume
 the reset token (`400` if invalid/expired/used); set the new hash; **revoke every
@@ -730,6 +1471,26 @@ update_password, delete_all_devices, get_user_by_id, clear_login_failures}`.
 ## fn list_notebooks
 
 **Identification** — handler; marker `// md:fn list_notebooks`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_notebooks
+async fn list_notebooks(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state
+        .store
+        .list_notebooks(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(items, limit, |nb| {
+        PageCursor::new(nb.created_at, nb.id)
+    }))
+}
+```
 
 **What it does** — `GET /api/notebooks`: the caller's **live** notebooks (the read
 side of relay materialisation, for cold rehydration — writes arrive over
@@ -749,6 +1510,23 @@ is a cache that rehydrates from these endpoints; soft-deleted rows are excluded
 
 **Identification** — handler; marker `// md:fn list_tags`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_tags
+async fn list_tags(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state.store.list_tags(user.user_id, limit, cursor).await?;
+    Ok(paginated(items, limit, |t| {
+        PageCursor::new(t.created_at, t.id)
+    }))
+}
+```
+
 **What it does** — `GET /api/tags`: the caller's live tags, paginated. Same pattern
 and context as `list_notebooks`.
 
@@ -761,6 +1539,26 @@ and context as `list_notebooks`.
 ## fn list_resources
 
 **Identification** — handler; marker `// md:fn list_resources`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_resources
+async fn list_resources(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let items = state
+        .store
+        .list_resources(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(items, limit, |r| {
+        PageCursor::new(r.created_at, r.id)
+    }))
+}
+```
 
 **What it does** — `GET /api/resources`: the caller's live resource **metadata**,
 paginated; binaries are fetched separately via `GET /api/resources/:id/data`.
@@ -776,6 +1574,21 @@ storage model (metadata tombstones persist; bytes are purgeable).
 
 **Identification** — handler; marker `// md:fn list_note_tags`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_note_tags
+async fn list_note_tags(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(note_id): Path<Uuid>,
+) -> Result<Json<Vec<Uuid>>, AppError> {
+    Ok(Json(
+        state.store.list_note_tag_ids(user.user_id, note_id).await?,
+    ))
+}
+```
+
 **What it does** — `GET /api/notes/:id/tags`: the live tag ids attached to a note
 (the materialised `note_tags` associations), scoped to the caller's user id.
 
@@ -788,6 +1601,27 @@ storage model (metadata tombstones persist; bytes are purgeable).
 ## fn get_resource_data
 
 **Identification** — handler; marker `// md:fn get_resource_data`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn get_resource_data
+async fn get_resource_data(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    if !state.store.resource_owned_by(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    let data = state
+        .store
+        .get_resource_blob(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], data))
+}
+```
 
 **What it does** — `GET /api/resources/:id/data`: ownership check
 (`resource_owned_by`, `404` otherwise — not `403`, so existence is not disclosed),
@@ -805,6 +1639,36 @@ check rather than capability resolution.
 ## fn put_resource_data
 
 **Identification** — handler; marker `// md:fn put_resource_data`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn put_resource_data
+async fn put_resource_data(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.store.resource_owned_by(id, user.user_id).await? {
+        return Err(AppError::NotFound);
+    }
+    let limit = state.config.max_user_storage_bytes;
+    if limit > 0 {
+        let others = state
+            .store
+            .user_blob_bytes_excluding(user.user_id, id)
+            .await?;
+        if others + body.len() as i64 > limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "storage limit reached ({limit} bytes)"
+            )));
+        }
+    }
+    state.store.put_resource_blob(id, &body).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
+}
+```
 
 **What it does** — `PUT /api/resources/:id/data`: upload (or replace) a resource's
 binary **out-of-band** — the metadata must already exist for this user (it arrives
@@ -826,8 +1690,39 @@ deleting resources actually frees quota.
 
 **Identification** — helper; marker `// md:fn materialize_body`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, AppError>
+// md:fn materialize_body
+async fn materialize_body(state: &AppState, note_id: Uuid) -> Result<String, AppError> {
+    let order = state
+        .store
+        .get_note_order(note_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let lines = state.store.list_lines(note_id).await?;
+    let by_id: std::collections::HashMap<Uuid, _> = lines.into_iter().map(|l| (l.id, l)).collect();
+    let live: Vec<&str> = order
+        .order
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .filter(|line| line.deleted_at.is_none())
+        .map(|line| line.content.as_str())
+        .collect();
+
+    let cap = state.config.max_note_body_bytes;
+    if cap > 0 {
+        let separators = live.len().saturating_sub(1);
+        let total = live.iter().map(|s| s.len()).sum::<usize>() + separators;
+        if total > cap {
+            return Err(AppError::PayloadTooLarge(format!(
+                "note body is {total} bytes, exceeds the {cap}-byte limit"
+            )));
+        }
+    }
+
+    Ok(live.join("\n"))
+}
 ```
 
 **What it does** — Materialises a note's body for non-collaborative reads (design
@@ -854,6 +1749,18 @@ the store's cipher choke point before reaching here.
 plus the materialised body, flattened into one JSON object. **Used by** `get_note`;
 otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:NoteResponse
+#[derive(Debug, serde::Serialize)]
+struct NoteResponse {
+    #[serde(flatten)]
+    note: Note,
+    body: String,
+}
+```
+
 ---
 
 ## CreateNoteBody
@@ -864,6 +1771,18 @@ otherwise trivial.
 note id on the server (`409` if taken). **Used by** `create_note`; otherwise
 trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:CreateNoteBody
+#[derive(Debug, Deserialize)]
+struct CreateNoteBody {
+    id: Option<Uuid>,
+    #[serde(default = "default_title")]
+    title: String,
+}
+```
+
 ---
 
 ## fn default_title
@@ -872,11 +1791,46 @@ trivial.
 `fn default_title() -> String` — `"Untitled note"`. **Used by** `CreateNoteBody`;
 otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn default_title
+fn default_title() -> String {
+    "Untitled note".into()
+}
+```
+
 ---
 
 ## fn create_note
 
 **Identification** — handler; marker `// md:fn create_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn create_note
+async fn create_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<CreateNoteBody>,
+) -> Result<Json<Note>, AppError> {
+    let limit = state.config.max_notes_per_user;
+    if limit > 0 {
+        let count = state.store.count_live_notes_for_user(user.user_id).await?;
+        if count >= limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "note limit reached ({limit})"
+            )));
+        }
+    }
+    let note = state
+        .store
+        .create_note(body.id, &body.title, user.user_id)
+        .await?;
+    Ok(Json(note))
+}
+```
 
 **What it does** — `POST /api/notes`: quota check first
 (`MAX_NOTES_PER_USER > 0` → count live notes, `507` at the limit), then create the
@@ -895,6 +1849,26 @@ insert.
 
 **Identification** — handler; marker `// md:fn list_notes`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_notes
+async fn list_notes(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Query(q): Query<ListQuery>,
+) -> Result<Response, AppError> {
+    let (limit, cursor) = q.resolve()?;
+    let notes = state
+        .store
+        .list_notes_for_user(user.user_id, limit, cursor)
+        .await?;
+    Ok(paginated(notes, limit, |n| {
+        PageCursor::new(n.updated_at, n.id)
+    }))
+}
+```
+
 **What it does** — `GET /api/notes`: the caller's owned **and shared** notes
 (including the folder-owner rule: notes filed in a notebook the caller owns),
 paginated with keyset on `(updated_at, id)`.
@@ -910,6 +1884,25 @@ list shows exactly the notes a `get_note` would allow.
 ## fn get_note
 
 **Identification** — handler; marker `// md:fn get_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn get_note
+async fn get_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<NoteResponse>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::Forbidden);
+    }
+    let body = materialize_body(&state, id).await?;
+    Ok(Json(NoteResponse { note, body }))
+}
+```
 
 **What it does** — `GET /api/notes/:id`: load (`404`), resolve access, require
 `can_read` (`403`), and return metadata **plus the materialised body** (subject to
@@ -927,8 +1920,17 @@ the `413` cap in `materialize_body`).
 
 **Identification** — serde helper; marker `// md:fn present`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn present
 fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(de).map(Some)
+}
 ```
 
 **What it does** — Deserialises a **present** field (even an explicit `null`) as
@@ -947,13 +1949,20 @@ fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 
 **Identification** — DTO struct; marker `// md:UpdateNoteBody`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:UpdateNoteBody
+#[derive(Debug, Deserialize)]
 struct UpdateNoteBody {
     title: Option<String>,
-    notebook_id: Option<Option<Uuid>>,      // present() — tri-state
+    #[serde(default, deserialize_with = "present")]
+    notebook_id: Option<Option<Uuid>>,
     is_todo: Option<bool>,
-    todo_due: Option<Option<DateTime<Utc>>>,       // present()
-    todo_completed: Option<Option<DateTime<Utc>>>, // present()
+    #[serde(default, deserialize_with = "present")]
+    todo_due: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(default, deserialize_with = "present")]
+    todo_completed: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 ```
 
@@ -965,6 +1974,54 @@ tri-state pattern above.
 ## fn update_note
 
 **Identification** — handler; marker `// md:fn update_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn update_note
+async fn update_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateNoteBody>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_write() {
+        return Err(AppError::Forbidden);
+    }
+    let notebook_id = match body.notebook_id {
+        Some(Some(nb)) if nb.is_nil() => Some(None),
+        other => other,
+    };
+    let patch = crate::store::NotePatch {
+        title: body.title,
+        notebook_id,
+        is_todo: body.is_todo,
+        todo_due: body.todo_due,
+        todo_completed: body.todo_completed,
+    };
+    let moved_into = match &patch.notebook_id {
+        Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
+        _ => None,
+    };
+    if let Some(nb) = moved_into {
+        let nb_access = resolve_notebook_access(&state.store, nb, user.user_id).await?;
+        if !nb_access.can_write() {
+            return Err(AppError::Forbidden);
+        }
+    }
+    let note = state
+        .store
+        .update_note_meta(id, &patch)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if let Some(nb) = moved_into {
+        state.store.apply_notebook_shares_to_note(id, nb).await?;
+    }
+    Ok(Json(note))
+}
+```
 
 **What it does** — `PATCH /api/notes/:id`: load (`404`); resolve access; require
 `can_write` (`403`). **Inbox mapping**: keeplin-core models the inbox as the nil
@@ -998,6 +2055,29 @@ notebook-less location (server representation: `notebook_id IS NULL`).
 
 **Identification** — handler; marker `// md:fn delete_note`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_note
+async fn delete_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_delete() {
+        return Err(AppError::Forbidden);
+    }
+    let note = state
+        .store
+        .soft_delete_note(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(note))
+}
+```
+
 **What it does** — `DELETE /api/notes/:id`: owner-only (design §9.3 —
 `access.can_delete()`, i.e. `is_owner`; capability grants never confer deletion).
 **Soft-delete**: sets `deleted_at`; the row and its lines remain as tombstones.
@@ -1019,11 +2099,73 @@ capabilities: i32 }` — target by id or email; the capability bitmask to grant
 `create_share`, `create_notebook_share`; **Repeated context** the capability model
 (`permissions.md` context).
 
+**Code** — complete and verbatim:
+
+```rust
+// md:CreateShareBody
+#[derive(Debug, Deserialize)]
+struct CreateShareBody {
+    user_id: Option<Uuid>,
+    user_email: Option<String>,
+    capabilities: i32,
+}
+```
+
 ---
 
 ## fn create_share
 
 **Identification** — handler; marker `// md:fn create_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn create_share
+async fn create_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateShareBody>,
+) -> Result<Json<NoteShare>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_share_write() {
+        return Err(AppError::Forbidden);
+    }
+    let requested = Capabilities::from_bits(body.capabilities);
+    if requested.bits() == 0 {
+        return Err(AppError::BadRequest(
+            "capabilities must be non-empty".into(),
+        ));
+    }
+    if requested.bits() & access.caps.bits() != requested.bits() {
+        return Err(AppError::Forbidden);
+    }
+    let target = match (body.user_id, &body.user_email) {
+        (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)?;
+    if target.id == note.owner_id {
+        return Err(AppError::BadRequest("owner already has access".into()));
+    }
+    let share = state
+        .store
+        .create_or_update_share(id, target.id, requested.bits())
+        .await?;
+    Ok(Json(share))
+}
+```
 
 **What it does** — `POST /api/notes/:id/share`: load note (`404`); require
 `can_share_write` (`403`). Normalise the requested bits
@@ -1048,6 +2190,24 @@ capped to the granter — the two rules that make the capability lattice sound.
 
 **Identification** — handler; marker `// md:fn list_shares`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_shares
+async fn list_shares(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NoteShare>>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.caps.can_share_read() {
+        return Err(AppError::Forbidden);
+    }
+    Ok(Json(state.store.list_shares(id).await?))
+}
+```
+
 **What it does** — `GET /api/notes/:id/share`: requires `can_share_read`; returns
 the note's share rows.
 
@@ -1061,6 +2221,29 @@ routed in `router`.
 ## fn delete_share
 
 **Identification** — handler; marker `// md:fn delete_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_share
+async fn delete_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path((note_id, target_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let note = state
+        .store
+        .get_note(note_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_share_write() && target_id != user.user_id {
+        return Err(AppError::Forbidden);
+    }
+    state.store.delete_share(note_id, target_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `DELETE /api/notes/:id/share/:user_id`: a `share_write` grantee
 can revoke anyone; anyone can remove **themselves** (leaving a share); otherwise
@@ -1081,11 +2264,62 @@ collaborative channel at the next op batch (per-op re-resolution, issue #30).
 new owner, by id or email. **Used by** `transfer_ownership`, `transfer_notebook`;
 otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:TransferBody
+#[derive(Debug, Deserialize)]
+struct TransferBody {
+    user_id: Option<Uuid>,
+    user_email: Option<String>,
+}
+```
+
 ---
 
 ## fn transfer_ownership
 
 **Identification** — handler; marker `// md:fn transfer_ownership`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transfer_ownership
+async fn transfer_ownership(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferBody>,
+) -> Result<Json<Note>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_transfer_ownership() {
+        return Err(AppError::Forbidden);
+    }
+    let target = match (body.user_id, &body.user_email) {
+        (Some(user_id), _) => state.store.get_user_by_id(user_id).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)?;
+    state.store.delete_share(id, target.id).await?;
+    let note = state
+        .store
+        .set_note_owner(id, target.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(note))
+}
+```
 
 **What it does** — `POST /api/notes/:id/transfer` — owner-only
 (`can_transfer_ownership`). Resolve the target; drop any share row for the new
@@ -1108,9 +2342,31 @@ delete/transfer; a `manage` grant does not.
 
 **Identification** — helper; marker `// md:fn resolve_target`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn resolve_target(state, user_id: Option<Uuid>, user_email: &Option<String>)
-    -> Result<User, AppError>
+// md:fn resolve_target
+async fn resolve_target(
+    state: &AppState,
+    user_id: Option<Uuid>,
+    user_email: &Option<String>,
+) -> Result<User, AppError> {
+    match (user_id, user_email) {
+        (Some(uid), _) => state.store.get_user_by_id(uid).await?,
+        (None, Some(email)) => {
+            state
+                .store
+                .get_user_by_email(&normalize_email(email))
+                .await?
+        }
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "user_id or user_email required".into(),
+            ))
+        }
+    }
+    .ok_or(AppError::NotFound)
+}
 ```
 
 **What it does** — Resolves a share/transfer target from `{user_id | user_email}`
@@ -1128,6 +2384,46 @@ get_user_by_email}`. **Used by** — `create_notebook_share`, `transfer_notebook
 ## fn create_notebook_share
 
 **Identification** — handler; marker `// md:fn create_notebook_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn create_notebook_share
+async fn create_notebook_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateShareBody>,
+) -> Result<Json<NotebookShare>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.can_share_write() {
+        return Err(AppError::Forbidden);
+    }
+    let requested = Capabilities::from_bits(body.capabilities);
+    if requested.bits() == 0 {
+        return Err(AppError::BadRequest(
+            "capabilities must be non-empty".into(),
+        ));
+    }
+    if requested.bits() & access.caps.bits() != requested.bits() {
+        return Err(AppError::Forbidden);
+    }
+    let target = resolve_target(&state, body.user_id, &body.user_email).await?;
+    let owner = state
+        .store
+        .notebook_owner(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if target.id == owner {
+        return Err(AppError::BadRequest("owner already has access".into()));
+    }
+    let share = state
+        .store
+        .create_or_update_notebook_share(id, target.id, requested.bits())
+        .await?;
+    Ok(Json(share))
+}
+```
 
 **What it does** — `POST /api/notebooks/:id/share` (Front B stage 1b): require
 `can_share_write` on the notebook; normalise + non-empty + capped-to-granter
@@ -1151,6 +2447,23 @@ write (store-side), so notes never hold a stale grant profile.
 
 **Identification** — handler; marker `// md:fn list_notebook_shares`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn list_notebook_shares
+async fn list_notebook_shares(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NotebookShare>>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.caps.can_share_read() {
+        return Err(AppError::Forbidden);
+    }
+    Ok(Json(state.store.list_notebook_shares(id).await?))
+}
+```
+
 **What it does** — `GET /api/notebooks/:id/share`: requires `can_share_read`;
 returns the notebook's share rows.
 
@@ -1162,6 +2475,27 @@ returns the notebook's share rows.
 ## fn delete_notebook_share
 
 **Identification** — handler; marker `// md:fn delete_notebook_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn delete_notebook_share
+async fn delete_notebook_share(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path((notebook_id, target_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let access = resolve_notebook_access(&state.store, notebook_id, user.user_id).await?;
+    if !access.can_share_write() && target_id != user.user_id {
+        return Err(AppError::Forbidden);
+    }
+    state
+        .store
+        .delete_notebook_share(notebook_id, target_id)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+```
 
 **What it does** — `DELETE /api/notebooks/:id/share/:user_id`: `share_write` or
 self-removal; the revocation **re-cascades** to the notebook's notes inside the
@@ -1176,6 +2510,33 @@ share). **Repeated context** — as `create_notebook_share`.
 ## fn transfer_notebook
 
 **Identification** — handler; marker `// md:fn transfer_notebook`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transfer_notebook
+async fn transfer_notebook(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+    if !access.can_transfer_ownership() {
+        return Err(AppError::Forbidden);
+    }
+    let target = resolve_target(&state, body.user_id, &body.user_email).await?;
+    state
+        .store
+        .set_notebook_owner(id, target.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    state.store.delete_notebook_share(id, target.id).await?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "owner_id": target.id }),
+    ))
+}
+```
 
 **What it does** — `POST /api/notebooks/:id/transfer` — owner-only. Resolve the
 target; move `notebooks.user_id` (`404` if the notebook vanished); then drop any
@@ -1199,13 +2560,26 @@ transfer needs no share rewrite for the new owner's own access.
 `struct HistoryQuery { limit: Option<u32> }` — version-count cap. **Used by** the
 two history handlers; **Repeated context** defaults in *History limits*.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:HistoryQuery
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    limit: Option<u32>,
+}
+```
+
 ---
 
 ## History limits
 
 **Identification** — logical section: the two consts; marker `// md:History limits`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:History limits
 const HISTORY_DEFAULT_LIMIT: u32 = 100;
 const HISTORY_MAX_LIMIT: u32 = 10_000;
 ```
@@ -1222,11 +2596,37 @@ none.
 
 **Identification** — helper; marker `// md:fn history_versions`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn history_versions
 async fn history_versions(
-    state, kind: HistoryKind, id: Uuid, q: &HistoryQuery,
-    access_cutoff: Option<DateTime<Utc>>, user_scope: Option<Uuid>,
-) -> Result<Vec<EntityVersionRow>, AppError>
+    state: &AppState,
+    kind: crate::store::HistoryKind,
+    id: Uuid,
+    q: &HistoryQuery,
+    access_cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    user_scope: Option<Uuid>,
+) -> Result<Vec<crate::store::EntityVersionRow>, AppError> {
+    let limit = q
+        .limit
+        .filter(|l| *l > 0)
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .min(HISTORY_MAX_LIMIT);
+    let retention_cutoff = (state.config.retention_days > 0)
+        .then(|| chrono::Utc::now() - chrono::Duration::days(state.config.retention_days as i64));
+    state
+        .store
+        .entity_history(
+            kind,
+            id,
+            limit as i64,
+            retention_cutoff,
+            access_cutoff,
+            user_scope,
+        )
+        .await
+}
 ```
 
 **What it does** — Shared history read (Front D stage 2, issue #27): clamp the
@@ -1262,9 +2662,21 @@ honest-client security boundary documented in `SECURITY.md`.
 
 **Identification** — helper; marker `// md:fn access_cutoff`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn access_cutoff(state, access: &Access,
-                 share_created_at: Option<DateTime<Utc>>) -> Option<DateTime<Utc>>
+// md:fn access_cutoff
+fn access_cutoff(
+    state: &AppState,
+    access: &crate::permissions::Access,
+    share_created_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if state.config.history_since_access && !access.is_owner {
+        share_created_at
+    } else {
+        None
+    }
+}
 ```
 
 **What it does** — The visibility cutoff for a collaborator under
@@ -1285,6 +2697,51 @@ collaborator sees only versions from when they were granted access.
 ## fn note_history
 
 **Identification** — handler; marker `// md:fn note_history`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn note_history
+async fn note_history(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
+    match state.store.get_note(id).await? {
+        Some(note) => {
+            let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+            if !access.can_read() {
+                return Err(AppError::Forbidden);
+            }
+            let share = state.store.get_share(id, user.user_id).await?;
+            let cutoff = access_cutoff(&state, &access, share.map(|s| s.created_at));
+            Ok(Json(
+                history_versions(
+                    &state,
+                    crate::store::HistoryKind::Note,
+                    id,
+                    &q,
+                    cutoff,
+                    None,
+                )
+                .await?,
+            ))
+        }
+        None => Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Note,
+                id,
+                &q,
+                None,
+                Some(user.user_id),
+            )
+            .await?,
+        )),
+    }
+}
+```
 
 **What it does** — `GET /api/notes/:id/history?limit=` — past versions, newest
 first, `[{ timestamp, device_id, entity? }]` with `entity: null` = tombstone. Two
@@ -1308,6 +2765,50 @@ caller's own journal (`user_scope: Some(caller)`, no cutoff).
 
 **Identification** — handler; marker `// md:fn notebook_history`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn notebook_history
+async fn notebook_history(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
+    if state.store.notebook_owner(id).await?.is_some() {
+        let access = resolve_notebook_access(&state.store, id, user.user_id).await?;
+        if !access.can_read() {
+            return Err(AppError::Forbidden);
+        }
+        let share = state.store.get_notebook_share(id, user.user_id).await?;
+        let cutoff = access_cutoff(&state, &access, share.map(|s| s.created_at));
+        Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Notebook,
+                id,
+                &q,
+                cutoff,
+                None,
+            )
+            .await?,
+        ))
+    } else {
+        Ok(Json(
+            history_versions(
+                &state,
+                crate::store::HistoryKind::Notebook,
+                id,
+                &q,
+                None,
+                Some(user.user_id),
+            )
+            .await?,
+        ))
+    }
+}
+```
+
 **What it does** — `GET /api/notebooks/:id/history` — same two regimes keyed on
 whether the notebook is materialised (`notebook_owner` row exists): materialised →
 notebook access + `can_read` + collaborator cutoff from `notebook_shares`;
@@ -1328,6 +2829,17 @@ otherwise per-user journal read.
 `struct ImportBody { title, body }` — a flat note to import. **Used by**
 `import_note`; otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ImportBody
+#[derive(Debug, Deserialize)]
+struct ImportBody {
+    title: String,
+    body: String,
+}
+```
+
 ---
 
 ## ImportResponse
@@ -1336,11 +2848,65 @@ otherwise per-user journal read.
 `struct ImportResponse { note_id, line_count }`. **Used by** `import_note`;
 otherwise trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ImportResponse
+#[derive(Debug, serde::Serialize)]
+struct ImportResponse {
+    note_id: Uuid,
+    line_count: usize,
+}
+```
+
 ---
 
 ## fn import_note
 
 **Identification** — handler; marker `// md:fn import_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn import_note
+async fn import_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Json(body): Json<ImportBody>,
+) -> Result<Json<ImportResponse>, AppError> {
+    let note = state
+        .store
+        .create_note(None, &body.title, user.user_id)
+        .await?;
+    let writer = user.device_id.to_string();
+    let now = chrono::Utc::now();
+    let lines: Vec<&str> = body.body.split('\n').collect();
+
+    let mut order = Vec::with_capacity(lines.len());
+    let line_vv = keeplin_core::storage::note_log::VersionVector::from([(writer.clone(), 1u64)]);
+    for content in &lines {
+        let line_id = Uuid::new_v4();
+        state
+            .store
+            .insert_line(line_id, note.id, content, &line_vv, &writer, now)
+            .await?;
+        order.push(line_id);
+    }
+    let order_vv = keeplin_core::storage::note_log::VersionVector::from([(
+        writer.clone(),
+        lines.len() as u64,
+    )]);
+    state
+        .store
+        .set_note_order(note.id, &order, &order_vv, &writer, now)
+        .await?;
+
+    Ok(Json(ImportResponse {
+        note_id: note.id,
+        line_count: lines.len(),
+    }))
+}
+```
 
 **What it does** — `POST /api/import` (design §10): offline → server migration for
 one note. Creates the note, splits the flat body on `\n` into one versioned line
@@ -1366,11 +2932,46 @@ from the same device.
 `struct ExportResponse { id, title, body }`. **Used by** `export_note`; otherwise
 trivial.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:ExportResponse
+#[derive(Debug, serde::Serialize)]
+struct ExportResponse {
+    id: Uuid,
+    title: String,
+    body: String,
+}
+```
+
 ---
 
 ## fn export_note
 
 **Identification** — handler; marker `// md:fn export_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn export_note
+async fn export_note(
+    State(state): State<Arc<AppState>>,
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ExportResponse>, AppError> {
+    let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
+    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::Forbidden);
+    }
+    let body = materialize_body(&state, id).await?;
+    Ok(Json(ExportResponse {
+        id: note.id,
+        title: note.title,
+        body,
+    }))
+}
+```
 
 **What it does** — `GET /api/notes/:id/export` (design §10): server → offline
 migration — access-checked (`can_read`), the live lines joined with `\n`
@@ -1390,6 +2991,8 @@ migration — access-checked (`can_read`), the live lines joined with `\n`
 **Identification** — `#[cfg(test)]` module; marker `// md:mod tests`. One test,
 below.
 
+**Code** — container: members documented as sub-blocks below: fn protocol_compatibility_is_exact_match.
+
 **What it does** — Unit-level pin of the compatibility rule.
 
 **Dependencies** — `super::*`. **Used by** — `cargo test`. **Repeated context** —
@@ -1399,6 +3002,18 @@ none.
 
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn protocol_compatibility_is_exact_match`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn protocol_compatibility_is_exact_match
+    #[test]
+    fn protocol_compatibility_is_exact_match() {
+        assert!(compatible_with(PROTOCOL_VERSION));
+        assert!(!compatible_with(PROTOCOL_VERSION + 1));
+        assert!(!compatible_with(0));
+    }
+```
 
 **What it does** — `compatible_with(PROTOCOL_VERSION)` is true; `+1` and `0` are
 false — the exact-match rule mirrored in keeplin-core's `compat::compatible_with`.
