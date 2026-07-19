@@ -1,7 +1,7 @@
 # `lib.rs` — keeplin-srv library root
 
-Self-contained companion for `crates/keeplin-srv/src/lib.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/lib.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `lib.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — the file's single block: the crate's module declarations. Marker
 `// md:Overview` at the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 pub mod auth;
 pub mod bus;
 pub mod collab;
