@@ -4,6 +4,7 @@ use keeplin_core::storage::note_log::VersionVector;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// md:Type aliases
 // md:Type aliases > LineId
 pub type LineId = Uuid;
 

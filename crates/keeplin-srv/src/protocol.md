@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use chrono::{DateTime, Utc};
 use keeplin_core::storage::note_log::VersionVector;
 use serde::{Deserialize, Serialize};
@@ -92,13 +95,20 @@ fields with `#[serde(default)]`) does not require a bump.
 
 ## Type aliases
 
+**Identification** — a grouping of two `pub type` aliases (no enclosing block); marker `// md:Type aliases`.
+
+**Code** — container: members documented as sub-blocks below: LineId, UserId.
+
 Two aliases that name the id spaces used throughout the protocol.
 
 ### LineId
 
 **Identification** — type alias; marker `// md:Type aliases > LineId`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Type aliases > LineId
 pub type LineId = Uuid;
 ```
 
@@ -123,7 +133,10 @@ content, not identity.
 
 **Identification** — type alias; marker `// md:Type aliases > UserId`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Type aliases > UserId
 pub type UserId = String;
 ```
 
@@ -157,7 +170,10 @@ Presence stays user-based because the UI shows people, not devices.
 
 **Identification** — struct; marker `// md:Cursor`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Cursor
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     pub line_id: LineId,
@@ -195,7 +211,10 @@ no vv because concurrent cursor updates need no merging (last write is fine).
 
 **Identification** — struct; marker `// md:LineSnapshot`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:LineSnapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LineSnapshot {
     pub id: LineId,
@@ -237,7 +256,10 @@ Tombstones are garbage-collected server-side only after a retention window
 
 **Identification** — struct; marker `// md:NoteLinesSnapshot`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:NoteLinesSnapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteLinesSnapshot {
     pub note_id: Uuid,
@@ -281,18 +303,42 @@ edits, rather than by operational transformation.
 
 **Identification** — enum, serde-tagged `op`, PascalCase variants; marker `// md:LineOp`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:LineOp
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "PascalCase")]
 pub enum LineOp {
-    Insert { after_line_id: Option<LineId>, line_id: LineId, content: String,
-             vv: VersionVector, last_writer: UserId, updated_at: DateTime<Utc> },
-    Update { line_id: LineId, content: String,
-             vv: VersionVector, last_writer: UserId, updated_at: DateTime<Utc> },
-    Delete { line_id: LineId, deleted_at: DateTime<Utc>,
-             vv: VersionVector, last_writer: UserId, updated_at: DateTime<Utc> },
-    Move   { line_ids: Vec<LineId>, after_line_id: Option<LineId>,
-             vv: VersionVector, last_writer: UserId, updated_at: DateTime<Utc> },
+    Insert {
+        after_line_id: Option<LineId>,
+        line_id: LineId,
+        content: String,
+        vv: VersionVector,
+        last_writer: UserId,
+        updated_at: DateTime<Utc>,
+    },
+    Update {
+        line_id: LineId,
+        content: String,
+        vv: VersionVector,
+        last_writer: UserId,
+        updated_at: DateTime<Utc>,
+    },
+    Delete {
+        line_id: LineId,
+        deleted_at: DateTime<Utc>,
+        vv: VersionVector,
+        last_writer: UserId,
+        updated_at: DateTime<Utc>,
+    },
+    Move {
+        line_ids: Vec<LineId>,
+        after_line_id: Option<LineId>,
+        vv: VersionVector,
+        last_writer: UserId,
+        updated_at: DateTime<Utc>,
+    },
 }
 ```
 
@@ -347,6 +393,8 @@ the merged causal frontier) and the op fans out to the note's other subscribers.
 **Identification** — inherent impl block; marker `// md:impl LineOp`. Contains one
 method, `fn last_writer` (next section).
 
+**Code** — container: members documented as sub-blocks below: fn last_writer.
+
 **What it does** — The only logic in this module: field access across variants. Kept
 here (rather than in `collab.rs`) because it is shape knowledge — every variant carries
 `last_writer` — not engine policy.
@@ -361,8 +409,18 @@ here (rather than in `collab.rs`) because it is shape knowledge — every varian
 
 **Identification** — method; marker `// md:impl LineOp > fn last_writer`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn last_writer(&self) -> &str
+    // md:impl LineOp > fn last_writer
+    pub fn last_writer(&self) -> &str {
+        match self {
+            LineOp::Insert { last_writer, .. }
+            | LineOp::Update { last_writer, .. }
+            | LineOp::Delete { last_writer, .. }
+            | LineOp::Move { last_writer, .. } => last_writer,
+        }
+    }
 ```
 
 **What it does** — Returns the op's `last_writer` field regardless of variant, as `&str`.
@@ -384,7 +442,10 @@ see *Type aliases → UserId*).
 
 **Identification** — struct; marker `// md:PresenceInfo`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:PresenceInfo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceInfo {
     pub user_id: UserId,
@@ -421,15 +482,18 @@ sibling instances are nudged over the `collab_presence` LISTEN/NOTIFY channel
 **Identification** — enum, serde-tagged `type`, PascalCase variants; marker
 `// md:CollabClientMsg`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:CollabClientMsg
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
 pub enum CollabClientMsg {
-    Join   { note_id: Uuid },
-    Leave  { note_id: Uuid },
-    Op     { note_id: Uuid, ops: Vec<LineOp> },
+    Join { note_id: Uuid },
+    Leave { note_id: Uuid },
+    Op { note_id: Uuid, ops: Vec<LineOp> },
     Cursor { note_id: Uuid, cursor: Cursor },
-    Ack    { server_seq: u64 },
+    Ack { server_seq: u64 },
 }
 ```
 
@@ -473,14 +537,31 @@ the WebSocket upgrade, never from frame contents.
 **Identification** — enum, serde-tagged `type`, PascalCase variants; marker
 `// md:CollabServerMsg`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:CollabServerMsg
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
 pub enum CollabServerMsg {
-    Welcome  { note_id: Uuid, snapshot: NoteLinesSnapshot },
-    Op       { server_seq: u64, note_id: Uuid, user_id: UserId, ops: Vec<LineOp> },
-    Presence { note_id: Uuid, users: Vec<PresenceInfo> },
-    Error    { code: String, message: String },
+    Welcome {
+        note_id: Uuid,
+        snapshot: NoteLinesSnapshot,
+    },
+    Op {
+        server_seq: u64,
+        note_id: Uuid,
+        user_id: UserId,
+        ops: Vec<LineOp>,
+    },
+    Presence {
+        note_id: Uuid,
+        users: Vec<PresenceInfo>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 ```
 
@@ -555,20 +636,18 @@ navigation model, the Graphify graph (`graphify-out/graph.json`) is LAYER 1; ref
 
 ## Coverage checklist
 
-Every code block of `protocol.rs`, in source order, each documented above (five points)
-and carrying its marker in the code:
-
-| # | Block (source order) | Marker in code | Documented in section |
-|---|----------------------|----------------|-----------------------|
-| 1 | imports (`use …`) | `// md:Overview` | Overview |
-| 2 | `pub type LineId` | `// md:Type aliases > LineId` | Type aliases › LineId |
-| 3 | `pub type UserId` | `// md:Type aliases > UserId` | Type aliases › UserId |
-| 4 | `struct Cursor` | `// md:Cursor` | Cursor |
-| 5 | `struct LineSnapshot` | `// md:LineSnapshot` | LineSnapshot |
-| 6 | `struct NoteLinesSnapshot` | `// md:NoteLinesSnapshot` | NoteLinesSnapshot |
-| 7 | `enum LineOp` | `// md:LineOp` | LineOp |
-| 8 | `impl LineOp` | `// md:impl LineOp` | impl LineOp |
-| 9 | `fn last_writer` | `// md:impl LineOp > fn last_writer` | impl LineOp › fn last_writer |
-| 10 | `struct PresenceInfo` | `// md:PresenceInfo` | PresenceInfo |
-| 11 | `enum CollabClientMsg` | `// md:CollabClientMsg` | CollabClientMsg |
-| 12 | `enum CollabServerMsg` | `// md:CollabServerMsg` | CollabServerMsg |
+| # | Block (source order) | Marker in code |
+|---|----------------------|----------------|
+| 1 | `Overview` | `// md:Overview` |
+| 2 | `Type aliases` (container) | `// md:Type aliases` |
+| 3 | `LineId` | `// md:Type aliases > LineId` |
+| 4 | `UserId` | `// md:Type aliases > UserId` |
+| 5 | `Cursor` | `// md:Cursor` |
+| 6 | `LineSnapshot` | `// md:LineSnapshot` |
+| 7 | `NoteLinesSnapshot` | `// md:NoteLinesSnapshot` |
+| 8 | `LineOp` | `// md:LineOp` |
+| 9 | `impl LineOp` (container) | `// md:impl LineOp` |
+| 10 | `fn last_writer` | `// md:impl LineOp > fn last_writer` |
+| 11 | `PresenceInfo` | `// md:PresenceInfo` |
+| 12 | `CollabClientMsg` | `// md:CollabClientMsg` |
+| 13 | `CollabServerMsg` | `// md:CollabServerMsg` |
