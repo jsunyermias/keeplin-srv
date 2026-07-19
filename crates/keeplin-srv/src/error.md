@@ -1,7 +1,7 @@
 # `error.rs` — the API error type
 
-Self-contained companion for `crates/keeplin-srv/src/error.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/error.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `error.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -54,20 +57,46 @@ name tables/columns/constraints) is logged server-side and **never** sent to cli
 **Identification** — enum deriving `Debug` + `thiserror::Error`; marker
 `// md:AppError`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:AppError
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error("missing token")]
     MissingToken,
+
+    #[error("invalid token")]
     InvalidToken,
+
+    #[error("not found")]
     NotFound,
+
+    #[error("forbidden")]
     Forbidden,
+
+    #[error("conflict")]
     Conflict,
+
+    #[error("bad request: {0}")]
     BadRequest(String),
+
+    #[error("quota exceeded: {0}")]
     QuotaExceeded(String),
+
+    #[error("payload too large: {0}")]
     PayloadTooLarge(String),
+
+    #[error("too many attempts; try again later")]
     TooManyAttempts,
+
+    #[error("not implemented: {0}")]
     NotImplemented(String),
+
+    #[error("internal error: {0}")]
     Internal(String),
 }
 ```
@@ -111,6 +140,8 @@ the rate limiter is generated in `ratelimit.rs` directly, not through this enum.
 **Identification** — inherent impl block; marker `// md:impl AppError`. Contains
 `fn status` and `fn client_message` (next sections).
 
+**Code** — container: members documented as sub-blocks below: fn status, fn client_message.
+
 **What it does** — The two private mappings used when converting to a response: variant
 → HTTP status, and variant → client-visible message.
 
@@ -124,8 +155,27 @@ the rate limiter is generated in `ratelimit.rs` directly, not through this enum.
 
 **Identification** — private method; marker `// md:impl AppError > fn status`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn status(&self) -> axum::http::StatusCode
+    // md:impl AppError > fn status
+    fn status(&self) -> axum::http::StatusCode {
+        use axum::http::StatusCode;
+        match self {
+            AppError::Database(sqlx::Error::RowNotFound) => StatusCode::NOT_FOUND,
+            AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::MissingToken | AppError::InvalidToken => StatusCode::UNAUTHORIZED,
+            AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Conflict => StatusCode::CONFLICT,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
+            AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::TooManyAttempts => StatusCode::TOO_MANY_REQUESTS,
+            AppError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
 ```
 
 **What it does** — Total match from variant to status code, exactly as tabulated under
@@ -144,8 +194,16 @@ changing a variant's status is a breaking API change.
 
 **Identification** — private method; marker `// md:impl AppError > fn client_message`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn client_message(&self) -> String
+    // md:impl AppError > fn client_message
+    fn client_message(&self) -> String {
+        match self {
+            AppError::Database(_) | AppError::Internal(_) => "internal error".to_string(),
+            other => other.to_string(),
+        }
+    }
 ```
 
 **What it does** — The message placed in the JSON body. `Database(_)` and `Internal(_)`
@@ -169,6 +227,8 @@ enforced for response bodies.
 **Identification** — trait impl; marker `// md:impl IntoResponse for AppError`.
 Contains `fn into_response` (next section).
 
+**Code** — container: members documented as sub-blocks below: fn into_response.
+
 **What it does** — The bridge into axum: because `AppError: IntoResponse`, every
 handler can return `Result<T, AppError>` and use `?`, and axum renders the error.
 
@@ -184,8 +244,18 @@ the WebSocket upgrade handlers in `collab.rs` / `sync.rs`.
 **Identification** — trait method; marker
 `// md:impl IntoResponse for AppError > fn into_response`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn into_response(self) -> Response
+    // md:impl IntoResponse for AppError > fn into_response
+    fn into_response(self) -> Response {
+        let status = self.status();
+        if status.is_server_error() {
+            tracing::error!(error = %self, "request failed");
+        }
+        let body = Json(json!({ "error": self.client_message() }));
+        (status, body).into_response()
+    }
 ```
 
 **What it does** — Builds the final HTTP response: takes `self.status()`; if the status
