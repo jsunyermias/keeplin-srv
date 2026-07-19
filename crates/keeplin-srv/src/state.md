@@ -1,7 +1,7 @@
 # `state.rs` — shared application state
 
-Self-contained companion for `crates/keeplin-srv/src/state.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/state.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `state.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 
@@ -59,7 +62,10 @@ coordinated only by the Postgres `LISTEN/NOTIFY` bus (`bus.rs`, issue #45).
 
 **Identification** — struct; marker `// md:AppState`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:AppState
 pub struct AppState {
     pub config: Config,
     pub store: Store,
@@ -119,6 +125,8 @@ wrong form.
 **Identification** — inherent impl block; marker `// md:impl AppState`. Contains one
 constructor, `fn new` (next section).
 
+**Code** — container: members documented as sub-blocks below: fn new.
+
 **What it does** — Construction only; `AppState` has no other methods, because all
 behaviour lives in the subsystems it holds.
 
@@ -132,8 +140,28 @@ behaviour lives in the subsystems it holds.
 
 **Identification** — associated function; marker `// md:impl AppState > fn new`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn new(config: Config, pool: Pool<Postgres>) -> Self
+    // md:impl AppState > fn new
+    pub fn new(config: Config, pool: Pool<Postgres>) -> Self {
+        let rate_limiter = RateLimiter::new(config.rate_limit_per_min);
+        let cipher = crate::crypto::Cipher::from_key(config.at_rest_key.as_deref())
+            .expect("valid AT_REST_KEY (validated at startup)");
+        let mailer = crate::mail::Mailer::new(
+            config.mail_webhook_url.clone(),
+            config.mail_webhook_token.clone(),
+        );
+        Self {
+            config,
+            store: Store::with_cipher(pool, cipher),
+            hub: SyncHub::default(),
+            collab: CollabRegistry::default(),
+            rate_limiter,
+            instance_id: Uuid::new_v4(),
+            mailer,
+        }
+    }
 ```
 
 **What it does** — Builds the complete state from the loaded configuration and an

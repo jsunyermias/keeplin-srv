@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-17)
+# Graph Report - keeplin-srv  (2026-07-19)
 
 ## Corpus Check
-- 99 files · ~77,350 words
+- 102 files · ~151,230 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1215 nodes · 3081 edges · 86 communities (76 shown, 10 thin omitted)
+- 1660 nodes · 3523 edges · 92 communities (80 shown, 12 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a33ce1a2`
+- Built from commit: `3a842e3e`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -82,32 +82,39 @@
 - note_shares
 - notebook_shares
 - 0007_per_user_batch_dedup.sql
-- login_attempts
+- reencrypt.rs
+- notes
+- 0008_changes_history_index.sql
+- 0009_changes_entity_index.sql
 - `src/mail.rs` — delegated email delivery (mail webhook)
 - `tests/soak.rs` — multi-instance collaborative soak/load drill
 - `{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}
-- {{Title}} — {{one-line framing}}
-- `{{path/to/module.rs}}` — {{one-line purpose}}
-- `{{tests/file.rs}}` — {{what it tests}}
+- 0004_domain_entities.sql
+- 0001_initial.sql
+- 0010_collab_bus.sql
 - `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 - `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
-- `{{path/to/file}}` — {{what it configures / generates}}
-- Documentation templates (mirrored from keeplin)
+- email_tokens
+- notes
 - `scripts/check-docs.sh` — contractual-docs CI check
+- note_shares
 - CLAUDE.md
 - check-docs.sh
+- notebook_shares
+- changes
+- login_attempts
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 157 edges
 2. `Store` - 98 edges
-3. `AppState` - 81 edges
-4. `AuthedUser` - 37 edges
-5. `send()` - 36 edges
-6. `user()` - 28 edges
-7. `spawn_server()` - 24 edges
-8. `create_note()` - 24 edges
-9. `register()` - 23 edges
-10. `login()` - 23 edges
+3. `impl Store` - 92 edges
+4. ``http.rs` — the REST router and handlers` - 83 edges
+5. `AppState` - 81 edges
+6. `AuthedUser` - 37 edges
+7. `send()` - 36 edges
+8. ``store.rs` — the PostgreSQL data-access layer` - 31 edges
+9. ``collab.rs` — the collaborative session engine` - 29 edges
+10. `user()` - 28 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `handle_msg()` --calls--> `resolve_note_access()`  [INFERRED]
@@ -124,31 +131,31 @@
 ## Import Cycles
 - None detected.
 
-## Communities (86 total, 10 thin omitted)
+## Communities (92 total, 12 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
-Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), ChangeRow, CollabEvent (+37 more)
+Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
 
 ### Community 1 - "AppState"
 Cohesion: 0.09
-Nodes (98): Bytes, AuthedUser, access_cutoff(), change_password(), ChangePasswordBody, create_device(), create_note(), create_notebook_share() (+90 more)
+Nodes (99): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+91 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
-Nodes (59): AtomicU64, advances_writer(), announce_presence(), apply_op(), clear_presence(), CollabRegistry, CollabSession, deliver_event() (+51 more)
+Nodes (59): AtomicU64, advances_writer(), announce_presence(), apply_op(), clear_presence(), deliver_event(), deliver_presence(), handle_msg() (+51 more)
 
 ### Community 3 - "collab.rs"
 Cohesion: 0.18
 Nodes (55): capability_grants_enforce_hierarchy_and_escalation(), concurrent_updates_resolve_deterministically(), create_note(), deleting_a_device_revokes_its_collab_token(), deleting_a_device_revokes_its_token(), export_body(), forged_writer_is_rejected(), gc_compacts_old_tombstones() (+47 more)
 
 ### Community 4 - "quotas.rs"
-Cohesion: 0.32
-Nodes (18): device(), login(), note_quota_blocks_creation_past_the_limit(), note_quota_disabled_by_default(), post_note(), put_blob(), quota_config(), register() (+10 more)
+Cohesion: 0.12
+Nodes (30): dev_insecure(), env_parse(), is_weak_secret(), resolve_jwt_secret(), Config, Option, Self, String (+22 more)
 
 ### Community 5 - "integration.rs"
-Cohesion: 0.10
-Nodes (60): Config, dev_insecure(), env_parse(), is_weak_secret(), resolve_jwt_secret(), Option, Self, String (+52 more)
+Cohesion: 0.16
+Nodes (48): router(), delete_account_requires_password_and_cascades(), device(), device_connecting_later_receives_backlog(), duplicate_batches_are_deduplicated(), email_flows_answer_501_when_unconfigured(), email_is_normalized_and_validated(), email_verification_and_password_reset_flows() (+40 more)
 
 ### Community 6 - "keeplin-srv operator runbook"
 Cohesion: 0.04
@@ -160,15 +167,15 @@ Nodes (31): handle_collab_op(), handle_collab_presence(), handle_sync_batch(), A
 
 ### Community 8 - "Cipher"
 Cohesion: 0.11
-Nodes (24): Aes256Gcm, main(), parse_args(), Result, Cipher, disabled_is_passthrough(), nonce_is_random_per_value(), reads_legacy_plaintext_when_enabled() (+16 more)
+Nodes (24): Aes256Gcm, main(), parse_args(), Result, disabled_is_passthrough(), nonce_is_random_per_value(), reads_legacy_plaintext_when_enabled(), round_trips_and_tags() (+16 more)
 
 ### Community 9 - "sync.rs"
 Cohesion: 0.14
-Nodes (27): authenticate(), changes_frame(), deliver_backlog(), FanoutBatch, FanoutMsg, handle_incoming(), handler(), materialize() (+19 more)
+Nodes (27): authenticate(), changes_frame(), deliver_backlog(), handle_incoming(), handler(), materialize(), relay_loop(), Arc (+19 more)
 
 ### Community 10 - "resolve_note_access"
-Cohesion: 0.13
-Nodes (6): Access, Capabilities, higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Self, unknown_bits_are_masked_off()
+Cohesion: 0.19
+Nodes (5): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Capabilities, Self, unknown_bits_are_masked_off()
 
 ### Community 11 - "materialize.rs"
 Cohesion: 0.25
@@ -176,7 +183,7 @@ Nodes (28): a_never_connected_device_does_not_block_pruning(), concurrent_notebo
 
 ### Community 12 - "ratelimit.rs"
 Cohesion: 0.14
-Nodes (21): ConnectInfo, Bucket, burst_then_throttle_then_refill(), disabled_always_allows(), idle_buckets_are_swept_after_the_interval(), ip(), LimiterState, rate_limit_mw() (+13 more)
+Nodes (21): ConnectInfo, burst_then_throttle_then_refill(), disabled_always_allows(), idle_buckets_are_swept_after_the_interval(), ip(), rate_limit_mw(), Arc, Bucket (+13 more)
 
 ### Community 13 - "mod.rs"
 Cohesion: 0.15
@@ -184,99 +191,99 @@ Nodes (20): CollabBackend, collab_client_writes_note_through_to_the_server(), Pg
 
 ### Community 14 - "auth_mw"
 Cohesion: 0.13
-Nodes (21): Body, auth_mw(), Claims, create_token(), dummy_password_hash(), hash_password(), Arc, Error (+13 more)
+Nodes (21): Body, auth_mw(), create_token(), dummy_password_hash(), hash_password(), Arc, Claims, Error (+13 more)
 
 ### Community 15 - "Mailer"
 Cohesion: 0.19
 Nodes (9): Client, Mailer, MailKind, DateTime, Option, Result, Self, String (+1 more)
 
 ### Community 16 - "`http.rs` — the REST router and handlers"
-Cohesion: 0.18
-Nodes (10): Body materialisation, Design notes, Graph context, `http.rs` — the REST router and handlers, Pagination (issue #29), Per-user quotas, Public API (handlers), Purpose (+2 more)
+Cohesion: 0.02
+Nodes (81): CAPABILITIES, Coverage checklist, fn access_cutoff, fn change_password, fn compatible_with, fn create_device, fn create_note, fn create_notebook_share (+73 more)
 
 ### Community 17 - "`permissions.rs` — note capabilities"
-Cohesion: 0.18
-Nodes (10): Design notes, Enforcement rules, Graph context, Key types, Notebook permissions & the destructive cascade, `permissions.rs` — note capabilities, Public API, Purpose (+2 more)
+Cohesion: 0.08
+Nodes (25): accessors, can_* accessors, Coverage checklist, fn all, fn bits, fn contains, fn empty, fn from_bits (+17 more)
 
 ### Community 18 - "`sync.rs` — the device sync relay"
-Cohesion: 0.18
-Nodes (10): Delivery mechanism, Design notes, Graph context, Keepalive, Key types, Materialisation (`materialize`), Purpose, Related files (+2 more)
+Cohesion: 0.09
+Nodes (21): Constants, Coverage checklist, fn authenticate, fn changes_frame, fn deliver_backlog, fn handle_incoming, fn handler, fn join (+13 more)
 
 ### Community 19 - "`tests/collab.rs` — collaborative channel & hardening tests"
-Cohesion: 0.18
-Nodes (10): Coverage gaps, Fixtures and helpers, Graph context, Hardening, Permissions & safety, Protocol, Related files, Test cases (+2 more)
+Cohesion: 0.40
+Nodes (4): Coverage checklist, Graph context, Overview, `tests/collab.rs` — collaborative channel & hardening tests
 
 ### Community 20 - "`tests/integration.rs` — device relay tests (real `DbBackend`)"
-Cohesion: 0.18
-Nodes (10): Coverage gaps, Fixtures and helpers, Graph context, HTTP surface, Live relay, Persistence & isolation, Related files, Test cases (+2 more)
+Cohesion: 0.04
+Nodes (45): Coverage checklist, Email-flow tests (issue #49), fn delete_account_requires_password_and_cascades, fn device, fn device_connecting_later_receives_backlog, fn duplicate_batches_are_deduplicated, fn email_flows_answer_501_when_unconfigured, fn email_is_normalized_and_validated (+37 more)
 
 ### Community 21 - "`Dockerfile` — reproducible server image"
 Cohesion: 0.20
 Nodes (9): `Dockerfile` — reproducible server image, Notes & gotchas, Purpose, Related files, Runtime contract, Stages, Usage, Why the runtime image is tiny (+1 more)
 
 ### Community 22 - "[Unreleased]"
-Cohesion: 0.22
-Nodes (8): [0.1.0], Added, Added, Added, Changed, Changelog, Security, [Unreleased]
+Cohesion: 0.20
+Nodes (9): [0.1.0], 2026-07 production-readiness audit follow-up, Added, Added, Added, Changed, Changelog, Security (+1 more)
 
 ### Community 23 - "`collab.rs` — the collaborative session engine"
-Cohesion: 0.20
-Nodes (9): `collab.rs` — the collaborative session engine, Concurrency discipline, Connection flow, Design notes, Graph context, Key types, Op validation & resolution, Purpose (+1 more)
+Cohesion: 0.06
+Nodes (34): `collab.rs` — the collaborative session engine, Constants, Coverage checklist, fn advances_writer, fn announce_presence, fn apply_op, fn broadcast, fn clear_presence (+26 more)
 
 ### Community 24 - "`ratelimit.rs` — per-IP token-bucket rate limiter"
-Cohesion: 0.20
-Nodes (9): Graph context, Key types, Memory, Notes & gotchas, Public API, Purpose, `ratelimit.rs` — per-IP token-bucket rate limiter, Related files (+1 more)
+Cohesion: 0.09
+Nodes (21): Coverage checklist, fn bucket_count, fn burst_then_throttle_then_refill, fn check, fn disabled_always_allows, fn enabled, fn idle_buckets_are_swept_after_the_interval, fn ip (+13 more)
 
 ### Community 25 - "keeplin-srv — Architecture overview"
 Cohesion: 0.25
 Nodes (7): 1. What keeplin-srv is, 2. The data model (PostgreSQL), 3. The surfaces (request flow), 4. Collaboration in one paragraph, 5. Operability, 6. Where to read next, keeplin-srv — Architecture overview
 
 ### Community 26 - "`auth.rs` — passwords, tokens, and the auth middleware"
-Cohesion: 0.22
-Nodes (8): `auth.rs` — passwords, tokens, and the auth middleware, Design notes, Graph context, Key types, Public API, Purpose, Related files, Token revocation
+Cohesion: 0.13
+Nodes (14): `auth.rs` — passwords, tokens, and the auth middleware, Coverage checklist, fn auth_mw, fn create_token, fn dummy_password_hash, fn from_request_parts, fn hash_password, fn verify_password (+6 more)
 
 ### Community 27 - "`src/crypto.rs` — at-rest encryption of note titles and line content"
-Cohesion: 0.22
-Nodes (8): Design notes, Graph context, Key types, Public API, Purpose, Related files, `src/crypto.rs` — at-rest encryption of note titles and line content, Stored-value format and migration invariants
+Cohesion: 0.10
+Nodes (19): Constants, Coverage checklist, `crypto.rs` — at-rest encryption of note titles and line content, fn bad_key_length_rejected, fn decrypt, fn disabled_is_passthrough, fn enabled, fn encrypt (+11 more)
 
 ### Community 28 - "`main.rs` — keeplin-srv entry point"
 Cohesion: 0.22
-Nodes (8): Design notes, Graceful shutdown, Graph context, `main.rs` — keeplin-srv entry point, Maintenance loop, Purpose, Related files, Startup / wiring
+Nodes (8): Coverage checklist, fn main, fn maintenance_loop, fn run_retention, fn shutdown_signal, Graph context, `main.rs` — keeplin-srv entry point, Overview
 
 ### Community 29 - "`src/reencrypt.rs` — one-off at-rest re-encrypt pass"
-Cohesion: 0.22
-Nodes (8): Design notes, Graph context, Key types, Public API, Purpose, Related files, `src/reencrypt.rs` — one-off at-rest re-encrypt pass, The pass — batching, resumability, live-server safety
+Cohesion: 0.18
+Nodes (10): Coverage checklist, fn reencrypt_column, fn run, Graph context, impl Default for Options, Options, Stats, TableStats (+2 more)
 
 ### Community 30 - "`store.rs` — the PostgreSQL data-access layer"
-Cohesion: 0.22
-Nodes (8): Database schema, Design notes, Graph context, Key types, Public API (by area), Purpose, Related files, `store.rs` — the PostgreSQL data-access layer
+Cohesion: 0.05
+Nodes (36): Coverage checklist, fn cascade_notebook_to_notes_tx, fn decode, fn delete_ops, fn encode, fn incoming_wins, fn new, fn replace_note_shares_from_notebook_tx (+28 more)
 
 ### Community 31 - "`bus.rs` — cross-instance coordination (issue #45)"
-Cohesion: 0.25
-Nodes (7): `bus.rs` — cross-instance coordination (issue #45), Graph context, How it works, Ordering & correctness, Purpose, Related files, Why an outbox for ops
+Cohesion: 0.18
+Nodes (10): `bus.rs` — cross-instance coordination (issue #45), Channel constants, Coverage checklist, fn handle_collab_op, fn handle_collab_presence, fn handle_sync_batch, fn run, fn spawn (+2 more)
 
 ### Community 32 - "`error.rs` — the API error type"
-Cohesion: 0.25
-Nodes (7): Design notes, `error.rs` — the API error type, Graph context, Key types, Public API, Purpose, Related files
+Cohesion: 0.18
+Nodes (10): Coverage checklist, `error.rs` — the API error type, fn client_message, fn into_response, fn status, Graph context, impl AppError, impl IntoResponse for AppError (+2 more)
 
 ### Community 33 - "`protocol.rs` — collaborative wire types"
-Cohesion: 0.25
-Nodes (7): Graph context, Key types, Notes & gotchas, `protocol.rs` — collaborative wire types, Purpose, Related files, The wire protocol
+Cohesion: 0.12
+Nodes (16): Coverage checklist, fn last_writer, Graph context, impl LineOp, LineId, CollabClientMsg, CollabServerMsg, Cursor (+8 more)
 
 ### Community 34 - "`state.rs` — shared application state"
 Cohesion: 0.25
-Nodes (7): Design notes, Graph context, Key types, Public API, Purpose, Related files, `state.rs` — shared application state
+Nodes (7): Coverage checklist, fn new, Graph context, impl AppState, AppState, Overview, `state.rs` — shared application state
 
 ### Community 35 - "`tests/collab_client_e2e.rs` — real daemon client ↔ real server"
-Cohesion: 0.25
-Nodes (7): Fixtures and helpers, Graph context, Notes & gotchas, Related files, Test cases, `tests/collab_client_e2e.rs` — real daemon client ↔ real server, What is tested
+Cohesion: 0.33
+Nodes (5): Coverage checklist, fn collab_client_writes_note_through_to_the_server, Graph context, Overview, `tests/collab_client_e2e.rs` — real daemon client ↔ real server
 
 ### Community 36 - "`tests/materialize.rs` — domain-entity materialisation tests"
-Cohesion: 0.25
-Nodes (7): Coverage gaps, Fixtures and helpers, Graph context, Related files, Test cases, `tests/materialize.rs` — domain-entity materialisation tests, What is tested
+Cohesion: 0.08
+Nodes (25): Coverage checklist, fn a_never_connected_device_does_not_block_pruning, fn concurrent_notebook_edits_converge_deterministically, fn deleted_resource_frees_quota_and_blob_is_purgeable, fn deleting_a_notebook_removes_it_from_listings, fn device, fn epoch, fn get_json (+17 more)
 
 ### Community 37 - "`tests/quotas.rs` — per-user quota enforcement tests"
-Cohesion: 0.25
-Nodes (7): Fixtures and helpers, Graph context, Notes, Related files, Test cases, `tests/quotas.rs` — per-user quota enforcement tests, What is tested
+Cohesion: 0.11
+Nodes (17): Coverage checklist, fn device, fn login, fn note_quota_blocks_creation_past_the_limit, fn note_quota_disabled_by_default, fn post_note, fn put_blob, fn quota_config (+9 more)
 
 ### Community 38 - "`docker-compose.yml` — Postgres + server stack"
 Cohesion: 0.29
@@ -308,23 +315,23 @@ Nodes (6): `0013_try_timestamptz.sql` — safe text→timestamptz cast for the h
 
 ### Community 45 - "`src/bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper"
 Cohesion: 0.29
-Nodes (6): Behaviour contract, Graph context, Purpose, Related files, `src/bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper, Usage
+Nodes (6): `bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper, Coverage checklist, fn main, fn parse_args, Graph context, Overview
 
 ### Community 46 - "`config.rs` — runtime configuration"
-Cohesion: 0.29
-Nodes (6): `config.rs` — runtime configuration, Configuration / key reference, Graph context, Notes & gotchas, Purpose, Related files
+Cohesion: 0.12
+Nodes (15): `config.rs` — runtime configuration, Coverage checklist, fn a_strong_secret_is_accepted, fn dev_insecure, fn env_parse, fn from_env, fn is_weak_secret, fn resolve_jwt_secret (+7 more)
 
 ### Community 47 - "`lib.rs` — keeplin-srv library root"
-Cohesion: 0.29
-Nodes (6): Design notes, Graph context, `lib.rs` — keeplin-srv library root, Module map, Purpose, Related files
+Cohesion: 0.40
+Nodes (4): Coverage checklist, Graph context, `lib.rs` — keeplin-srv library root, Overview
 
 ### Community 48 - "`tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (real client)"
-Cohesion: 0.29
-Nodes (6): Fixtures and helpers, Graph context, Related files, Test cases, `tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (real client), What is tested
+Cohesion: 0.33
+Nodes (5): Coverage checklist, fn resource_blob_travels_out_of_band_through_the_real_client, Graph context, Overview, `tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (real client)
 
 ### Community 49 - "`tests/reencrypt.rs` — re-encrypt pass tests"
-Cohesion: 0.29
-Nodes (6): Fixtures and helpers, Graph context, Related files, Test cases, `tests/reencrypt.rs` — re-encrypt pass tests, What is tested
+Cohesion: 0.15
+Nodes (12): Coverage checklist, fn dry_run_reports_but_does_not_modify, fn raw_values, fn reencrypts_pre_key_rows_and_server_still_serves_plaintext, fn refuses_to_run_without_a_key, fn seed_note, fn spawn_server, fn test_config (+4 more)
 
 ### Community 50 - "`0001_initial.sql` — accounts, devices, and the relay journal"
 Cohesion: 0.33
@@ -351,84 +358,104 @@ Cohesion: 0.50
 Nodes (3): 0011 — login brute-force lockout, Design notes, Semantics
 
 ### Community 58 - "reencrypt.rs"
+Cohesion: 0.02
+Nodes (92): fn advance_cursor, fn append_changes, fn apply_notebook_shares_to_note, fn cascade_notebook_to_notes, fn changes_after, fn clear_login_failures, fn consume_email_token, fn count_live_notes_for_user (+84 more)
+
+### Community 59 - "notes"
+Cohesion: 0.12
+Nodes (17): fn create_note, fn export_body, fn insert_op, fn join, fn recv_until, fn send, fn share, fn spawn_instance (+9 more)
+
+### Community 60 - "0004_domain_entities.sql"
+Cohesion: 0.17
+Nodes (12): Capability-model tests (Front B), fn capability_grants_enforce_hierarchy_and_escalation, fn move_note, fn move_note_status, fn nil_notebook_id_patch_means_inbox_and_keeps_shares, fn note_move_requires_write_on_destination_notebook, fn note_status, fn notebook_owner_can_manage_child_notes_they_do_not_own (+4 more)
+
+### Community 61 - "0001_initial.sql"
+Cohesion: 0.20
+Nodes (10): fn deleting_a_device_revokes_its_collab_token, fn deleting_a_device_revokes_its_token, fn gc_compacts_old_tombstones, fn health_and_readiness_probes, fn metrics_reports_counts, fn rate_limit_throttles_and_spares_health, fn spawn_rate_limited, fn version_endpoint_advertises_capabilities (+2 more)
+
+### Community 62 - "0010_collab_bus.sql"
+Cohesion: 0.29
+Nodes (7): fn concurrent_updates_resolve_deterministically, fn join_receives_welcome_snapshot, fn move_reorders_lines, fn ops_and_presence_propagate_across_instances, fn ops_propagate_between_participants, fn stale_op_is_ignored, Protocol tests
+
+### Community 63 - "email_tokens"
+Cohesion: 0.29
+Nodes (7): fn forged_writer_is_rejected, fn import_then_export_roundtrip, fn outsider_cannot_join, fn presence_shows_other_participants, fn revoking_a_share_stops_edits_mid_session, fn viewer_can_watch_but_not_edit, Permission tests
+
+### Community 64 - "notes"
+Cohesion: 0.29
+Nodes (6): Purpose, Related files, Safety, `scripts/dr-drill.sh` — disaster-recovery restore drill, Usage, What it does
+
+### Community 67 - "0007_per_user_batch_dedup.sql"
+Cohesion: 0.40
+Nodes (4): `0007_per_user_batch_dedup.sql` — scope batch dedup to the owning user, Purpose, Related files, What it changes
+
+### Community 68 - "reencrypt.rs"
 Cohesion: 0.33
 Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
 
-### Community 59 - "notes"
+### Community 69 - "notes"
 Cohesion: 0.67
 Nodes (5): lines, note_line_order, note_shares, notes, users
 
-### Community 60 - "0004_domain_entities.sql"
+### Community 70 - "0008_changes_history_index.sql"
+Cohesion: 0.33
+Nodes (5): `0008_changes_history_index.sql` — per-user history indexes on the change journal, Purpose, Related files, Trade-off, What it defines
+
+### Community 71 - "0009_changes_entity_index.sql"
+Cohesion: 0.40
+Nodes (4): `0009_changes_entity_index.sql` — re-index history per entity (user-agnostic), Purpose, Related files, What it changes
+
+### Community 72 - "`src/mail.rs` — delegated email delivery (mail webhook)"
+Cohesion: 0.15
+Nodes (12): Coverage checklist, fn as_str, fn enabled, fn new, fn send, Graph context, impl Mailer, impl MailKind (+4 more)
+
+### Community 73 - "`tests/soak.rs` — multi-instance collaborative soak/load drill"
+Cohesion: 0.14
+Nodes (13): Coverage checklist, fn editor, fn env_or, fn export_body, fn merge_vv, fn soak_two_instances_under_concurrent_editors, fn spawn_instance, fn test_config (+5 more)
+
+### Community 74 - "`{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}"
+Cohesion: 0.05
+Nodes (34): Configuration / key reference, Graph context, Notes & gotchas, `{{path/to/file}}` — {{what it configures / generates}}, Purpose, Related files, What it {{generates | defines | runs}}, Dependency graph (intra-crate) (+26 more)
+
+### Community 75 - "0004_domain_entities.sql"
 Cohesion: 0.40
 Nodes (5): note_tags, notebooks, resource_blobs, resources, tags
 
-### Community 61 - "0001_initial.sql"
+### Community 76 - "0001_initial.sql"
 Cohesion: 0.70
 Nodes (4): changes, device_cursors, user_devices, users
 
-### Community 72 - "`src/mail.rs` — delegated email delivery (mail webhook)"
-Cohesion: 0.22
-Nodes (8): Design notes, Graph context, Key types, Public API, Purpose, Related files, `src/mail.rs` — delegated email delivery (mail webhook), Wire payload
-
-### Community 73 - "`tests/soak.rs` — multi-instance collaborative soak/load drill"
-Cohesion: 0.25
-Nodes (7): Coverage gaps, Fixtures and helpers, Graph context, Phases and assertions, Related files, `tests/soak.rs` — multi-instance collaborative soak/load drill, What is tested
-
-### Community 74 - "`{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}"
-Cohesion: 0.25
-Nodes (8): Dependency graph (intra-crate), Design notes, Graph context, `{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}, Module map, Purpose, Related files, Startup / wiring
-
-### Community 75 - "{{Title}} — {{one-line framing}}"
-Cohesion: 0.25
-Nodes (7): {{1. The concept / the model}}, {{2. How it works across the system}}, {{3. Guarantees and non-guarantees}}, {{4. Operational implications}}, Related documents, {{Title}} — {{one-line framing}}, Trade-offs & rejected alternatives
-
-### Community 76 - "`{{path/to/module.rs}}` — {{one-line purpose}}"
-Cohesion: 0.25
-Nodes (8): Design notes, Graph context, Key types, {{Module-specific mechanism}}, `{{path/to/module.rs}}` — {{one-line purpose}}, Public API, Purpose, Related files
-
-### Community 77 - "`{{tests/file.rs}}` — {{what it tests}}"
-Cohesion: 0.25
-Nodes (8): Coverage gaps, {{Feature area}}, Fixtures and helpers, Graph context, Related files, Test cases, `{{tests/file.rs}}` — {{what it tests}}, What is tested
-
 ### Community 78 - "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)"
-Cohesion: 0.29
-Nodes (6): Fixtures and helpers, Graph context, Related files, Test cases, `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client), What is tested
+Cohesion: 0.33
+Nodes (5): Coverage checklist, fn reconnecting_client_rebuilds_note_from_snapshot, Graph context, Overview, `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 
 ### Community 79 - "`tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries"
-Cohesion: 0.29
-Nodes (6): Graph context, Helpers, Invariant, Purpose, Related files, `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
-
-### Community 80 - "`{{path/to/file}}` — {{what it configures / generates}}"
-Cohesion: 0.29
-Nodes (7): Configuration / key reference, Graph context, Notes & gotchas, `{{path/to/file}}` — {{what it configures / generates}}, Purpose, Related files, What it {{generates | defines | runs}}
-
-### Community 81 - "Documentation templates (mirrored from keeplin)"
-Cohesion: 0.33
-Nodes (6): Documentation templates (mirrored from keeplin), House style, Placeholders in the templates, The convention in one sentence, The two-layer navigation model, Which template to use
+Cohesion: 0.15
+Nodes (12): CONVERGE_TRIES, Coverage checklist, fn collab_device, fn login, fn register, fn spawn_server, fn test_config, fn wait_local_body (+4 more)
 
 ### Community 82 - "`scripts/check-docs.sh` — contractual-docs CI check"
-Cohesion: 0.33
-Nodes (5): Behaviour, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check
+Cohesion: 0.22
+Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ## Knowledge Gaps
-- **349 isolated node(s):** `notes`, `notebooks`, `tags`, `note_tags`, `note_shares` (+344 more)
+- **753 isolated node(s):** `notes`, `notebooks`, `tags`, `note_tags`, `note_shares` (+748 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **12 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.185) - this node is a cross-community bridge._
-- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `soak.rs`, `materialize.rs`, `mod.rs`, `reencrypt.rs`?**
-  _High betweenness centrality (0.092) - this node is a cross-community bridge._
+- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
+  _High betweenness centrality (0.099) - this node is a cross-community bridge._
+- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
+  _High betweenness centrality (0.049) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
-  _High betweenness centrality (0.083) - this node is a cross-community bridge._
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
 - **What connects `notes`, `notebooks`, `tags` to the rest of the system?**
-  _349 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _753 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06439288043984717 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.09415992812219227 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0859073359073359 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08502939846223428 - nodes in this community are weakly interconnected._

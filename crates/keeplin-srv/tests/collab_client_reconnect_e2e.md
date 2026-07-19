@@ -1,15 +1,16 @@
 # `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 
 Self-contained companion for `crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs`.
-It documents **every code block of the source file, in source order** — a reader with
+It documents **every code block of the source file, in source order, with its complete code embedded** — a reader with
 only this file must be able to understand the test binary without opening anything
 else, so project-wide conventions are deliberately re-explained here (hyper-redundancy
 is intended).
 
 **How to navigate**: every block carries exactly one marker comment
 `// md:<Header> > … > <Block header>` whose path is the header chain of its section
-here; grep it in either direction. Each section covers **Identification**,
-**What it does**, **Dependencies**, **Used by**, **Repeated context**.
+here; grep it in either direction. Each block section covers, in this fixed order:
+**Identification**, **Code**, **What it does**, **Dependencies**, **Used by**,
+**Repeated context**.
 
 ---
 
@@ -18,7 +19,10 @@ here; grep it in either direction. Each section covers **Identification**,
 **Identification** — file-level block: the `#[path] mod common;` declaration and
 imports. Marker `// md:Overview`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 #[path = "collab_e2e_common/mod.rs"]
 mod common;
 
@@ -49,6 +53,36 @@ is exactly why server-side pruning/dropping of collab messages is safe.
 
 **Identification** — `#[sqlx::test]` async test; marker
 `// md:fn reconnecting_client_rebuilds_note_from_snapshot`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn reconnecting_client_rebuilds_note_from_snapshot
+#[sqlx::test(migrations = "../../migrations")]
+async fn reconnecting_client_rebuilds_note_from_snapshot(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+
+    let note_id = {
+        let a = collab_device(addr, &token).await;
+        let note = a
+            .create_note(Note::new("Persisted", "durable body"))
+            .await
+            .unwrap();
+        wait_server_body(addr, &token, note.id, "durable body").await;
+        note.id
+    };
+
+    let b = collab_device(addr, &token).await;
+    wait_local_body(&b, note_id, "durable body").await;
+
+    let mut edited = b.read_note(note_id).await.unwrap();
+    edited.body = "edited after reconnect".into();
+    b.update_note(edited).await.unwrap();
+    wait_server_body(addr, &token, note_id, "edited after reconnect").await;
+}
+```
 
 **What it does** — Three acts: (1) client A creates a note (`"Persisted"` /
 `"durable body"`) through the real stack, the server materialises it

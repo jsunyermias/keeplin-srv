@@ -1,7 +1,7 @@
 # `crypto.rs` — at-rest encryption of note titles and line content
 
-Self-contained companion for `crates/keeplin-srv/src/crypto.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/crypto.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `crypto.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
 use base64::Engine as _;
@@ -73,7 +76,10 @@ would leak equality of contents.
 **Identification** — logical section: the tag and encoding constants; marker
 `// md:Constants`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Constants
 pub const ENC_PREFIX: &str = "enc:v1:";
 const TAG: &str = ENC_PREFIX;
 const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -101,7 +107,10 @@ migrate forward only via the explicit re-encrypt pass).
 
 **Identification** — struct; marker `// md:Cipher`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Cipher
 #[derive(Clone)]
 pub struct Cipher {
     cipher: Option<Aes256Gcm>,
@@ -131,6 +140,8 @@ is how that rule stays structural instead of disciplinary.
 **Identification** — inherent impl block; marker `// md:impl Cipher`. Contains
 `fn from_key`, `fn enabled`, `fn encrypt`, `fn decrypt` (next sections).
 
+**Code** — container: members documented as sub-blocks below: fn from_key, fn enabled, fn encrypt, fn decrypt.
+
 **What it does** — Constructor plus the pass-through-aware encrypt/decrypt pair.
 
 **Dependencies** — `Cipher` (this file).
@@ -143,8 +154,29 @@ is how that rule stays structural instead of disciplinary.
 
 **Identification** — associated function; marker `// md:impl Cipher > fn from_key`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn from_key(key: Option<&str>) -> Result<Self, String>
+    // md:impl Cipher > fn from_key
+    pub fn from_key(key: Option<&str>) -> Result<Self, String> {
+        let raw = match key.map(str::trim).filter(|k| !k.is_empty()) {
+            None => return Ok(Self { cipher: None }),
+            Some(k) => k,
+        };
+        let bytes = B64
+            .decode(raw)
+            .map_err(|_| "AT_REST_KEY must be valid base64".to_string())?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "AT_REST_KEY must decode to 32 bytes (got {})",
+                bytes.len()
+            ));
+        }
+        let key = Key::<Aes256Gcm>::from_slice(&bytes);
+        Ok(Self {
+            cipher: Some(Aes256Gcm::new(key)),
+        })
+    }
 ```
 
 **What it does** — Builds the cipher from the optional base64 `AT_REST_KEY`.
@@ -170,8 +202,13 @@ operators comment out env vars.
 
 **Identification** — method; marker `// md:impl Cipher > fn enabled`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn enabled(&self) -> bool
+    // md:impl Cipher > fn enabled
+    pub fn enabled(&self) -> bool {
+        self.cipher.is_some()
+    }
 ```
 
 **What it does** — Whether a key is loaded. Used to distinguish pass-through mode
@@ -190,8 +227,22 @@ presumes a key.
 
 **Identification** — method; marker `// md:impl Cipher > fn encrypt`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn encrypt(&self, plaintext: &str) -> Result<String, AppError>
+    // md:impl Cipher > fn encrypt
+    pub fn encrypt(&self, plaintext: &str) -> Result<String, AppError> {
+        let Some(cipher) = &self.cipher else {
+            return Ok(plaintext.to_string());
+        };
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ct = cipher
+            .encrypt(&nonce, plaintext.as_bytes())
+            .map_err(|_| AppError::Internal("at-rest encryption failed".into()))?;
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(&ct);
+        Ok(format!("{TAG}{}", B64.encode(blob)))
+    }
 ```
 
 **What it does** — Encrypts a value for storage. Disabled → returns the plaintext
@@ -217,8 +268,31 @@ ciphertexts (equality leak).
 
 **Identification** — method; marker `// md:impl Cipher > fn decrypt`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn decrypt(&self, stored: &str) -> Result<String, AppError>
+    // md:impl Cipher > fn decrypt
+    pub fn decrypt(&self, stored: &str) -> Result<String, AppError> {
+        let Some(rest) = stored.strip_prefix(TAG) else {
+            return Ok(stored.to_string());
+        };
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("encrypted value but AT_REST_KEY is unset".into()))?;
+        let blob = B64
+            .decode(rest)
+            .map_err(|_| AppError::Internal("at-rest ciphertext is not valid base64".into()))?;
+        if blob.len() < 12 {
+            return Err(AppError::Internal("at-rest ciphertext too short".into()));
+        }
+        let (nonce_bytes, ct) = blob.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let pt = cipher
+            .decrypt(nonce, ct)
+            .map_err(|_| AppError::Internal("at-rest decryption failed (wrong key?)".into()))?;
+        String::from_utf8(pt).map_err(|_| AppError::Internal("at-rest plaintext not utf-8".into()))
+    }
 ```
 
 **What it does** — Decrypts a stored value. Untagged (no `enc:v1:` prefix) → returned
@@ -250,6 +324,8 @@ not returned as garbage.
 **Identification** — `#[cfg(test)]` unit-test module; marker `// md:mod tests`. Its
 test functions are the subsections below; the shared helper first.
 
+**Code** — container: members documented as sub-blocks below: fn test_key, fn disabled_is_passthrough, fn round_trips_and_tags, fn nonce_is_random_per_value, fn reads_legacy_plaintext_when_enabled, fn wrong_key_fails_loudly, fn bad_key_length_rejected.
+
 **What it does** — Unit tests of the cipher in isolation (no database, no server).
 They pin the module's contract: pass-through when disabled, tagged+recoverable when
 enabled, nonce randomness, legacy plaintext readability, loud wrong-key failure, and
@@ -267,6 +343,15 @@ in *Overview*; a change that breaks one is a contract change, not a test problem
 **Identification** — test helper; marker `// md:mod tests > fn test_key`.
 `fn test_key() -> String`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn test_key
+    fn test_key() -> String {
+        B64.encode([7u8; 32])
+    }
+```
+
 **What it does** — A fixed valid key: base64 of 32 bytes of `7`. Deterministic on
 purpose — the tests need a *valid* key, not a secret one.
 
@@ -280,6 +365,19 @@ purpose — the tests need a *valid* key, not a secret one.
 
 **Identification** — `#[test]`; marker `// md:mod tests > fn disabled_is_passthrough`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn disabled_is_passthrough
+    #[test]
+    fn disabled_is_passthrough() {
+        let c = Cipher::from_key(None).unwrap();
+        assert!(!c.enabled());
+        assert_eq!(c.encrypt("hello").unwrap(), "hello");
+        assert_eq!(c.decrypt("hello").unwrap(), "hello");
+    }
+```
+
 **What it does** — `from_key(None)` yields a disabled cipher: `enabled()` is false and
 both `encrypt` and `decrypt` return their input unchanged.
 
@@ -292,6 +390,20 @@ both `encrypt` and `decrypt` return their input unchanged.
 ### fn round_trips_and_tags
 
 **Identification** — `#[test]`; marker `// md:mod tests > fn round_trips_and_tags`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn round_trips_and_tags
+    #[test]
+    fn round_trips_and_tags() {
+        let c = Cipher::from_key(Some(&test_key())).unwrap();
+        let ct = c.encrypt("secret note line").unwrap();
+        assert!(ct.starts_with(TAG), "stored value must be tagged");
+        assert_ne!(ct, "secret note line");
+        assert_eq!(c.decrypt(&ct).unwrap(), "secret note line");
+    }
+```
 
 **What it does** — With a key: `encrypt` output starts with the tag, differs from the
 plaintext, and `decrypt` recovers the original exactly.
@@ -307,6 +419,17 @@ plaintext, and `decrypt` recovers the original exactly.
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn nonce_is_random_per_value`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn nonce_is_random_per_value
+    #[test]
+    fn nonce_is_random_per_value() {
+        let c = Cipher::from_key(Some(&test_key())).unwrap();
+        assert_ne!(c.encrypt("x").unwrap(), c.encrypt("x").unwrap());
+    }
+```
+
 **What it does** — Encrypting the same plaintext twice yields different stored
 values — the equality-leak defence.
 
@@ -320,6 +443,20 @@ values — the equality-leak defence.
 
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn reads_legacy_plaintext_when_enabled`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn reads_legacy_plaintext_when_enabled
+    #[test]
+    fn reads_legacy_plaintext_when_enabled() {
+        let c = Cipher::from_key(Some(&test_key())).unwrap();
+        assert_eq!(
+            c.decrypt("old plaintext title").unwrap(),
+            "old plaintext title"
+        );
+    }
+```
 
 **What it does** — With a key loaded, an untagged (legacy plaintext) value decrypts
 to itself: enabling the key on an existing database must not break old rows.
@@ -335,6 +472,19 @@ zero-downtime operation.
 
 **Identification** — `#[test]`; marker `// md:mod tests > fn wrong_key_fails_loudly`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn wrong_key_fails_loudly
+    #[test]
+    fn wrong_key_fails_loudly() {
+        let a = Cipher::from_key(Some(&B64.encode([1u8; 32]))).unwrap();
+        let b = Cipher::from_key(Some(&B64.encode([2u8; 32]))).unwrap();
+        let ct = a.encrypt("data").unwrap();
+        assert!(b.decrypt(&ct).is_err());
+    }
+```
+
 **What it does** — A value encrypted under key A fails to decrypt under key B (GCM
 authentication) — an error, never silent garbage.
 
@@ -347,6 +497,17 @@ authentication) — an error, never silent garbage.
 ### fn bad_key_length_rejected
 
 **Identification** — `#[test]`; marker `// md:mod tests > fn bad_key_length_rejected`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn bad_key_length_rejected
+    #[test]
+    fn bad_key_length_rejected() {
+        assert!(Cipher::from_key(Some(&B64.encode([0u8; 16]))).is_err());
+        assert!(Cipher::from_key(Some("not base64!!!")).is_err());
+    }
+```
 
 **What it does** — `from_key` rejects a 16-byte key and a non-base64 string — the
 fail-fast configuration contract.

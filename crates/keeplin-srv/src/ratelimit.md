@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -70,7 +73,10 @@ replicas do not share buckets.
 
 **Identification** — private struct; marker `// md:Bucket`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Bucket
 struct Bucket {
     tokens: f64,
     last_refill: Instant,
@@ -96,7 +102,10 @@ fresh one** — the fact that makes the idle-bucket sweep behaviour-preserving (
 
 **Identification** — private struct; marker `// md:LimiterState`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:LimiterState
 struct LimiterState {
     buckets: HashMap<IpAddr, Bucket>,
     last_sweep: Instant,
@@ -122,7 +131,10 @@ is the fix's bookkeeping.
 
 **Identification** — public struct; marker `// md:RateLimiter`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:RateLimiter
 pub struct RateLimiter {
     capacity: f64,
     refill_per_sec: f64,
@@ -151,7 +163,10 @@ section sits on an async path.
 
 **Identification** — private const; marker `// md:SWEEP_INTERVAL`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:SWEEP_INTERVAL
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 ```
 
@@ -175,6 +190,8 @@ and is indistinguishable from the fresh full bucket it would be recreated as.
 `fn new`, `fn enabled`, `fn projected_tokens`, `fn check`, `fn bucket_count` (next
 sections).
 
+**Code** — container: members documented as sub-blocks below: fn new, fn enabled, fn projected_tokens, fn check, fn bucket_count.
+
 **What it does** — Construction and the token-spending logic.
 
 **Dependencies** — `RateLimiter` (this file).
@@ -187,8 +204,20 @@ sections).
 
 **Identification** — associated function; marker `// md:impl RateLimiter > fn new`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn new(per_min: u32) -> Self
+    // md:impl RateLimiter > fn new
+    pub fn new(per_min: u32) -> Self {
+        Self {
+            capacity: per_min as f64,
+            refill_per_sec: per_min as f64 / 60.0,
+            state: Mutex::new(LimiterState {
+                buckets: HashMap::new(),
+                last_sweep: Instant::now(),
+            }),
+        }
+    }
 ```
 
 **What it does** — Builds the limiter: `per_min` requests per IP per minute (`0`
@@ -207,8 +236,13 @@ strict no-op — the crate's opt-in convention for operational features.
 
 **Identification** — method; marker `// md:impl RateLimiter > fn enabled`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn enabled(&self) -> bool
+    // md:impl RateLimiter > fn enabled
+    pub fn enabled(&self) -> bool {
+        self.capacity > 0.0
+    }
 ```
 
 **What it does** — `capacity > 0`. The fast-path guard `check` uses to skip the lock
@@ -225,8 +259,16 @@ entirely when limiting is disabled.
 **Identification** — private method; marker
 `// md:impl RateLimiter > fn projected_tokens`.
 
+**Code** — complete and verbatim:
+
 ```rust
-fn projected_tokens(&self, bucket: &Bucket, now: Instant) -> f64
+    // md:impl RateLimiter > fn projected_tokens
+    fn projected_tokens(&self, bucket: &Bucket, now: Instant) -> f64 {
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
+        (bucket.tokens + elapsed * self.refill_per_sec).min(self.capacity)
+    }
 ```
 
 **What it does** — The tokens `bucket` would hold at `now` after refilling for the
@@ -246,8 +288,39 @@ smooth behaviour at the boundary, no thundering-herd reset each minute.
 
 **Identification** — public async method; marker `// md:impl RateLimiter > fn check`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub async fn check(&self, ip: IpAddr, now: Instant) -> bool
+    // md:impl RateLimiter > fn check
+    pub async fn check(&self, ip: IpAddr, now: Instant) -> bool {
+        if !self.enabled() {
+            return true;
+        }
+        let mut state = self.state.lock().await;
+        let bucket = state.buckets.entry(ip).or_insert(Bucket {
+            tokens: self.capacity,
+            last_refill: now,
+        });
+        bucket.tokens = self.projected_tokens(bucket, now);
+        bucket.last_refill = now;
+        let allowed = if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        };
+
+        if now.saturating_duration_since(state.last_sweep) >= SWEEP_INTERVAL {
+            let cap = self.capacity;
+            let rate = self.refill_per_sec;
+            state.buckets.retain(|_, b| {
+                let elapsed = now.saturating_duration_since(b.last_refill).as_secs_f64();
+                (b.tokens + elapsed * rate) < cap
+            });
+            state.last_sweep = now;
+        }
+        allowed
+    }
 ```
 
 **What it does** — Try to spend one token for `ip` at time `now`; `true` = allowed.
@@ -277,8 +350,14 @@ proxy instead — see *Overview*).
 **Identification** — `#[cfg(test)]` method; marker
 `// md:impl RateLimiter > fn bucket_count`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn bucket_count(&self) -> usize
+    // md:impl RateLimiter > fn bucket_count
+    #[cfg(test)]
+    async fn bucket_count(&self) -> usize {
+        self.state.lock().await.buckets.len()
+    }
 ```
 
 **What it does** — The number of live buckets. Test-only introspection for the sweep
@@ -297,13 +376,26 @@ test; compiled out of release builds.
 **Identification** — public async function (axum middleware); marker
 `// md:fn rate_limit_mw`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn rate_limit_mw
 pub async fn rate_limit_mw(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     req: axum::extract::Request,
     next: Next,
-) -> Response
+) -> Response {
+    if state.rate_limiter.check(addr.ip(), Instant::now()).await {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({ "error": "rate limit exceeded" })),
+        )
+            .into_response()
+    }
+}
 ```
 
 **What it does** — Enforces the limiter on every request of the sub-router it is
@@ -330,6 +422,8 @@ test-spawn helper do this; forgetting it makes every request fail extraction.
 **Identification** — `#[cfg(test)]` unit-test module; marker `// md:mod tests`. The
 helper and four tests are the subsections below.
 
+**Code** — container: members documented as sub-blocks below: fn ip, fn disabled_always_allows, fn burst_then_throttle_then_refill, fn separate_ips_have_separate_buckets, fn idle_buckets_are_swept_after_the_interval.
+
 **What it does** — Deterministic unit tests of the bucket algebra (time is injected
 via the `now` parameter — no sleeping, no wall clock).
 
@@ -345,6 +439,15 @@ burst-then-throttle-then-refill, per-IP isolation, and bounded memory (issue #33
 **Identification** — test helper; marker `// md:mod tests > fn ip`.
 `fn ip() -> IpAddr` — the fixed loopback IP used by single-IP tests.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn ip
+    fn ip() -> IpAddr {
+        IpAddr::from([127, 0, 0, 1])
+    }
+```
+
 **What it does / Dependencies / Used by** — trivially returns `127.0.0.1`; used by
 `disabled_always_allows` and `burst_then_throttle_then_refill`.
 
@@ -354,6 +457,20 @@ burst-then-throttle-then-refill, per-IP isolation, and bounded memory (issue #33
 
 **Identification** — `#[tokio::test]`; marker
 `// md:mod tests > fn disabled_always_allows`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn disabled_always_allows
+    #[tokio::test]
+    async fn disabled_always_allows() {
+        let rl = RateLimiter::new(0);
+        let now = Instant::now();
+        for _ in 0..1000 {
+            assert!(rl.check(ip(), now).await);
+        }
+    }
+```
 
 **What it does** — `RateLimiter::new(0)` allows 1000 checks at one instant: disabled
 means strict no-op.
@@ -368,6 +485,24 @@ means strict no-op.
 
 **Identification** — `#[tokio::test]`; marker
 `// md:mod tests > fn burst_then_throttle_then_refill`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn burst_then_throttle_then_refill
+    #[tokio::test]
+    async fn burst_then_throttle_then_refill() {
+        let rl = RateLimiter::new(60);
+        let t0 = Instant::now();
+        for _ in 0..60 {
+            assert!(rl.check(ip(), t0).await);
+        }
+        assert!(!rl.check(ip(), t0).await);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(rl.check(ip(), t1).await);
+        assert!(!rl.check(ip(), t1).await);
+    }
+```
 
 **What it does** — With 60/min (1 token/s, burst 60): the full burst passes at one
 instant; the 61st is denied; one second later exactly one more passes, the next is
@@ -384,6 +519,22 @@ denied — verifying capacity, denial, and continuous refill.
 **Identification** — `#[tokio::test]`; marker
 `// md:mod tests > fn separate_ips_have_separate_buckets`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn separate_ips_have_separate_buckets
+    #[tokio::test]
+    async fn separate_ips_have_separate_buckets() {
+        let rl = RateLimiter::new(1);
+        let now = Instant::now();
+        let a = IpAddr::from([10, 0, 0, 1]);
+        let b = IpAddr::from([10, 0, 0, 2]);
+        assert!(rl.check(a, now).await);
+        assert!(!rl.check(a, now).await);
+        assert!(rl.check(b, now).await);
+    }
+```
+
 **What it does** — Exhausting IP `a`'s bucket leaves IP `b` unaffected.
 
 **Dependencies** — `RateLimiter` (this file).
@@ -396,6 +547,27 @@ denied — verifying capacity, denial, and continuous refill.
 
 **Identification** — `#[tokio::test]`; marker
 `// md:mod tests > fn idle_buckets_are_swept_after_the_interval`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn idle_buckets_are_swept_after_the_interval
+    #[tokio::test]
+    async fn idle_buckets_are_swept_after_the_interval() {
+        let rl = RateLimiter::new(60);
+        let t0 = Instant::now();
+        for i in 0..100u32 {
+            let ip = IpAddr::from([10, 0, (i >> 8) as u8, i as u8]);
+            assert!(rl.check(ip, t0).await);
+        }
+        assert_eq!(rl.bucket_count().await, 100);
+
+        let later = t0 + Duration::from_secs(120);
+        let active = IpAddr::from([10, 0, 0, 0]);
+        rl.check(active, later).await;
+        assert_eq!(rl.bucket_count().await, 1);
+    }
+```
 
 **What it does** — 100 distinct IPs create 100 buckets; 120 s later (past both the
 sweep interval and the refill window) one request from an active IP triggers the

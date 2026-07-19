@@ -1,7 +1,7 @@
 # `mail.rs` — delegated email delivery (mail webhook)
 
-Self-contained companion for `crates/keeplin-srv/src/mail.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/mail.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `mail.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use chrono::{DateTime, Utc};
 ```
 
@@ -69,7 +72,10 @@ and the user proves receipt by presenting it back (`/api/verify-email`,
 
 **Identification** — enum; marker `// md:MailKind`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:MailKind
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailKind {
     VerifyEmail,
@@ -97,6 +103,8 @@ cannot be replayed as a reset token), `Mailer::send` (this file).
 **Identification** — inherent impl block; marker `// md:impl MailKind`. Contains
 `fn as_str` (next section).
 
+**Code** — container: members documented as sub-blocks below: fn as_str.
+
 **What it does** — Wire-tag rendering only.
 
 **Dependencies** — `MailKind` (this file).
@@ -109,8 +117,16 @@ cannot be replayed as a reset token), `Mailer::send` (this file).
 
 **Identification** — method; marker `// md:impl MailKind > fn as_str`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn as_str(self) -> &'static str
+    // md:impl MailKind > fn as_str
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MailKind::VerifyEmail => "verify_email",
+            MailKind::PasswordReset => "password_reset",
+        }
+    }
 ```
 
 **What it does** — Renders the wire tag the webhook receives in `kind`:
@@ -132,7 +148,10 @@ stored flow tokens; treat the strings as frozen.
 
 **Identification** — struct; marker `// md:Mailer`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Mailer
 #[derive(Clone)]
 pub struct Mailer {
     webhook_url: Option<String>,
@@ -163,6 +182,8 @@ bearer.
 **Identification** — inherent impl block; marker `// md:impl Mailer`. Contains
 `fn new`, `fn enabled`, `fn send` (next sections).
 
+**Code** — container: members documented as sub-blocks below: fn new, fn enabled, fn send.
+
 **What it does** — Construction plus the two-method delivery API.
 
 **Dependencies** — `Mailer` (this file).
@@ -175,8 +196,17 @@ bearer.
 
 **Identification** — associated function; marker `// md:impl Mailer > fn new`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn new(webhook_url: Option<String>, webhook_token: Option<String>) -> Self
+    // md:impl Mailer > fn new
+    pub fn new(webhook_url: Option<String>, webhook_token: Option<String>) -> Self {
+        Self {
+            webhook_url,
+            webhook_token,
+            http: reqwest::Client::new(),
+        }
+    }
 ```
 
 **What it does** — Builds the mailer from configuration (`MAIL_WEBHOOK_URL`,
@@ -194,8 +224,13 @@ never re-reads the environment.
 
 **Identification** — method; marker `// md:impl Mailer > fn enabled`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn enabled(&self) -> bool
+    // md:impl Mailer > fn enabled
+    pub fn enabled(&self) -> bool {
+        self.webhook_url.is_some()
+    }
 ```
 
 **What it does** — Whether delivery is configured (`webhook_url.is_some()`). Flow
@@ -214,15 +249,37 @@ rule; this method is the gate that implements it.
 
 **Identification** — async method; marker `// md:impl Mailer > fn send`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub async fn send(
-    &self,
-    kind: MailKind,
-    to: &str,
-    display_name: &str,
-    token: &str,
-    expires_at: DateTime<Utc>,
-) -> Result<(), String>
+    // md:impl Mailer > fn send
+    pub async fn send(
+        &self,
+        kind: MailKind,
+        to: &str,
+        display_name: &str,
+        token: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let Some(url) = &self.webhook_url else {
+            return Err("mail webhook not configured".into());
+        };
+        let mut req = self.http.post(url).json(&serde_json::json!({
+            "kind": kind.as_str(),
+            "to": to,
+            "display_name": display_name,
+            "token": token,
+            "expires_at": expires_at,
+        }));
+        if let Some(bearer) = &self.webhook_token {
+            req = req.bearer_auth(bearer);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) => Err(format!("mail webhook answered {}", resp.status())),
+            Err(e) => Err(format!("mail webhook unreachable: {e}")),
+        }
+    }
 ```
 
 **What it does** — Delivers one flow message: POSTs the JSON payload
