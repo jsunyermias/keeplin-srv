@@ -1,7 +1,7 @@
 # `auth.rs` — passwords, tokens, and the auth middleware
 
-Self-contained companion for `crates/keeplin-srv/src/auth.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/auth.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `auth.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -73,7 +76,10 @@ surface, not just at mint time.
 
 **Identification** — struct; marker `// md:Claims`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: Uuid,
@@ -104,7 +110,10 @@ deliberately **insufficient** for acceptance — the device row must still exist
 
 **Identification** — struct; marker `// md:AuthedUser`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:AuthedUser
 #[derive(Debug, Clone)]
 pub struct AuthedUser {
     pub user_id: Uuid,
@@ -134,8 +143,18 @@ concurrency actor (vv components, relay cursor identity).
 
 **Identification** — public function; marker `// md:fn hash_password`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn hash_password(password: &str) -> Result<String, AppError>
+// md:fn hash_password
+pub fn hash_password(password: &str) -> Result<String, AppError> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| AppError::Internal(format!("password hash failed: {}", e)))?;
+    Ok(hash.to_string())
+}
 ```
 
 **What it does** — Hashes a password with Argon2id (library defaults) and a fresh
@@ -158,8 +177,16 @@ hashes.
 
 **Identification** — public function; marker `// md:fn verify_password`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError>
+// md:fn verify_password
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
+    let parsed = PasswordHash::new(hash)
+        .map_err(|e| AppError::Internal(format!("invalid password hash: {}", e)))?;
+    let argon2 = Argon2::default();
+    Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
+}
 ```
 
 **What it does** — Verifies a candidate password against a stored PHC hash string.
@@ -184,8 +211,18 @@ the account.
 
 **Identification** — public function; marker `// md:fn dummy_password_hash`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn dummy_password_hash() -> &'static str
+// md:fn dummy_password_hash
+pub fn dummy_password_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        hash_password("timing-equalizer-not-a-real-password")
+            .expect("hashing a fixed dummy password never fails")
+    })
+}
 ```
 
 **What it does** — Returns a valid Argon2 hash of a fixed dummy password, computed
@@ -209,14 +246,30 @@ kept non-revealing at the HTTP layer.
 
 **Identification** — public function; marker `// md:fn create_token`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn create_token
 pub fn create_token(
     user_id: Uuid,
     device_id: Uuid,
     email: &str,
     secret: &str,
     ttl_days: i64,
-) -> Result<String, jsonwebtoken::errors::Error>
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let claims = Claims {
+        sub: user_id,
+        device_id,
+        email: email.to_string(),
+        exp: (chrono::Utc::now() + chrono::Duration::days(ttl_days)).timestamp() as usize,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+}
 ```
 
 **What it does** — Mints an HS256 JWT: builds `Claims` with `exp = now + ttl_days`
@@ -240,8 +293,27 @@ request — deleting the device revokes the token immediately regardless of `exp
 
 **Identification** — public function; marker `// md:fn verify_token`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn verify_token(token: &str, secret: &str) -> Result<AuthedUser, AppError>
+// md:fn verify_token
+pub fn verify_token(token: &str, secret: &str) -> Result<AuthedUser, AppError> {
+    let token_data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|e| {
+        tracing::debug!(error = %e, "token verification failed");
+        AppError::InvalidToken
+    })?;
+
+    Ok(AuthedUser {
+        user_id: token_data.claims.sub,
+        device_id: token_data.claims.device_id,
+        email: token_data.claims.email,
+    })
+}
 ```
 
 **What it does** — Decodes and validates a JWT (signature + expiry, via
@@ -269,12 +341,31 @@ function DB-free is what lets the WebSocket handshakes share it.
 **Identification** — public async function (axum middleware); marker
 `// md:fn auth_mw`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn auth_mw
 pub async fn auth_mw(
     state: State<Arc<AppState>>,
     mut req: Request<Body>,
     next: Next,
-) -> Result<Response, AppError>
+) -> Result<Response, AppError> {
+    let State(state) = state;
+    let auth = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+    let token = auth
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .ok_or(AppError::MissingToken)?;
+    let user = verify_token(token, &state.config.jwt_secret)?;
+    match state.store.get_device(user.device_id).await? {
+        Some(device) if device.user_id == user.user_id => {}
+        _ => return Err(AppError::InvalidToken),
+    }
+    req.extensions_mut().insert(user);
+    Ok(next.run(req).await)
+}
 ```
 
 **What it does** — The guard on every protected REST route. Steps: (1) read the
@@ -307,6 +398,8 @@ re-assigned from crossing user boundaries.
 `// md:impl FromRequestParts for AuthedUser`. Contains `fn from_request_parts`
 (next section).
 
+**Code** — container: members documented as sub-blocks below: fn from_request_parts.
+
 **What it does** — Makes `AuthedUser` an axum extractor so protected handlers declare
 it as a plain parameter.
 
@@ -323,8 +416,17 @@ it as a plain parameter.
 **Identification** — trait method; marker
 `// md:impl FromRequestParts for AuthedUser > fn from_request_parts`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection>
+    // md:impl FromRequestParts for AuthedUser > fn from_request_parts
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthedUser>()
+            .cloned()
+            .ok_or(AppError::MissingToken)
+    }
 ```
 
 **What it does** — Pulls the `AuthedUser` that `auth_mw` inserted into request
