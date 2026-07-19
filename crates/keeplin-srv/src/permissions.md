@@ -20,7 +20,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use uuid::Uuid;
 
 use crate::{error::AppError, store::Note};
@@ -81,7 +84,10 @@ weaker than another.
 
 **Identification** — struct (newtype over `i32`); marker `// md:Capabilities`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities(i32);
 ```
@@ -108,6 +114,8 @@ to re-derive implications.
 **Identification** — inherent impl block; marker `// md:impl Capabilities`. Contains
 the bit constants and the constructors/accessors documented below.
 
+**Code** — container: members documented as sub-blocks below: fn from_bits, fn empty, fn all, fn normalized, fn bits, fn contains, can_* accessors.
+
 **What it does** — The five capability bits, `ALL`, constructors (`from_bits`,
 `empty`, `all`), the normaliser, and the `can_*` accessors.
 
@@ -133,6 +141,15 @@ Bit constants (associated consts, part of this block):
 **Identification** — associated function; marker
 `// md:impl Capabilities > fn from_bits`. `pub fn from_bits(bits: i32) -> Self`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn from_bits
+    pub fn from_bits(bits: i32) -> Self {
+        Self(bits & Self::ALL).normalized()
+    }
+```
+
 **What it does** — Builds from a raw bitmask: masks off unknown bits (`& ALL`), then
 expands implied bits (`normalized`). The only entry point for untrusted masks (share
 bodies from clients, rows from the database).
@@ -150,6 +167,15 @@ for clients sending newer masks; the surviving grant is still well-formed.
 **Identification** — associated function; marker
 `// md:impl Capabilities > fn empty`. `pub fn empty() -> Self` — no capabilities.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn empty
+    pub fn empty() -> Self {
+        Self(0)
+    }
+```
+
 **What it does / Dependencies / Used by** — the zero mask; used by `http.rs` when
 computing capability intersections/caps.
 
@@ -159,6 +185,15 @@ computing capability intersections/caps.
 
 **Identification** — associated function; marker `// md:impl Capabilities > fn all`.
 `pub fn all() -> Self` — the full set.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn all
+    pub fn all() -> Self {
+        Self(Self::ALL)
+    }
+```
 
 **What it does** — Every bit: what an owner holds, and what a `MANAGE` grant expands
 to.
@@ -175,6 +210,25 @@ delete/transfer (those live on `Access::is_owner`).
 
 **Identification** — private method; marker
 `// md:impl Capabilities > fn normalized`. `fn normalized(self) -> Self`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn normalized
+    fn normalized(self) -> Self {
+        let mut b = self.0;
+        if b & Self::MANAGE != 0 {
+            b |= Self::ALL;
+        }
+        if b & Self::SHARE_WRITE != 0 {
+            b |= Self::SHARE_READ | Self::WRITE;
+        }
+        if b & (Self::SHARE_READ | Self::WRITE) != 0 {
+            b |= Self::READ;
+        }
+        Self(b)
+    }
+```
 
 **What it does** — Expands implied bits so containment checks are a plain mask test:
 `MANAGE` ⊃ everything; `SHARE_WRITE` ⊃ `SHARE_READ` + `WRITE`; `SHARE_READ` or
@@ -193,6 +247,15 @@ place the hierarchy is encoded.
 **Identification** — method; marker `// md:impl Capabilities > fn bits`.
 `pub fn bits(self) -> i32` — the stored/serialised bitmask (already normalised).
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn bits
+    pub fn bits(self) -> i32 {
+        self.0
+    }
+```
+
 **What it does / Dependencies / Used by** — raw accessor for persistence and JSON;
 used by `http.rs` (responses, capping arithmetic) and `store.rs` (column values).
 
@@ -204,6 +267,15 @@ may mask-test without re-normalising.
 **Identification** — private method; marker
 `// md:impl Capabilities > fn contains`. `fn contains(self, bit: i32) -> bool`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > fn contains
+    fn contains(self, bit: i32) -> bool {
+        self.0 & bit == bit
+    }
+```
+
 **What it does** — `self.0 & bit == bit` — the single mask test backing every
 `can_*`.
 
@@ -211,17 +283,30 @@ may mask-test without re-normalising.
 
 **Repeated context** — none.
 
-### can_read / can_write / can_share_read / can_share_write / can_manage
+### can_* accessors
 
 **Identification** — five public methods; one marker for the group:
 `// md:impl Capabilities > can_* accessors`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn can_read(self) -> bool
-pub fn can_write(self) -> bool
-pub fn can_share_read(self) -> bool   // may see who it is shared with
-pub fn can_share_write(self) -> bool  // may grant/revoke shares (capped to own caps)
-pub fn can_manage(self) -> bool
+    // md:impl Capabilities > can_* accessors
+    pub fn can_read(self) -> bool {
+        self.contains(Self::READ)
+    }
+    pub fn can_write(self) -> bool {
+        self.contains(Self::WRITE)
+    }
+    pub fn can_share_read(self) -> bool {
+        self.contains(Self::SHARE_READ)
+    }
+    pub fn can_share_write(self) -> bool {
+        self.contains(Self::SHARE_WRITE)
+    }
+    pub fn can_manage(self) -> bool {
+        self.contains(Self::MANAGE)
+    }
 ```
 
 **What it does** — The capability queries callers use; each is one `contains` test
@@ -241,7 +326,10 @@ is tabulated in *Overview*; keep the two in sync when adding endpoints.
 
 **Identification** — struct; marker `// md:Access`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Access
 #[derive(Debug, Clone, Copy)]
 pub struct Access {
     pub caps: Capabilities,
@@ -271,6 +359,8 @@ endpoint. Conflating the two would let a `manage` grantee delete someone's note.
 **Identification** — inherent impl block; marker `// md:impl Access`. Constructors
 and forwarding accessors documented below.
 
+**Code** — container: members documented as sub-blocks below: fn owner, fn granted, accessors.
+
 **What it does** — Construction (`owner`, `granted`) plus capability forwarding and
 the owner-only checks.
 
@@ -285,6 +375,18 @@ the owner-only checks.
 **Identification** — associated function; marker `// md:impl Access > fn owner`.
 `pub fn owner() -> Self` — every capability, `is_owner: true`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Access > fn owner
+    pub fn owner() -> Self {
+        Self {
+            caps: Capabilities::all(),
+            is_owner: true,
+        }
+    }
+```
+
 **What it does / Dependencies / Used by** — the owner's access value; built by both
 resolvers when `user_id` matches the owner column.
 
@@ -297,23 +399,48 @@ powers `Capabilities::all()` alone does not grant.
 `// md:impl Access > fn granted`. `fn granted(caps: Capabilities) -> Self` —
 `is_owner: false`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Access > fn granted
+    fn granted(caps: Capabilities) -> Self {
+        Self {
+            caps,
+            is_owner: false,
+        }
+    }
+```
+
 **What it does / Dependencies / Used by** — wraps share-derived (or
 implicit-manage) capabilities; used only by the two resolvers.
 
 **Repeated context** — Private so no caller can fabricate an owner-less full-power
 `Access` except through resolution.
 
-### can_read / can_write / can_share_write / can_delete / can_transfer_ownership
+### accessors
 
 **Identification** — five public methods; one marker for the group:
 `// md:impl Access > accessors`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn can_read(self) -> bool            // → caps
-pub fn can_write(self) -> bool           // → caps
-pub fn can_share_write(self) -> bool     // → caps
-pub fn can_delete(self) -> bool          // is_owner only
-pub fn can_transfer_ownership(self) -> bool  // is_owner only
+    // md:impl Access > accessors
+    pub fn can_read(self) -> bool {
+        self.caps.can_read()
+    }
+    pub fn can_write(self) -> bool {
+        self.caps.can_write()
+    }
+    pub fn can_share_write(self) -> bool {
+        self.caps.can_share_write()
+    }
+    pub fn can_delete(self) -> bool {
+        self.is_owner
+    }
+    pub fn can_transfer_ownership(self) -> bool {
+        self.is_owner
+    }
 ```
 
 **What it does** — The first three forward to the capability mask; the last two are
@@ -335,12 +462,28 @@ tombstone write is owner-only.
 
 **Identification** — public async function; marker `// md:fn resolve_note_access`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn resolve_note_access
 pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
-) -> Result<Access, AppError>
+) -> Result<Access, AppError> {
+    if note.owner_id == user_id {
+        return Ok(Access::owner());
+    }
+    if let Some(nb) = note.notebook_id {
+        if store.notebook_owner(nb).await? == Some(user_id) {
+            return Ok(Access::granted(Capabilities::all()));
+        }
+    }
+    match store.get_share(note.id, user_id).await? {
+        Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
+        None => Err(AppError::Forbidden),
+    }
+}
 ```
 
 **What it does** — Resolves `user_id`'s `Access` to `note`, or `Forbidden` if they
@@ -375,12 +518,27 @@ computed live.
 **Identification** — public async function; marker
 `// md:fn resolve_notebook_access`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:fn resolve_notebook_access
 pub async fn resolve_notebook_access(
     store: &crate::store::Store,
     notebook_id: Uuid,
     user_id: Uuid,
-) -> Result<Access, AppError>
+) -> Result<Access, AppError> {
+    let owner = store
+        .notebook_owner(notebook_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if owner == user_id {
+        return Ok(Access::owner());
+    }
+    match store.get_notebook_share(notebook_id, user_id).await? {
+        Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
+        None => Err(AppError::Forbidden),
+    }
+}
 ```
 
 **What it does** — Resolves `user_id`'s `Access` to a notebook. Missing notebook →
@@ -406,6 +564,8 @@ copies onto child notes; changing them triggers the cascade in the same transact
 **Identification** — `#[cfg(test)]` unit-test module; marker `// md:mod tests`.
 Four tests, below.
 
+**Code** — container: members documented as sub-blocks below: fn higher_bits_imply_lower_ones, fn read_alone_implies_nothing_more, fn unknown_bits_are_masked_off, fn owner_has_every_capability.
+
 **What it does** — Pure unit tests of the bitset algebra (no database).
 
 **Dependencies** — `Capabilities` (aliased `C`).
@@ -419,6 +579,22 @@ Four tests, below.
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn higher_bits_imply_lower_ones`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn higher_bits_imply_lower_ones
+    #[test]
+    fn higher_bits_imply_lower_ones() {
+        assert!(C::from_bits(C::WRITE).can_read());
+        assert!(C::from_bits(C::SHARE_READ).can_read());
+        let sw = C::from_bits(C::SHARE_WRITE);
+        assert!(sw.can_share_read() && sw.can_write() && sw.can_read());
+        let m = C::from_bits(C::MANAGE);
+        assert!(m.can_read() && m.can_write() && m.can_share_read() && m.can_share_write());
+        assert_eq!(m.bits(), C::ALL);
+    }
+```
+
 **What it does** — write ⊃ read; share_read ⊃ read; share_write ⊃ share_read +
 write + read; manage ⊃ everything (`bits() == ALL`).
 
@@ -430,6 +606,18 @@ write + read; manage ⊃ everything (`bits() == ALL`).
 
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn read_alone_implies_nothing_more`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn read_alone_implies_nothing_more
+    #[test]
+    fn read_alone_implies_nothing_more() {
+        let r = C::from_bits(C::READ);
+        assert!(r.can_read());
+        assert!(!r.can_write() && !r.can_share_read() && !r.can_manage());
+    }
+```
 
 **What it does** — `READ` grants only read: no write, no share_read, no manage —
 the hierarchy points downward only.
@@ -443,6 +631,17 @@ the hierarchy points downward only.
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn unknown_bits_are_masked_off`.
 
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn unknown_bits_are_masked_off
+    #[test]
+    fn unknown_bits_are_masked_off() {
+        let c = C::from_bits(C::WRITE | 0x4000);
+        assert_eq!(c.bits(), C::WRITE | C::READ);
+    }
+```
+
 **What it does** — A bit outside `ALL` (0x4000) is dropped by `from_bits`, leaving
 the clean normalised set (`WRITE|READ`).
 
@@ -454,6 +653,16 @@ the clean normalised set (`WRITE|READ`).
 
 **Identification** — `#[test]`; marker
 `// md:mod tests > fn owner_has_every_capability`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn owner_has_every_capability
+    #[test]
+    fn owner_has_every_capability() {
+        assert_eq!(C::all().bits(), C::ALL);
+    }
+```
 
 **What it does** — `Capabilities::all().bits() == ALL`.
 
