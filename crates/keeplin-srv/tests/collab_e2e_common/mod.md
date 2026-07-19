@@ -1,15 +1,16 @@
 # `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
 
 Self-contained companion for `crates/keeplin-srv/tests/collab_e2e_common/mod.rs`. It
-documents **every code block of the source file, in source order** — a reader with only
+documents **every code block of the source file, in source order, with its complete code embedded** — a reader with only
 this file must be able to understand the harness without opening anything else, so
 project-wide conventions are deliberately re-explained here (hyper-redundancy is
 intended).
 
 **How to navigate**: every block carries exactly one marker comment
 `// md:<Header> > … > <Block header>` whose path is the header chain of its section
-here; grep it in either direction. Each section covers **Identification**,
-**What it does**, **Dependencies**, **Used by**, **Repeated context**.
+here; grep it in either direction. Each block section covers, in this fixed order:
+**Identification**, **Code**, **What it does**, **Dependencies**, **Used by**,
+**Repeated context**.
 
 ---
 
@@ -17,6 +18,28 @@ here; grep it in either direction. Each section covers **Identification**,
 
 **Identification** — file-level block: the `#![allow(dead_code)]` inner attribute and
 imports. Marker `// md:Overview`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:Overview
+#![allow(dead_code)]
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::Router;
+
+use keeplin_core::{
+    collab::{CollabBackend, CollabConfig},
+    storage::{db::DbBackend, NoteRepository, StorageBackend},
+};
+use keeplin_srv::{config::Config, http::router, state::AppState};
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use tokio::net::TcpListener;
+use uuid::Uuid;
+```
 
 **What it does** — Shared setup for the `collab_client_*_e2e` test binaries. Each e2e
 test lives in its **own** integration-test binary (cargo runs test binaries
@@ -44,6 +67,43 @@ second scenario in an existing binary (issue #51).
 
 **Identification** — pub fn; marker `// md:fn test_config`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn test_config
+pub fn test_config() -> Config {
+    Config {
+        port: 0,
+        database_url: String::new(),
+        jwt_secret: "test-secret".into(),
+        token_ttl_days: 1,
+        retention_days: 0,
+        lines_gc_days: 0,
+        resource_purge_days: 0,
+        db_max_connections: 5,
+        db_acquire_timeout_secs: 10,
+        db_idle_timeout_secs: 600,
+        db_max_lifetime_secs: 1800,
+        rate_limit_per_min: 0,
+        shutdown_grace_secs: 5,
+        log_json: false,
+        max_upload_bytes: 100 * 1024 * 1024,
+        max_note_body_bytes: 0,
+        max_user_storage_bytes: 0,
+        max_notes_per_user: 0,
+        registration_enabled: true,
+        at_rest_key: None,
+        mail_webhook_url: None,
+        mail_webhook_token: None,
+        email_token_ttl_secs: 3600,
+        email_verification_required: false,
+        login_max_failures: 0,
+        login_lockout_secs: 300,
+        history_since_access: false,
+    }
+}
+```
+
 **What it does** — The standard test `Config` literal: registration open, no
 quotas/rate limit/at-rest key/mail webhook/lockout, 5-connection pool, ephemeral
 port. Built literally (never `from_env`) so the environment cannot leak into test
@@ -60,6 +120,27 @@ omission loud).
 ## fn spawn_server
 
 **Identification** — pub async fn; marker `// md:fn spawn_server`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn spawn_server
+pub async fn spawn_server(pool: PgPool) -> SocketAddr {
+    let state = Arc::new(AppState::new(test_config(), pool));
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+```
 
 **What it does** — Boots the real router (`AppState::new(test_config(), pool)` →
 `router`) on an ephemeral loopback port, served with
@@ -82,6 +163,20 @@ the same pattern every suite uses — no Docker, no external server.
 **Dependencies** — `reqwest`, `serde_json`. **Used by** — all three e2e binaries.
 **Repeated context** — none.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn register
+pub async fn register(addr: SocketAddr, email: &str) {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": email, "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+}
+```
+
 ## fn login
 
 **Identification** — pub async fn; marker `// md:fn login`. POSTs `/api/login`
@@ -90,14 +185,56 @@ with a device name and returns the **device token** string. **Dependencies** —
 **Repeated context** — one login = one device = one token (device-as-actor); the
 e2e binaries create a second device by calling `login` again with another name.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn login
+pub async fn login(addr: SocketAddr, email: &str, device: &str) -> String {
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({ "email": email, "password": "password123", "device_name": device }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["token"].as_str().unwrap().to_string()
+}
+```
+
 ---
 
 ## fn collab_device
 
 **Identification** — pub async fn; marker `// md:fn collab_device`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<DbBackend>>
+// md:fn collab_device
+pub async fn collab_device(addr: SocketAddr, token: &str) -> Arc<CollabBackend<DbBackend>> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dev.db");
+    std::mem::forget(dir);
+    let db = DbBackend::new(path, &format!("ws://{addr}/api/sync"), token)
+        .await
+        .unwrap();
+    let collab = Arc::new(
+        CollabBackend::new(
+            db,
+            CollabConfig {
+                api_url: format!("http://{addr}"),
+                ws_url: format!("ws://{addr}/api/ws"),
+                token: token.to_string(),
+            },
+        )
+        .unwrap(),
+    );
+    let top: Arc<dyn StorageBackend> = collab.clone();
+    collab.start(top).await.expect("protocol handshake");
+    collab
+}
 ```
 
 **What it does** — Builds the **exact client stack the daemon mounts** in
@@ -123,6 +260,13 @@ fails loudly in CI.
 **Identification** — pub const; marker `// md:CONVERGE_TRIES`.
 `pub const CONVERGE_TRIES: usize = 300;`
 
+**Code** — complete and verbatim:
+
+```rust
+// md:CONVERGE_TRIES
+pub const CONVERGE_TRIES: usize = 300;
+```
+
 **What it does** — The convergence-poll bound (~30 s at 100 ms per try). Generous on
 purpose: these tests drive the *real* client (its own async connect/reconnect plus
 a second `/api/sync` connection), so convergence latency tracks database
@@ -141,6 +285,35 @@ work eliminated.
 
 **Identification** — pub async fn; marker `// md:fn wait_server_body`.
 
+**Code** — complete and verbatim:
+
+```rust
+// md:fn wait_server_body
+pub async fn wait_server_body(addr: SocketAddr, token: &str, note_id: Uuid, want: &str) {
+    let client = reqwest::Client::new();
+    let mut last = String::new();
+    for _ in 0..CONVERGE_TRIES {
+        if let Ok(resp) = client
+            .get(format!("http://{addr}/api/notes/{note_id}/export"))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<Value>().await {
+                    last = v["body"].as_str().unwrap_or_default().to_string();
+                    if last == want {
+                        return;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("server body never became {want:?}; last {last:?}");
+}
+```
+
 **What it does** — Polls `GET /api/notes/:id/export` (bearer token) until the
 materialised body equals `want`, tolerating the transient 404/empty window before
 the note's lines exist; panics with the last observed body after `CONVERGE_TRIES`.
@@ -156,6 +329,25 @@ with `\n`) — the strongest server-side convergence signal available over REST.
 ## fn wait_local_body
 
 **Identification** — pub async fn; marker `// md:fn wait_local_body`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn wait_local_body
+pub async fn wait_local_body(dev: &Arc<CollabBackend<DbBackend>>, note_id: Uuid, want: &str) {
+    let mut last = String::new();
+    for _ in 0..CONVERGE_TRIES {
+        if let Ok(note) = dev.read_note(note_id).await {
+            last = note.body.clone();
+            if last == want {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("local body never became {want:?}; last {last:?}");
+}
+```
 
 **What it does** — Polls a client's local `read_note(note_id).body` until it equals
 `want`; panics with the last observed value after `CONVERGE_TRIES`.
