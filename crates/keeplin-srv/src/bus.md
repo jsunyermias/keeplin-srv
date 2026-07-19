@@ -1,7 +1,7 @@
 # `bus.rs` — cross-instance coordination (issue #45)
 
-Self-contained companion for `crates/keeplin-srv/src/bus.rs`. It documents **every code
-block of the source file, in source order** — a reader with only this file must be able to
+Self-contained companion for `crates/keeplin-srv/src/bus.rs`. It documents **every code block of
+the source file, in source order, with its complete code embedded** — a reader with only this file must be able to
 understand `bus.rs` without opening anything else, so project-wide conventions are
 deliberately re-explained here (hyper-redundancy is intended).
 
@@ -19,7 +19,10 @@ doc → code. Each block section covers five fixed points: **Identification**,
 **Identification** — file-level block: the module's imports. Marker `// md:Overview` at
 the top of the file.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Overview
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,7 +86,10 @@ maintenance-loop sweep for rows a crashed instance left behind.
 **Identification** — logical section: the three channel-name constants; marker
 `// md:Channel constants`.
 
+**Code** — complete and verbatim:
+
 ```rust
+// md:Channel constants
 pub const CH_COLLAB_OP: &str = "collab_op";
 pub const CH_COLLAB_PRESENCE: &str = "collab_presence";
 pub const CH_SYNC_BATCH: &str = "sync_batch";
@@ -108,8 +114,20 @@ breaking cross-instance change.
 
 **Identification** — public function; marker `// md:fn spawn`.
 
+**Code** — complete and verbatim:
+
 ```rust
-pub fn spawn(state: Arc<AppState>)
+// md:fn spawn
+pub fn spawn(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = run(&state).await {
+                tracing::warn!(error = %e, "collab bus listener error; reconnecting");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    });
+}
 ```
 
 **What it does** — Spawns the singleton listener task for this process: an endless
@@ -133,8 +151,26 @@ not loss.
 
 **Identification** — private async function; marker `// md:fn run`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn run(state: &Arc<AppState>) -> anyhow::Result<()>
+// md:fn run
+async fn run(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let mut listener = PgListener::connect_with(state.store.pool()).await?;
+    listener
+        .listen_all([CH_COLLAB_OP, CH_COLLAB_PRESENCE, CH_SYNC_BATCH])
+        .await?;
+    tracing::info!(instance = %state.instance_id, "collab bus listening");
+    loop {
+        let notification = listener.recv().await?;
+        match notification.channel() {
+            CH_COLLAB_OP => handle_collab_op(state, notification.payload()).await,
+            CH_COLLAB_PRESENCE => handle_collab_presence(state, notification.payload()).await,
+            CH_SYNC_BATCH => handle_sync_batch(state, notification.payload()).await,
+            _ => {}
+        }
+    }
+}
 ```
 
 **What it does** — One listener session: connects a `PgListener` on the store's pool,
@@ -160,8 +196,26 @@ with request traffic for pool slots.
 
 **Identification** — private async function; marker `// md:fn handle_collab_op`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn handle_collab_op(state: &Arc<AppState>, payload: &str)
+// md:fn handle_collab_op
+async fn handle_collab_op(state: &Arc<AppState>, payload: &str) {
+    let Some((seq, origin)) = payload.split_once(':') else {
+        return;
+    };
+    let (Ok(seq), Ok(origin)) = (seq.parse::<i64>(), origin.parse::<Uuid>()) else {
+        return;
+    };
+    if origin == state.instance_id {
+        return;
+    }
+    match state.store.get_collab_event(seq).await {
+        Ok(Some(event)) => crate::collab::deliver_event(state, event).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, seq, "collab event load failed"),
+    }
+}
 ```
 
 **What it does** — Handles one `collab_op` notification, payload
@@ -194,8 +248,22 @@ nothing" correct.
 
 **Identification** — private async function; marker `// md:fn handle_collab_presence`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn handle_collab_presence(state: &Arc<AppState>, payload: &str)
+// md:fn handle_collab_presence
+async fn handle_collab_presence(state: &Arc<AppState>, payload: &str) {
+    let Some((note_id, origin)) = payload.split_once(':') else {
+        return;
+    };
+    let (Ok(note_id), Ok(origin)) = (note_id.parse::<Uuid>(), origin.parse::<Uuid>()) else {
+        return;
+    };
+    if origin == state.instance_id {
+        return;
+    }
+    crate::collab::deliver_presence(state, note_id).await;
+}
 ```
 
 **What it does** — Handles one `collab_presence` notification, payload
@@ -220,8 +288,22 @@ the table on every notification is both simple and self-healing.
 
 **Identification** — private async function; marker `// md:fn handle_sync_batch`.
 
+**Code** — complete and verbatim:
+
 ```rust
-async fn handle_sync_batch(state: &Arc<AppState>, payload: &str)
+// md:fn handle_sync_batch
+async fn handle_sync_batch(state: &Arc<AppState>, payload: &str) {
+    let Some((user, origin)) = payload.split_once(':') else {
+        return;
+    };
+    let (Ok(user_id), Ok(origin)) = (user.parse::<Uuid>(), origin.parse::<Uuid>()) else {
+        return;
+    };
+    if origin == state.instance_id {
+        return;
+    }
+    state.hub.wake_user(user_id).await;
+}
 ```
 
 **What it does** — Handles one `sync_batch` notification, payload
