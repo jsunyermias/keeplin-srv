@@ -398,10 +398,24 @@ re-assigned from crossing user boundaries.
 `// md:impl FromRequestParts for AuthedUser`. Contains `fn from_request_parts`
 (next section).
 
-**Code** — container: members documented as sub-blocks below: fn from_request_parts.
+**Code** — container (one member, `fn from_request_parts`, documented below). The impl
+header, `where` clause and the `Rejection` associated type are the container's own body
+— complete and verbatim:
+
+```rust
+// md:impl FromRequestParts for AuthedUser
+#[async_trait::async_trait]
+impl<S> FromRequestParts<S> for AuthedUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+```
 
 **What it does** — Makes `AuthedUser` an axum extractor so protected handlers declare
-it as a plain parameter.
+it as a plain parameter. The `Rejection = AppError` associated type means a failed
+extraction surfaces as the crate's standard error response; the `where S: Send + Sync`
+bound is what axum requires of any state type the extractor is generic over.
 
 **Dependencies** — `axum::extract::FromRequestParts` (external), `async_trait`
 (external), `AuthedUser` (this file).

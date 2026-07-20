@@ -9,6 +9,7 @@ pub struct Capabilities(i32);
 
 // md:impl Capabilities
 impl Capabilities {
+    // md:impl Capabilities > consts
     pub const READ: i32 = 1;
     pub const WRITE: i32 = 2;
     pub const SHARE_READ: i32 = 4;

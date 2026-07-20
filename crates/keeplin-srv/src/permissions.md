@@ -114,12 +114,43 @@ to re-derive implications.
 **Identification** — inherent impl block; marker `// md:impl Capabilities`. Contains
 the bit constants and the constructors/accessors documented below.
 
-**Code** — container: members documented as sub-blocks below: fn from_bits, fn empty, fn all, fn normalized, fn bits, fn contains, can_* accessors.
+**Code** — container: members documented as sub-blocks below: consts, fn from_bits, fn empty, fn all, fn normalized, fn bits, fn contains, can_* accessors.
 
-**What it does** — The five capability bits, `ALL`, constructors (`from_bits`,
-`empty`, `all`), the normaliser, and the `can_*` accessors.
+**What it does** — The capability bit constants (their own `consts` sub-block below),
+the constructors (`from_bits`, `empty`, `all`), the normaliser, and the `can_*`
+accessors.
 
-Bit constants (associated consts, part of this block):
+**Dependencies** — `Capabilities` (this file).
+
+**Used by** — see the method subsections.
+
+**Repeated context** — none beyond the methods' own (below).
+
+### consts
+
+**Identification** — the associated bit constants of `impl Capabilities`
+(`READ`/`WRITE`/`SHARE_READ`/`SHARE_WRITE`/`MANAGE`/`ALL`); marker
+`// md:impl Capabilities > consts`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Capabilities > consts
+    pub const READ: i32 = 1;
+    pub const WRITE: i32 = 2;
+    pub const SHARE_READ: i32 = 4;
+    pub const SHARE_WRITE: i32 = 8;
+    pub const MANAGE: i32 = 16;
+    pub const ALL: i32 =
+        Self::READ | Self::WRITE | Self::SHARE_READ | Self::SHARE_WRITE | Self::MANAGE;
+```
+
+**What it does** — The five capability bits and their union `ALL`. Each named const is
+a distinct power-of-two bit; the "implies" relationships in the table are materialised
+by `normalized`, **not** by the raw values here (a raw const is just its own bit —
+`WRITE == 2`, never `3`). `ALL` is defined as the OR of the five bits (`31`), so
+appending a future bit to the list extends `ALL` automatically. Bit constants
+(associated consts, part of this block):
 
 | Const | Value | Implies | Meaning |
 |-------|:-:|---------|---------|
@@ -130,11 +161,17 @@ Bit constants (associated consts, part of this block):
 | `MANAGE` | 16 | everything | full control short of ownership |
 | `ALL` | 31 | — | every bit; what an owner or a `MANAGE` grant expands to |
 
-**Dependencies** — `Capabilities` (this file).
+**Dependencies** — none (plain `i32` associated consts). `ALL` references the other
+five consts; expects each to stay a distinct single bit so their OR is the full mask.
 
-**Used by** — see the method subsections.
+**Used by** — `from_bits` (`& Self::ALL` masks unknown bits), `all` (returns
+`Self(ALL)`), `normalized` (tests the `SHARE_WRITE`/`SHARE_READ`/`WRITE` bits);
+`http.rs` (share-grant capping) and `store.rs` (persisted bitmasks). Fase 3.5 will
+add `FULL_CONTROL` here.
 
-**Repeated context** — none beyond the methods' own (below).
+**Repeated context** — Capability bit values are a wire/storage compatibility
+surface: `store.rs` persists them in share rows, so a value must never be renumbered —
+only new bits appended (and folded into `ALL`).
 
 ### fn from_bits
 
@@ -714,23 +751,24 @@ points) and carrying its marker in the code:
 |---|----------------------|----------------|-----------------------|
 | 1 | imports (`use …`) | `// md:Overview` | Overview |
 | 2 | `struct Capabilities` | `// md:Capabilities` | Capabilities |
-| 3 | `impl Capabilities` (incl. bit consts) | `// md:impl Capabilities` | impl Capabilities |
-| 4 | `fn from_bits` | `// md:impl Capabilities > fn from_bits` | impl Capabilities › fn from_bits |
-| 5 | `fn empty` | `// md:impl Capabilities > fn empty` | impl Capabilities › fn empty |
-| 6 | `fn all` | `// md:impl Capabilities > fn all` | impl Capabilities › fn all |
-| 7 | `fn normalized` | `// md:impl Capabilities > fn normalized` | impl Capabilities › fn normalized |
-| 8 | `fn bits` | `// md:impl Capabilities > fn bits` | impl Capabilities › fn bits |
-| 9 | `fn contains` | `// md:impl Capabilities > fn contains` | impl Capabilities › fn contains |
-| 10 | `can_read`…`can_manage` (5 fns) | `// md:impl Capabilities > can_* accessors` | impl Capabilities › can_read / … / can_manage |
-| 11 | `struct Access` | `// md:Access` | Access |
-| 12 | `impl Access` | `// md:impl Access` | impl Access |
-| 13 | `fn owner` | `// md:impl Access > fn owner` | impl Access › fn owner |
-| 14 | `fn granted` | `// md:impl Access > fn granted` | impl Access › fn granted |
-| 15 | `can_read`…`can_transfer_ownership` (5 fns) | `// md:impl Access > accessors` | impl Access › accessors |
-| 16 | `fn resolve_note_access` | `// md:fn resolve_note_access` | fn resolve_note_access |
-| 17 | `fn resolve_notebook_access` | `// md:fn resolve_notebook_access` | fn resolve_notebook_access |
-| 18 | `mod tests` | `// md:mod tests` | mod tests |
-| 19 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
-| 20 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
-| 21 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
-| 22 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |
+| 3 | `impl Capabilities` | `// md:impl Capabilities` | impl Capabilities |
+| 4 | `consts` (bit constants) | `// md:impl Capabilities > consts` | impl Capabilities › consts |
+| 5 | `fn from_bits` | `// md:impl Capabilities > fn from_bits` | impl Capabilities › fn from_bits |
+| 6 | `fn empty` | `// md:impl Capabilities > fn empty` | impl Capabilities › fn empty |
+| 7 | `fn all` | `// md:impl Capabilities > fn all` | impl Capabilities › fn all |
+| 8 | `fn normalized` | `// md:impl Capabilities > fn normalized` | impl Capabilities › fn normalized |
+| 9 | `fn bits` | `// md:impl Capabilities > fn bits` | impl Capabilities › fn bits |
+| 10 | `fn contains` | `// md:impl Capabilities > fn contains` | impl Capabilities › fn contains |
+| 11 | `can_read`…`can_manage` (5 fns) | `// md:impl Capabilities > can_* accessors` | impl Capabilities › can_read / … / can_manage |
+| 12 | `struct Access` | `// md:Access` | Access |
+| 13 | `impl Access` | `// md:impl Access` | impl Access |
+| 14 | `fn owner` | `// md:impl Access > fn owner` | impl Access › fn owner |
+| 15 | `fn granted` | `// md:impl Access > fn granted` | impl Access › fn granted |
+| 16 | `can_read`…`can_transfer_ownership` (5 fns) | `// md:impl Access > accessors` | impl Access › accessors |
+| 17 | `fn resolve_note_access` | `// md:fn resolve_note_access` | fn resolve_note_access |
+| 18 | `fn resolve_notebook_access` | `// md:fn resolve_notebook_access` | fn resolve_notebook_access |
+| 19 | `mod tests` | `// md:mod tests` | mod tests |
+| 20 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
+| 21 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
+| 22 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
+| 23 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |
