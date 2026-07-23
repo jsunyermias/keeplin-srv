@@ -240,6 +240,7 @@ pub struct Tag {
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ResourceMeta {
     pub id: Uuid,
+    pub note_id: Uuid,
     pub title: String,
     pub mime_type: String,
     pub file_name: String,
@@ -962,14 +963,19 @@ impl Store {
 
     // md:impl Store > fn soft_delete_note
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let mut tx = self.pool.begin().await?;
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
                RETURNING {NOTE_COLS}"#
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        if let Some(deleted_at) = note.as_ref().and_then(|n| n.deleted_at) {
+            Self::cascade_resources_note_deleted(&mut *tx, id, deleted_at).await?;
+        }
+        tx.commit().await?;
         self.decrypt_note_title(note)
     }
 
@@ -1883,8 +1889,8 @@ impl Store {
         }
         sqlx::query(
             r#"INSERT INTO resources
-                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, mime_type = EXCLUDED.mime_type,
                    file_name = EXCLUDED.file_name, size = EXCLUDED.size,
@@ -1905,6 +1911,7 @@ impl Store {
         .bind(r.duration_ms.map(|d| d as i64))
         .bind(r.dimensions.map(|(w, _)| w as i32))
         .bind(r.dimensions.map(|(_, h)| h as i32))
+        .bind(r.note_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2047,7 +2054,7 @@ impl Store {
     ) -> Result<Vec<ResourceMeta>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, ResourceMeta>(
-            "SELECT id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
+            "SELECT id, note_id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
              FROM resources
              WHERE user_id = $1 AND deleted_at IS NULL
                AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
@@ -2060,6 +2067,70 @@ impl Store {
         .bind(cur_id)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    // md:impl Store > fn list_resources_for_note
+    pub async fn list_resources_for_note(
+        &self,
+        user_id: Uuid,
+        note_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<ResourceMeta>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
+        Ok(sqlx::query_as::<_, ResourceMeta>(
+            "SELECT id, note_id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
+             FROM resources
+             WHERE user_id = $1 AND note_id = $5 AND deleted_at IS NULL
+               AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
+             ORDER BY created_at, id
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    // md:impl Store > fn cascade_resources_note_deleted
+    pub async fn cascade_resources_note_deleted<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<u64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            "UPDATE resources SET deleted_at = $2 WHERE note_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .bind(deleted_at)
+        .execute(exec)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    // md:impl Store > fn cascade_resources_note_restored
+    pub async fn cascade_resources_note_restored<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<u64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            "UPDATE resources SET deleted_at = NULL WHERE note_id = $1 AND deleted_at = $2",
+        )
+        .bind(note_id)
+        .bind(deleted_at)
+        .execute(exec)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     // md:impl Store > fn list_note_tag_ids

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use keeplin_core::{
-    models::Resource,
+    models::{Resource, SYSTEM_RESOURCE_NOTE_ID},
     storage::{db::DbBackend, ResourceRepository, SyncBackend},
 };
 use keeplin_srv::{config::Config, http::router, state::AppState};
@@ -263,7 +263,13 @@ before `PUT`ting bytes.
 async fn seed_resource(dev: &DbBackend) -> Uuid {
     let resource = dev
         .create_resource(
-            Resource::new("f", "application/octet-stream", "f.bin", 0),
+            Resource::new(
+                SYSTEM_RESOURCE_NOTE_ID,
+                "f",
+                "application/octet-stream",
+                "f.bin",
+                0,
+            ),
             vec![],
         )
         .await

@@ -1536,6 +1536,29 @@ and context as `list_notebooks`.
 
 ---
 
+## ResourceListFilter
+
+**Identification** — query struct; marker `// md:ResourceListFilter`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:ResourceListFilter
+#[derive(Debug, Deserialize)]
+struct ResourceListFilter {
+    #[serde(default)]
+    note_id: Option<Uuid>,
+}
+```
+
+**What it does** — the optional `?note_id=<uuid>` filter for `GET /api/resources`, extracted as
+a second `Query` alongside the shared `ListQuery` (which is left untouched). `serde_urlencoded`
+ignores fields it doesn't know, so the two query structs coexist.
+
+**Dependencies** — `serde` derive. **Used by** — `list_resources`.
+
+---
+
 ## fn list_resources
 
 **Identification** — handler; marker `// md:fn list_resources`.
@@ -1548,12 +1571,23 @@ async fn list_resources(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
     Query(q): Query<ListQuery>,
+    Query(f): Query<ResourceListFilter>,
 ) -> Result<Response, AppError> {
     let (limit, cursor) = q.resolve()?;
-    let items = state
-        .store
-        .list_resources(user.user_id, limit, cursor)
-        .await?;
+    let items = match f.note_id {
+        Some(note_id) => {
+            state
+                .store
+                .list_resources_for_note(user.user_id, note_id, limit, cursor)
+                .await?
+        }
+        None => {
+            state
+                .store
+                .list_resources(user.user_id, limit, cursor)
+                .await?
+        }
+    };
     Ok(paginated(items, limit, |r| {
         PageCursor::new(r.created_at, r.id)
     }))
@@ -1561,9 +1595,12 @@ async fn list_resources(
 ```
 
 **What it does** — `GET /api/resources`: the caller's live resource **metadata**,
-paginated; binaries are fetched separately via `GET /api/resources/:id/data`.
+paginated; binaries are fetched separately via `GET /api/resources/:id/data`. With
+`?note_id=<uuid>` (issue #125) it returns just that note's attachments via
+`list_resources_for_note`; without it, all of the user's resources.
 
-**Dependencies** — `Store::list_resources`. **Used by** — routed in `router`.
+**Dependencies** — `Store::list_resources`, `Store::list_resources_for_note`. **Used by** —
+routed in `router`.
 
 **Repeated context** — as `list_notebooks`; blob/metadata split is issue #24's
 storage model (metadata tombstones persist; bytes are purgeable).
@@ -3118,42 +3155,43 @@ and carrying its marker in the code:
 | 41 | `fn reset_confirm` | `// md:fn reset_confirm` |
 | 42 | `fn list_notebooks` | `// md:fn list_notebooks` |
 | 43 | `fn list_tags` | `// md:fn list_tags` |
-| 44 | `fn list_resources` | `// md:fn list_resources` |
-| 45 | `fn list_note_tags` | `// md:fn list_note_tags` |
-| 46 | `fn get_resource_data` | `// md:fn get_resource_data` |
-| 47 | `fn put_resource_data` | `// md:fn put_resource_data` |
-| 48 | `fn materialize_body` | `// md:fn materialize_body` |
-| 49 | `struct NoteResponse` | `// md:NoteResponse` |
-| 50 | `struct CreateNoteBody` | `// md:CreateNoteBody` |
-| 51 | `fn default_title` | `// md:fn default_title` |
-| 52 | `fn create_note` | `// md:fn create_note` |
-| 53 | `fn list_notes` | `// md:fn list_notes` |
-| 54 | `fn get_note` | `// md:fn get_note` |
-| 55 | `fn present` | `// md:fn present` |
-| 56 | `struct UpdateNoteBody` | `// md:UpdateNoteBody` |
-| 57 | `fn update_note` | `// md:fn update_note` |
-| 58 | `fn delete_note` | `// md:fn delete_note` |
-| 59 | `struct CreateShareBody` | `// md:CreateShareBody` |
-| 60 | `fn create_share` | `// md:fn create_share` |
-| 61 | `fn list_shares` | `// md:fn list_shares` |
-| 62 | `fn delete_share` | `// md:fn delete_share` |
-| 63 | `struct TransferBody` | `// md:TransferBody` |
-| 64 | `fn transfer_ownership` | `// md:fn transfer_ownership` |
-| 65 | `fn resolve_target` | `// md:fn resolve_target` |
-| 66 | `fn create_notebook_share` | `// md:fn create_notebook_share` |
-| 67 | `fn list_notebook_shares` | `// md:fn list_notebook_shares` |
-| 68 | `fn delete_notebook_share` | `// md:fn delete_notebook_share` |
-| 69 | `fn transfer_notebook` | `// md:fn transfer_notebook` |
-| 70 | `struct HistoryQuery` | `// md:HistoryQuery` |
-| 71 | `HISTORY_DEFAULT_LIMIT` / `HISTORY_MAX_LIMIT` | `// md:History limits` |
-| 72 | `fn history_versions` | `// md:fn history_versions` |
-| 73 | `fn access_cutoff` | `// md:fn access_cutoff` |
-| 74 | `fn note_history` | `// md:fn note_history` |
-| 75 | `fn notebook_history` | `// md:fn notebook_history` |
-| 76 | `struct ImportBody` | `// md:ImportBody` |
-| 77 | `struct ImportResponse` | `// md:ImportResponse` |
-| 78 | `fn import_note` | `// md:fn import_note` |
-| 79 | `struct ExportResponse` | `// md:ExportResponse` |
-| 80 | `fn export_note` | `// md:fn export_note` |
-| 81 | `mod tests` | `// md:mod tests` |
-| 82 | `fn protocol_compatibility_is_exact_match` | `// md:mod tests > fn protocol_compatibility_is_exact_match` |
+| 44 | `ResourceListFilter` | `// md:ResourceListFilter` |
+| 45 | `fn list_resources` | `// md:fn list_resources` |
+| 46 | `fn list_note_tags` | `// md:fn list_note_tags` |
+| 47 | `fn get_resource_data` | `// md:fn get_resource_data` |
+| 48 | `fn put_resource_data` | `// md:fn put_resource_data` |
+| 49 | `fn materialize_body` | `// md:fn materialize_body` |
+| 50 | `struct NoteResponse` | `// md:NoteResponse` |
+| 51 | `struct CreateNoteBody` | `// md:CreateNoteBody` |
+| 52 | `fn default_title` | `// md:fn default_title` |
+| 53 | `fn create_note` | `// md:fn create_note` |
+| 54 | `fn list_notes` | `// md:fn list_notes` |
+| 55 | `fn get_note` | `// md:fn get_note` |
+| 56 | `fn present` | `// md:fn present` |
+| 57 | `struct UpdateNoteBody` | `// md:UpdateNoteBody` |
+| 58 | `fn update_note` | `// md:fn update_note` |
+| 59 | `fn delete_note` | `// md:fn delete_note` |
+| 60 | `struct CreateShareBody` | `// md:CreateShareBody` |
+| 61 | `fn create_share` | `// md:fn create_share` |
+| 62 | `fn list_shares` | `// md:fn list_shares` |
+| 63 | `fn delete_share` | `// md:fn delete_share` |
+| 64 | `struct TransferBody` | `// md:TransferBody` |
+| 65 | `fn transfer_ownership` | `// md:fn transfer_ownership` |
+| 66 | `fn resolve_target` | `// md:fn resolve_target` |
+| 67 | `fn create_notebook_share` | `// md:fn create_notebook_share` |
+| 68 | `fn list_notebook_shares` | `// md:fn list_notebook_shares` |
+| 69 | `fn delete_notebook_share` | `// md:fn delete_notebook_share` |
+| 70 | `fn transfer_notebook` | `// md:fn transfer_notebook` |
+| 71 | `struct HistoryQuery` | `// md:HistoryQuery` |
+| 72 | `HISTORY_DEFAULT_LIMIT` / `HISTORY_MAX_LIMIT` | `// md:History limits` |
+| 73 | `fn history_versions` | `// md:fn history_versions` |
+| 74 | `fn access_cutoff` | `// md:fn access_cutoff` |
+| 75 | `fn note_history` | `// md:fn note_history` |
+| 76 | `fn notebook_history` | `// md:fn notebook_history` |
+| 77 | `struct ImportBody` | `// md:ImportBody` |
+| 78 | `struct ImportResponse` | `// md:ImportResponse` |
+| 79 | `fn import_note` | `// md:fn import_note` |
+| 80 | `struct ExportResponse` | `// md:ExportResponse` |
+| 81 | `fn export_note` | `// md:fn export_note` |
+| 82 | `mod tests` | `// md:mod tests` |
+| 83 | `fn protocol_compatibility_is_exact_match` | `// md:mod tests > fn protocol_compatibility_is_exact_match` |

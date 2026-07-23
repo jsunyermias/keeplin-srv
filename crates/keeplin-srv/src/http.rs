@@ -656,17 +656,35 @@ async fn list_tags(
     }))
 }
 
+// md:ResourceListFilter
+#[derive(Debug, Deserialize)]
+struct ResourceListFilter {
+    #[serde(default)]
+    note_id: Option<Uuid>,
+}
+
 // md:fn list_resources
 async fn list_resources(
     State(state): State<Arc<AppState>>,
     user: AuthedUser,
     Query(q): Query<ListQuery>,
+    Query(f): Query<ResourceListFilter>,
 ) -> Result<Response, AppError> {
     let (limit, cursor) = q.resolve()?;
-    let items = state
-        .store
-        .list_resources(user.user_id, limit, cursor)
-        .await?;
+    let items = match f.note_id {
+        Some(note_id) => {
+            state
+                .store
+                .list_resources_for_note(user.user_id, note_id, limit, cursor)
+                .await?
+        }
+        None => {
+            state
+                .store
+                .list_resources(user.user_id, limit, cursor)
+                .await?
+        }
+    };
     Ok(paginated(items, limit, |r| {
         PageCursor::new(r.created_at, r.id)
     }))

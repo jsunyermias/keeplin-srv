@@ -3,7 +3,11 @@
 mod common;
 
 use common::*;
-use keeplin_core::{models::Resource, storage::ResourceRepository, storage::SyncBackend};
+use keeplin_core::{
+    models::{Resource, SYSTEM_RESOURCE_NOTE_ID},
+    storage::ResourceRepository,
+    storage::SyncBackend,
+};
 use sqlx::{PgPool, Row};
 
 // md:fn resource_blob_travels_out_of_band_through_the_real_client
@@ -15,7 +19,13 @@ async fn resource_blob_travels_out_of_band_through_the_real_client(pool: PgPool)
     let a = collab_device(addr, &token_a).await;
 
     let bytes: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-    let meta = Resource::new("photo", "image/png", "photo.png", bytes.len() as u64);
+    let meta = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "photo",
+        "image/png",
+        "photo.png",
+        bytes.len() as u64,
+    );
     let created = a.create_resource(meta, bytes.clone()).await.unwrap();
 
     let client = reqwest::Client::new();

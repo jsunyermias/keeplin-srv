@@ -662,6 +662,7 @@ as served over REST; excludes the binary payload — fetched separately from
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ResourceMeta {
     pub id: Uuid,
+    pub note_id: Uuid,
     pub title: String,
     pub mime_type: String,
     pub file_name: String,
@@ -673,6 +674,9 @@ pub struct ResourceMeta {
     pub height: Option<i32>,
 }
 ```
+
+`note_id` (issue #125) is the owning note; it is plaintext (like every id) so the server can
+filter attachments by note without decrypting anything, and immutable after insert.
 
 `duration_ms`/`width`/`height` (issue #129) are the plaintext media metadata mirrored from
 `keeplin-core`'s `Resource.duration_ms`/`Resource.dimensions`: the server stores and returns
@@ -2022,19 +2026,27 @@ pub struct Store {
 ```rust
     // md:impl Store > fn soft_delete_note
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let mut tx = self.pool.begin().await?;
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
                RETURNING {NOTE_COLS}"#
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        if let Some(deleted_at) = note.as_ref().and_then(|n| n.deleted_at) {
+            Self::cascade_resources_note_deleted(&mut *tx, id, deleted_at).await?;
+        }
+        tx.commit().await?;
         self.decrypt_note_title(note)
     }
 ```
 
-**What it does** — tombstone (sets `deleted_at`, bumps `updated_at`).
+**What it does** — tombstone (sets `deleted_at`, bumps `updated_at`). **Delete cascade (issue
+#125, D5):** in the same transaction, if a live note was tombstoned, every live attachment of
+that note is stamped with the note's `deleted_at` via `cascade_resources_note_deleted` — this is
+the server-side hook where the note delete is applied.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3650,8 +3662,8 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         }
         sqlx::query(
             r#"INSERT INTO resources
-                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, mime_type = EXCLUDED.mime_type,
                    file_name = EXCLUDED.file_name, size = EXCLUDED.size,
@@ -3672,6 +3684,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         .bind(r.duration_ms.map(|d| d as i64))
         .bind(r.dimensions.map(|(w, _)| w as i32))
         .bind(r.dimensions.map(|(_, h)| h as i32))
+        .bind(r.note_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3679,7 +3692,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     }
 ```
 
-**What it does** — create if it wins; resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately.
+**What it does** — create if it wins; resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately. `note_id` (issue #125) is written **only in the `INSERT`** and deliberately left out of the `ON CONFLICT DO UPDATE` set, so an attachment's owning note is **immutable** after creation.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3926,7 +3939,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     ) -> Result<Vec<ResourceMeta>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, ResourceMeta>(
-            "SELECT id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
+            "SELECT id, note_id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
              FROM resources
              WHERE user_id = $1 AND deleted_at IS NULL
                AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
@@ -3942,13 +3955,141 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     }
 ```
 
-**What it does** — the user's live rows, keyset-paginated on `(created_at, id)`.
+**What it does** — the user's live rows, keyset-paginated on `(created_at, id)`. The `SELECT`
+now carries `note_id` (issue #125) so `ResourceMeta` reports each attachment's owning note.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn list_resources_for_note
+
+**Identification** — method of `impl Store`; marker `// md:impl Store > fn list_resources_for_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn list_resources_for_note
+    pub async fn list_resources_for_note(
+        &self,
+        user_id: Uuid,
+        note_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<ResourceMeta>, AppError> {
+        let (cur_ts, cur_id) = split_cursor(cursor);
+        Ok(sqlx::query_as::<_, ResourceMeta>(
+            "SELECT id, note_id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
+             FROM resources
+             WHERE user_id = $1 AND note_id = $5 AND deleted_at IS NULL
+               AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
+             ORDER BY created_at, id
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit.unwrap_or(i64::MAX))
+        .bind(cur_ts)
+        .bind(cur_id)
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+```
+
+**What it does** — the same keyset-paginated listing filtered to one note (`note_id = $5`),
+backed by the `idx_resources_note (user_id, note_id)` index from migration `0016`. A user-note
+query never matches `SYSTEM_RESOURCE_NOTE_ID`, so system resources stay out of per-note listings.
+
+**Dependencies** — `sqlx` query on `self.pool` against the Postgres schema; expects the
+`note_id` column and its index from `migrations/0016_resource_note_id.sql`.
+
+**Used by** — `http.rs` `list_resources` when the `note_id` query parameter is present.
+
+**Repeated context** — keyset pagination on `(created_at, id)`; per-note listings exclude the
+system sentinel.
+
+### fn cascade_resources_note_deleted
+
+**Identification** — associated fn of `impl Store`; marker `// md:impl Store > fn cascade_resources_note_deleted`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn cascade_resources_note_deleted
+    pub async fn cascade_resources_note_deleted<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<u64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            "UPDATE resources SET deleted_at = $2 WHERE note_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .bind(deleted_at)
+        .execute(exec)
+        .await?;
+        Ok(result.rows_affected())
+    }
+```
+
+**What it does** — the server-side delete cascade (issue #125, D5): stamps every live resource
+of `note_id` with the note's `deleted_at`. Takes an `Executor` so the caller runs it inside the
+note-delete transaction (`soft_delete_note`), keeping the note tombstone and the attachment
+stamps atomic. Returns the number of attachments stamped.
+
+**Dependencies** — `sqlx::Executor` — the passed connection or transaction; expects the caller
+to supply the note's tombstone ts so a later restore can match on it.
+
+**Used by** — `soft_delete_note`.
+
+**Repeated context** — the cascade is hooked where the server *applies* the note delete
+(`store.rs`), not in `sync.rs::materialize` (which deliberately skips `Change::Note*`).
+
+### fn cascade_resources_note_restored
+
+**Identification** — associated fn of `impl Store`; marker `// md:impl Store > fn cascade_resources_note_restored`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn cascade_resources_note_restored
+    pub async fn cascade_resources_note_restored<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<u64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            "UPDATE resources SET deleted_at = NULL WHERE note_id = $1 AND deleted_at = $2",
+        )
+        .bind(note_id)
+        .bind(deleted_at)
+        .execute(exec)
+        .await?;
+        Ok(result.rows_affected())
+    }
+```
+
+**What it does** — the symmetric restore cascade: revives only the attachments a note dragged
+down, matching on `deleted_at = $2` (the note's prior tombstone ts) so a directly-deleted
+attachment with its own ts is left tombstoned. Provided for symmetry and future use — the
+current server REST surface soft-deletes notes but has no note-restore endpoint, so this has no
+production caller yet; it is exercised by the store tests and ready for a restore path.
+
+**Dependencies** — `sqlx::Executor` — connection or transaction; expects the caller to pass the
+exact prior tombstone ts.
+
+**Used by** — store tests (no production caller yet).
+
+**Repeated context** — matches the keeplin-core cascade semantics (un-stamp only the dragged
+attachments).
 
 ### fn list_note_tag_ids
 
@@ -4304,8 +4445,11 @@ refresh with `graphify update .` after refactors.
 | 118 | `fn list_notebooks` | `// md:impl Store > fn list_notebooks` |
 | 119 | `fn list_tags` | `// md:impl Store > fn list_tags` |
 | 120 | `fn list_resources` | `// md:impl Store > fn list_resources` |
-| 121 | `fn list_note_tag_ids` | `// md:impl Store > fn list_note_tag_ids` |
-| 122 | `fn user_blob_bytes_excluding` | `// md:impl Store > fn user_blob_bytes_excluding` |
-| 123 | `fn count_live_notes_for_user` | `// md:impl Store > fn count_live_notes_for_user` |
-| 124 | `fn replace_note_shares_from_notebook_tx` | `// md:fn replace_note_shares_from_notebook_tx` |
-| 125 | `fn cascade_notebook_to_notes_tx` | `// md:fn cascade_notebook_to_notes_tx` |
+| 121 | `fn list_resources_for_note` | `// md:impl Store > fn list_resources_for_note` |
+| 122 | `fn cascade_resources_note_deleted` | `// md:impl Store > fn cascade_resources_note_deleted` |
+| 123 | `fn cascade_resources_note_restored` | `// md:impl Store > fn cascade_resources_note_restored` |
+| 124 | `fn list_note_tag_ids` | `// md:impl Store > fn list_note_tag_ids` |
+| 125 | `fn user_blob_bytes_excluding` | `// md:impl Store > fn user_blob_bytes_excluding` |
+| 126 | `fn count_live_notes_for_user` | `// md:impl Store > fn count_live_notes_for_user` |
+| 127 | `fn replace_note_shares_from_notebook_tx` | `// md:fn replace_note_shares_from_notebook_tx` |
+| 128 | `fn cascade_notebook_to_notes_tx` | `// md:fn cascade_notebook_to_notes_tx` |

@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-23)
 
 ## Corpus Check
-- 107 files · ~153,062 words
+- 109 files · ~155,303 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1644 nodes · 3507 edges · 82 communities (77 shown, 5 thin omitted)
+- 1660 nodes · 3547 edges · 83 communities (78 shown, 5 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `da204c1c`
+- Built from commit: `5d2c2fc8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -91,6 +91,7 @@
 - `{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}
 - 0004_domain_entities.sql
 - `0015_resource_media_meta.sql` — plaintext media metadata on resources
+- `0016_resource_note_id.sql` — owning note on resources
 - `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 - `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
 - `scripts/check-docs.sh` — contractual-docs CI check
@@ -98,10 +99,10 @@
 - check-docs.sh
 
 ## God Nodes (most connected - your core abstractions)
-1. `AppError` - 157 edges
-2. `Store` - 98 edges
-3. `impl Store` - 92 edges
-4. ``http.rs` — the REST router and handlers` - 83 edges
+1. `AppError` - 160 edges
+2. `Store` - 101 edges
+3. `impl Store` - 95 edges
+4. ``http.rs` — the REST router and handlers` - 84 edges
 5. `AppState` - 81 edges
 6. `AuthedUser` - 37 edges
 7. `send()` - 36 edges
@@ -124,7 +125,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (82 total, 5 thin omitted)
+## Communities (83 total, 5 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -132,7 +133,7 @@ Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to
 
 ### Community 1 - "AppState"
 Cohesion: 0.09
-Nodes (99): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+91 more)
+Nodes (100): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+92 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
@@ -171,8 +172,8 @@ Cohesion: 0.19
 Nodes (5): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Capabilities, Self, unknown_bits_are_masked_off()
 
 ### Community 11 - "materialize.rs"
-Cohesion: 0.25
-Nodes (28): a_never_connected_device_does_not_block_pruning(), concurrent_notebook_edits_converge_deterministically(), deleted_resource_frees_quota_and_blob_is_purgeable(), deleting_a_notebook_removes_it_from_listings(), device(), epoch(), get_json(), login() (+20 more)
+Cohesion: 0.23
+Nodes (29): a_never_connected_device_does_not_block_pruning(), concurrent_notebook_edits_converge_deterministically(), deleted_resource_frees_quota_and_blob_is_purgeable(), deleting_a_notebook_removes_it_from_listings(), device(), epoch(), get_json(), login() (+21 more)
 
 ### Community 12 - "ratelimit.rs"
 Cohesion: 0.14
@@ -192,7 +193,7 @@ Nodes (9): Client, Mailer, MailKind, DateTime, Option, Result, Self, String (+1 
 
 ### Community 16 - "`http.rs` — the REST router and handlers"
 Cohesion: 0.02
-Nodes (81): CAPABILITIES, Coverage checklist, fn access_cutoff, fn change_password, fn compatible_with, fn create_device, fn create_note, fn create_notebook_share (+73 more)
+Nodes (82): CAPABILITIES, Coverage checklist, fn access_cutoff, fn change_password, fn compatible_with, fn create_device, fn create_note, fn create_notebook_share (+74 more)
 
 ### Community 17 - "`permissions.rs` — note capabilities"
 Cohesion: 0.07
@@ -271,8 +272,8 @@ Cohesion: 0.33
 Nodes (5): Coverage checklist, fn collab_client_writes_note_through_to_the_server, Graph context, Overview, `tests/collab_client_e2e.rs` — real daemon client ↔ real server
 
 ### Community 36 - "`tests/materialize.rs` — domain-entity materialisation tests"
-Cohesion: 0.08
-Nodes (25): Coverage checklist, fn a_never_connected_device_does_not_block_pruning, fn concurrent_notebook_edits_converge_deterministically, fn deleted_resource_frees_quota_and_blob_is_purgeable, fn deleting_a_notebook_removes_it_from_listings, fn device, fn epoch, fn get_json (+17 more)
+Cohesion: 0.07
+Nodes (26): Coverage checklist, fn a_never_connected_device_does_not_block_pruning, fn concurrent_notebook_edits_converge_deterministically, fn deleted_resource_frees_quota_and_blob_is_purgeable, fn deleting_a_notebook_removes_it_from_listings, fn device, fn epoch, fn get_json (+18 more)
 
 ### Community 37 - "`tests/quotas.rs` — per-user quota enforcement tests"
 Cohesion: 0.11
@@ -352,7 +353,7 @@ Nodes (3): 0011 — login brute-force lockout, Design notes, Semantics
 
 ### Community 58 - "reencrypt.rs"
 Cohesion: 0.02
-Nodes (92): fn advance_cursor, fn append_changes, fn apply_notebook_shares_to_note, fn cascade_notebook_to_notes, fn changes_after, fn clear_login_failures, fn consume_email_token, fn count_live_notes_for_user (+84 more)
+Nodes (95): fn advance_cursor, fn append_changes, fn apply_notebook_shares_to_note, fn cascade_notebook_to_notes, fn cascade_resources_note_deleted, fn cascade_resources_note_restored, fn changes_after, fn clear_login_failures (+87 more)
 
 ### Community 59 - "notes"
 Cohesion: 0.12
@@ -418,6 +419,10 @@ Nodes (5): `0014_tag_system.sql` — transport-only `system` marker on tags, For
 Cohesion: 0.33
 Nodes (5): `0015_resource_media_meta.sql` — plaintext media metadata on resources, Forward-only, Related files, What it does, Why
 
+### Community 77 - "`0016_resource_note_id.sql` — owning note on resources"
+Cohesion: 0.33
+Nodes (5): `0016_resource_note_id.sql` — owning note on resources, Forward-only, Related files, What it does, Why the sentinel default
+
 ### Community 78 - "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)"
 Cohesion: 0.33
 Nodes (5): Coverage checklist, fn reconnecting_client_rebuilds_note_from_snapshot, Graph context, Overview, `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
@@ -431,7 +436,7 @@ Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ## Knowledge Gaps
-- **759 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+754 more)
+- **768 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+763 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
@@ -439,16 +444,16 @@ Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refac
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.102) - this node is a cross-community bridge._
-- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.050) - this node is a cross-community bridge._
+  _High betweenness centrality (0.097) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
   _High betweenness centrality (0.046) - this node is a cross-community bridge._
+- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
+  _High betweenness centrality (0.041) - this node is a cross-community bridge._
 - **What connects `dr-drill.sh script`, `Severity`, `Where` to the rest of the system?**
-  _759 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _768 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
-  _Cohesion score 0.06439288043984717 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06398210290827741 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.0859073359073359 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.08501896333754741 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08502939846223428 - nodes in this community are weakly interconnected._
