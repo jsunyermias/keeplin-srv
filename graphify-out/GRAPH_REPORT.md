@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-23)
 
 ## Corpus Check
-- 105 files · ~152,550 words
+- 107 files · ~153,062 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1638 nodes · 3502 edges · 81 communities (76 shown, 5 thin omitted)
+- 1644 nodes · 3507 edges · 82 communities (77 shown, 5 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4f5a895b`
+- Built from commit: `da204c1c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -90,6 +90,7 @@
 - `tests/soak.rs` — multi-instance collaborative soak/load drill
 - `{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}
 - 0004_domain_entities.sql
+- `0015_resource_media_meta.sql` — plaintext media metadata on resources
 - `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 - `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
 - `scripts/check-docs.sh` — contractual-docs CI check
@@ -123,7 +124,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (81 total, 5 thin omitted)
+## Communities (82 total, 5 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -413,6 +414,10 @@ Nodes (34): Configuration / key reference, Graph context, Notes & gotchas, `{{pa
 Cohesion: 0.33
 Nodes (5): `0014_tag_system.sql` — transport-only `system` marker on tags, Forward-only, Related files, What it does, Why
 
+### Community 76 - "`0015_resource_media_meta.sql` — plaintext media metadata on resources"
+Cohesion: 0.33
+Nodes (5): `0015_resource_media_meta.sql` — plaintext media metadata on resources, Forward-only, Related files, What it does, Why
+
 ### Community 78 - "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)"
 Cohesion: 0.33
 Nodes (5): Coverage checklist, fn reconnecting_client_rebuilds_note_from_snapshot, Graph context, Overview, `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
@@ -426,7 +431,7 @@ Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ## Knowledge Gaps
-- **755 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+750 more)
+- **759 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+754 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
@@ -434,13 +439,13 @@ Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refac
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.103) - this node is a cross-community bridge._
+  _High betweenness centrality (0.102) - this node is a cross-community bridge._
 - **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+  _High betweenness centrality (0.050) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
   _High betweenness centrality (0.046) - this node is a cross-community bridge._
 - **What connects `dr-drill.sh script`, `Severity`, `Where` to the rest of the system?**
-  _755 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _759 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06439288043984717 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
