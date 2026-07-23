@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-23)
 
 ## Corpus Check
-- 113 files · ~156,732 words
+- 113 files · ~156,919 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1681 nodes · 3564 edges · 87 communities (80 shown, 7 thin omitted)
+- 1684 nodes · 3567 edges · 87 communities (81 shown, 6 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `e5f3a687`
+- Built from commit: `5ac3edec`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -129,7 +129,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (87 total, 7 thin omitted)
+## Communities (87 total, 6 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -447,10 +447,14 @@ Nodes (6): Behaviour, Enabling, `.githooks/pre-commit` — auto-refresh the know
 Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
+### Community 84 - "CLAUDE.md"
+Cohesion: 0.33
+Nodes (5): Companion .md format, Completion rule, Documentation & Knowledge Consistency Policy, graphify, Mandatory completion checks
+
 ## Knowledge Gaps
-- **782 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+777 more)
+- **784 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+779 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
@@ -462,7 +466,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
   _High betweenness centrality (0.047) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _782 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _784 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06398210290827741 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
