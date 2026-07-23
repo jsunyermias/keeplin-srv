@@ -233,6 +233,7 @@ pub struct Tag {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub system: bool,
 }
 
 // md:ResourceMeta
@@ -1722,12 +1723,12 @@ impl Store {
             }
         }
         sqlx::query(
-            r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer, system)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, updated_at = EXCLUDED.updated_at,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
-                   last_writer = EXCLUDED.last_writer"#,
+                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system"#,
         )
         .bind(tag.id)
         .bind(user_id)
@@ -1737,6 +1738,7 @@ impl Store {
         .bind(tag.deleted_at)
         .bind(Json(&tag.vv))
         .bind(&tag.last_writer)
+        .bind(tag.system)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2014,7 +2016,7 @@ impl Store {
     ) -> Result<Vec<Tag>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
-            "SELECT id, title, created_at, updated_at, deleted_at
+            "SELECT id, title, created_at, updated_at, deleted_at, system
              FROM tags
              WHERE user_id = $1 AND deleted_at IS NULL
                AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))

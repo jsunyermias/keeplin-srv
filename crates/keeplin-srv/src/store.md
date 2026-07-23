@@ -639,8 +639,14 @@ pub struct Tag {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub system: bool,
 }
 ```
+
+`system` (issue #128) is the transport-only internal-function marker mirrored from
+`keeplin-core`'s `Tag.system`: the server stores and returns it but never interprets the
+(encrypted) tag title nor filters by it. Every `SELECT` mapping into this `FromRow` struct
+must include the `system` column, or the row decode fails at runtime.
 
 ## ResourceMeta
 
@@ -3426,12 +3432,12 @@ pub struct Store {
             }
         }
         sqlx::query(
-            r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer, system)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, updated_at = EXCLUDED.updated_at,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
-                   last_writer = EXCLUDED.last_writer"#,
+                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system"#,
         )
         .bind(tag.id)
         .bind(user_id)
@@ -3441,6 +3447,7 @@ pub struct Store {
         .bind(tag.deleted_at)
         .bind(Json(&tag.vv))
         .bind(&tag.last_writer)
+        .bind(tag.system)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3448,7 +3455,10 @@ pub struct Store {
     }
 ```
 
-**What it does** — same pattern for tags.
+**What it does** — same pattern for tags. `system` (issue #128) is persisted as `$9` and
+refreshed on conflict (`system = EXCLUDED.system`), so a `TagUpdate` that flips the flag
+converges like any other field. The whole core `Tag` reaches here via `materialize`, so the
+flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3862,7 +3872,7 @@ pub struct Store {
     ) -> Result<Vec<Tag>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
-            "SELECT id, title, created_at, updated_at, deleted_at
+            "SELECT id, title, created_at, updated_at, deleted_at, system
              FROM tags
              WHERE user_id = $1 AND deleted_at IS NULL
                AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
