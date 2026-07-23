@@ -8657,6 +8657,39 @@
       "norm_label": "companion .md format"
     },
     {
+      "label": "Documentation & Knowledge Consistency Policy",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": "L17",
+      "_origin": "ast",
+      "id": "claude_documentation_knowledge_consistency_policy",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "documentation & knowledge consistency policy"
+    },
+    {
+      "label": "Mandatory completion checks",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": "L23",
+      "_origin": "ast",
+      "id": "claude_mandatory_completion_checks",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "mandatory completion checks"
+    },
+    {
+      "label": "Completion rule",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": "L41",
+      "_origin": "ast",
+      "id": "claude_completion_rule",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "completion rule"
+    },
+    {
       "label": "Dockerfile.md",
       "file_type": "document",
       "source_file": "Dockerfile.md",
@@ -50589,11 +50622,44 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "CLAUDE.md",
+      "source_location": "L17",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "claude",
+      "target": "claude_documentation_knowledge_consistency_policy",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CLAUDE.md",
       "source_location": "L1",
       "weight": 1.0,
       "_origin": "ast",
       "source": "claude",
       "target": "claude_graphify",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CLAUDE.md",
+      "source_location": "L41",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "claude_documentation_knowledge_consistency_policy",
+      "target": "claude_completion_rule",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CLAUDE.md",
+      "source_location": "L23",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "claude_documentation_knowledge_consistency_policy",
+      "target": "claude_mandatory_completion_checks",
       "confidence_score": 1.0
     },
     {
@@ -59915,5 +59981,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "e5f3a687e93e3e5104199f0cbc5a2fb8e5b7fbfb"
+  "built_at_commit": "5ac3edec54929ad5fd925c9677cdab6a31f7466b"
 }
