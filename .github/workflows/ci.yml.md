@@ -28,6 +28,17 @@ the steps run.
 
 Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` + `rustfmt`.
 
+## The `graph` job
+
+Runs on `ubuntu-latest` in parallel with `test` (no Rust toolchain or Postgres needed).
+Enforces LAYER 1 of the navigation model: the committed `graphify-out/graph.json` must match
+the code.
+
+| Step | What it enforces |
+|------|------------------|
+| `actions/setup-python@v5` (`3.12`) + `pip install "graphifyy==0.9.25"` | the pinned graphify is available so extraction matches the version the committed graph was built with |
+| `./scripts/check-graph.sh` (env `GRAPHIFY_REQUIRED=1`) | re-runs `graphify update .` and fails if the committed graph's code structure is stale; `GRAPHIFY_REQUIRED=1` turns a missing install into a hard failure rather than a silent skip |
+
 ## Notes & gotchas
 
 - `DATABASE_URL` here points at the service container's superuser (`keeplin:keeplin`); `sqlx::test`

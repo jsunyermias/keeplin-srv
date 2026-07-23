@@ -4,6 +4,36 @@
   "graph": {},
   "nodes": [
     {
+      "label": "pre-commit",
+      "file_type": "code",
+      "source_file": ".githooks/pre-commit",
+      "source_location": "L1",
+      "metadata": {
+        "language": "bash",
+        "kind": "file"
+      },
+      "_origin": "ast",
+      "id": "githooks_pre_commit_githooks_pre_commit",
+      "community": 83,
+      "community_name": "pre-commit script",
+      "norm_label": "pre-commit"
+    },
+    {
+      "label": "pre-commit script",
+      "file_type": "code",
+      "source_file": ".githooks/pre-commit",
+      "source_location": "L1",
+      "metadata": {
+        "language": "bash",
+        "kind": "bash_entrypoint"
+      },
+      "_origin": "ast",
+      "id": "githooks_pre_commit__entry",
+      "community": 83,
+      "community_name": "pre-commit script",
+      "norm_label": "pre-commit script"
+    },
+    {
       "label": "auth.rs",
       "file_type": "code",
       "source_file": "crates/keeplin-srv/src/auth.rs",
@@ -7991,6 +8021,36 @@
       "norm_label": "err()"
     },
     {
+      "label": "check-graph.sh",
+      "file_type": "code",
+      "source_file": "scripts/check-graph.sh",
+      "source_location": "L1",
+      "metadata": {
+        "language": "bash",
+        "kind": "file"
+      },
+      "_origin": "ast",
+      "id": "scripts_check_graph",
+      "community": 86,
+      "community_name": "check-graph.sh",
+      "norm_label": "check-graph.sh"
+    },
+    {
+      "label": "check-graph.sh script",
+      "file_type": "code",
+      "source_file": "scripts/check-graph.sh",
+      "source_location": "L1",
+      "metadata": {
+        "language": "bash",
+        "kind": "bash_entrypoint"
+      },
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh__entry",
+      "community": 86,
+      "community_name": "check-graph.sh",
+      "norm_label": "check-graph.sh script"
+    },
+    {
       "label": "dr-drill.sh",
       "file_type": "code",
       "source_file": "scripts/dr-drill.sh",
@@ -8034,6 +8094,83 @@
       "community": 56,
       "community_name": "dr-drill.sh",
       "norm_label": "verify()"
+    },
+    {
+      "label": "pre-commit.md",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_md_githooks_pre_commit",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "pre-commit.md"
+    },
+    {
+      "label": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit"
+    },
+    {
+      "label": "Purpose",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L3",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_purpose",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "purpose"
+    },
+    {
+      "label": "Enabling",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L9",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_enabling",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "enabling"
+    },
+    {
+      "label": "Behaviour",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L20",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_behaviour",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "behaviour"
+    },
+    {
+      "label": "Version",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L35",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_version",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "version"
+    },
+    {
+      "label": "Related files",
+      "file_type": "document",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L40",
+      "_origin": "ast",
+      "id": "githooks_pre_commit_related_files",
+      "community": 81,
+      "community_name": "`.githooks/pre-commit` \u2014 auto-refresh the knowledge graph on commit",
+      "norm_label": "related files"
     },
     {
       "label": "finding.md",
@@ -8256,10 +8393,21 @@
       "norm_label": "the `test` job"
     },
     {
-      "label": "Notes & gotchas",
+      "label": "The `graph` job",
       "file_type": "document",
       "source_file": ".github/workflows/ci.yml.md",
       "source_location": "L31",
+      "_origin": "ast",
+      "id": "github_workflows_ci_yml_the_graph_job",
+      "community": 40,
+      "community_name": "`ci.yml` \u2014 continuous integration",
+      "norm_label": "the `graph` job"
+    },
+    {
+      "label": "Notes & gotchas",
+      "file_type": "document",
+      "source_file": ".github/workflows/ci.yml.md",
+      "source_location": "L42",
       "_origin": "ast",
       "id": "github_workflows_ci_yml_notes_gotchas",
       "community": 40,
@@ -8270,7 +8418,7 @@
       "label": "Related files",
       "file_type": "document",
       "source_file": ".github/workflows/ci.yml.md",
-      "source_location": "L40",
+      "source_location": "L51",
       "_origin": "ast",
       "id": "github_workflows_ci_yml_related_files",
       "community": 40,
@@ -18211,6 +18359,105 @@
       "norm_label": "related files"
     },
     {
+      "label": "check-graph.sh.md",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "check-graph.sh.md"
+    },
+    {
+      "label": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check"
+    },
+    {
+      "label": "Purpose",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L3",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_purpose",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "purpose"
+    },
+    {
+      "label": "How it works",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L11",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_how_it_works",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "how it works"
+    },
+    {
+      "label": "What it compares \u2014 and what it ignores",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L19",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_what_it_compares_and_what_it_ignores",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "what it compares \u2014 and what it ignores"
+    },
+    {
+      "label": "graphify not installed",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L38",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_graphify_not_installed",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "graphify not installed"
+    },
+    {
+      "label": "Version pinning",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L45",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_version_pinning",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "version pinning"
+    },
+    {
+      "label": "Side effect",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L52",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_side_effect",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "side effect"
+    },
+    {
+      "label": "Related files",
+      "file_type": "document",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L58",
+      "_origin": "ast",
+      "id": "scripts_check_graph_sh_related_files",
+      "community": 80,
+      "community_name": "`scripts/check-graph.sh` \u2014 knowledge-graph freshness check",
+      "norm_label": "related files"
+    },
+    {
       "label": "dr-drill.sh.md",
       "file_type": "document",
       "source_file": "scripts/dr-drill.sh.md",
@@ -18289,6 +18536,17 @@
     }
   ],
   "links": [
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit",
+      "target": "githooks_pre_commit__entry",
+      "confidence_score": 1.0
+    },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
@@ -49824,6 +50082,17 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph",
+      "target": "scripts_check_graph_sh__entry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "scripts/dr-drill.sh",
       "source_location": "L1",
       "weight": 1.0,
@@ -49841,6 +50110,72 @@
       "_origin": "ast",
       "source": "scripts_dr_drill",
       "target": "scripts_dr_drill_verify",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_md_githooks_pre_commit",
+      "target": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L20",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "target": "githooks_pre_commit_behaviour",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L9",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "target": "githooks_pre_commit_enabling",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "target": "githooks_pre_commit_purpose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L40",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "target": "githooks_pre_commit_related_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".githooks/pre-commit.md",
+      "source_location": "L35",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "githooks_pre_commit_githooks_pre_commit_auto_refresh_the_knowledge_graph_on_commit",
+      "target": "githooks_pre_commit_version",
       "confidence_score": 1.0
     },
     {
@@ -50001,7 +50336,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/workflows/ci.yml.md",
-      "source_location": "L31",
+      "source_location": "L42",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_workflows_ci_yml_ci_yml_continuous_integration",
@@ -50023,11 +50358,22 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/workflows/ci.yml.md",
-      "source_location": "L40",
+      "source_location": "L51",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_workflows_ci_yml_ci_yml_continuous_integration",
       "target": "github_workflows_ci_yml_related_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".github/workflows/ci.yml.md",
+      "source_location": "L31",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "github_workflows_ci_yml_ci_yml_continuous_integration",
+      "target": "github_workflows_ci_yml_the_graph_job",
       "confidence_score": 1.0
     },
     {
@@ -59416,6 +59762,94 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh",
+      "target": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L38",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_graphify_not_installed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L11",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_how_it_works",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_purpose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L58",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_related_files",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_side_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L45",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_version_pinning",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/check-graph.sh.md",
+      "source_location": "L19",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "scripts_check_graph_sh_scripts_check_graph_sh_knowledge_graph_freshness_check",
+      "target": "scripts_check_graph_sh_what_it_compares_and_what_it_ignores",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "scripts/dr-drill.sh.md",
       "source_location": "L1",
       "weight": 1.0,
@@ -59481,5 +59915,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "5d2c2fc8fb1c053694d04c93dce70b28ec07060e"
+  "built_at_commit": "e5f3a687e93e3e5104199f0cbc5a2fb8e5b7fbfb"
 }
