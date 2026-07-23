@@ -79,7 +79,11 @@
   "77": "`0016_resource_note_id.sql` — owning note on resources",
   "78": "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)",
   "79": "`tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries",
+  "80": "`scripts/check-graph.sh` — knowledge-graph freshness check",
+  "81": "`.githooks/pre-commit` — auto-refresh the knowledge graph on commit",
   "82": "`scripts/check-docs.sh` — contractual-docs CI check",
+  "83": "pre-commit script",
   "84": "CLAUDE.md",
-  "85": "check-docs.sh"
+  "85": "check-docs.sh",
+  "86": "check-graph.sh"
 }

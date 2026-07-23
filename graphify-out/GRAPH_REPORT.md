@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-23)
 
 ## Corpus Check
-- 109 files · ~155,303 words
+- 113 files · ~156,732 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1660 nodes · 3547 edges · 83 communities (78 shown, 5 thin omitted)
+- 1681 nodes · 3564 edges · 87 communities (80 shown, 7 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `5d2c2fc8`
+- Built from commit: `e5f3a687`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -94,9 +94,13 @@
 - `0016_resource_note_id.sql` — owning note on resources
 - `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 - `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
+- `scripts/check-graph.sh` — knowledge-graph freshness check
+- `.githooks/pre-commit` — auto-refresh the knowledge graph on commit
 - `scripts/check-docs.sh` — contractual-docs CI check
+- pre-commit script
 - CLAUDE.md
 - check-docs.sh
+- check-graph.sh
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 160 edges
@@ -125,7 +129,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (83 total, 5 thin omitted)
+## Communities (87 total, 7 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -288,8 +292,8 @@ Cohesion: 0.29
 Nodes (6): Context, Impact, Problem, Severity, Suggested fix / options, Where
 
 ### Community 40 - "`ci.yml` — continuous integration"
-Cohesion: 0.29
-Nodes (6): `ci.yml` — continuous integration, Notes & gotchas, Purpose, Related files, The `test` job, When it runs
+Cohesion: 0.25
+Nodes (7): `ci.yml` — continuous integration, Notes & gotchas, Purpose, Related files, The `graph` job, The `test` job, When it runs
 
 ### Community 41 - "`0002_collab.sql` — the collaborative note model"
 Cohesion: 0.29
@@ -431,26 +435,34 @@ Nodes (5): Coverage checklist, fn reconnecting_client_rebuilds_note_from_snapsho
 Cohesion: 0.15
 Nodes (12): CONVERGE_TRIES, Coverage checklist, fn collab_device, fn login, fn register, fn spawn_server, fn test_config, fn wait_local_body (+4 more)
 
+### Community 80 - "`scripts/check-graph.sh` — knowledge-graph freshness check"
+Cohesion: 0.22
+Nodes (8): graphify not installed, How it works, Purpose, Related files, `scripts/check-graph.sh` — knowledge-graph freshness check, Side effect, Version pinning, What it compares — and what it ignores
+
+### Community 81 - "`.githooks/pre-commit` — auto-refresh the knowledge graph on commit"
+Cohesion: 0.29
+Nodes (6): Behaviour, Enabling, `.githooks/pre-commit` — auto-refresh the knowledge graph on commit, Purpose, Related files, Version
+
 ### Community 82 - "`scripts/check-docs.sh` — contractual-docs CI check"
 Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ## Knowledge Gaps
-- **768 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+763 more)
+- **782 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+777 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.097) - this node is a cross-community bridge._
-- **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
+  _High betweenness centrality (0.093) - this node is a cross-community bridge._
 - **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.041) - this node is a cross-community bridge._
-- **What connects `dr-drill.sh script`, `Severity`, `Where` to the rest of the system?**
-  _768 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
+  _782 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06398210290827741 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
