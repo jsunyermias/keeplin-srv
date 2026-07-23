@@ -27,7 +27,7 @@ use std::sync::Arc;
 use axum::Router;
 use chrono::{Duration, Utc};
 use keeplin_core::{
-    models::{Note, NoteTag, Notebook, Resource, Tag},
+    models::{Note, NoteTag, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::{
         db::DbBackend, note_log::VersionVector, NoteRepository, NotebookRepository,
         ResourceRepository, SyncBackend, TagRepository,
@@ -435,7 +435,13 @@ async fn resource_metadata_and_blob_materialise(pool: PgPool) {
     let bytes = b"opaque-encrypted-bytes".to_vec();
     let resource = a
         .create_resource(
-            Resource::new("photo", "image/png", "photo.png", bytes.len() as u64),
+            Resource::new(
+                SYSTEM_RESOURCE_NOTE_ID,
+                "photo",
+                "image/png",
+                "photo.png",
+                bytes.len() as u64,
+            ),
             bytes.clone(),
         )
         .await
@@ -502,7 +508,7 @@ async fn streaming_blob_upload_then_download(pool: PgPool) {
 
     let resource = a
         .create_resource(
-            Resource::new("f", "application/pdf", "f.pdf", 3),
+            Resource::new(SYSTEM_RESOURCE_NOTE_ID, "f", "application/pdf", "f.pdf", 3),
             b"abc".to_vec(),
         )
         .await
@@ -917,7 +923,13 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
     let store = Store::new(pool);
     let u = store.create_user("a@x.com", "h", "A").await.unwrap();
 
-    let mut r = keeplin_core::models::Resource::new("f", "application/octet-stream", "f.bin", 3);
+    let mut r = keeplin_core::models::Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "f",
+        "application/octet-stream",
+        "f.bin",
+        3,
+    );
     r.vv = VersionVector::from([("dev".to_string(), 1)]);
     r.last_writer = "dev".into();
     assert!(store.upsert_resource_meta(u.id, &r).await.unwrap());
@@ -968,6 +980,112 @@ stays (issue #24).
 
 **Repeated context** — Blob bytes are reclaimable; convergence metadata is not —
 the tombstone must keep competing in resolution.
+
+---
+
+## fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged
+
+**Identification** — `#[sqlx::test(migrations = "../../migrations")]`; marker
+`// md:fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged
+#[sqlx::test(migrations = "../../migrations")]
+async fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("a@example.com", "hash", "A")
+        .await
+        .unwrap();
+    let note = store.create_note(None, "N", user.id).await.unwrap();
+
+    let r1 = Resource::new(note.id, "a", "text/plain", "a.txt", 1);
+    let r2 = Resource::new(note.id, "b", "text/plain", "b.txt", 1);
+    let r3 = Resource::new(note.id, "c", "text/plain", "c.txt", 1);
+    for r in [&r1, &r2, &r3] {
+        store.upsert_resource_meta(user.id, r).await.unwrap();
+    }
+
+    let before = store
+        .list_resources_for_note(user.id, note.id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        before.len(),
+        3,
+        "three attachments present before any delete"
+    );
+
+    let r3_ts = Utc::now() + Duration::seconds(60);
+    let mut r3_vv = r3.vv.clone();
+    keeplin_core::storage::note_log::increment(&mut r3_vv, "test-device");
+    let r3_deleted = store
+        .delete_resource(r3.id, r3_ts, &r3_vv, "test-device")
+        .await
+        .unwrap();
+    assert!(r3_deleted, "r3 direct delete must win");
+    let after_r3 = store
+        .list_resources_for_note(user.id, note.id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(after_r3.len(), 2, "r3 gone after its direct delete");
+
+    let deleted = store.soft_delete_note(note.id).await.unwrap().unwrap();
+    let note_ts = deleted.deleted_at.unwrap();
+
+    let live = store
+        .list_resources_for_note(user.id, note.id, None, None)
+        .await
+        .unwrap();
+    assert!(
+        live.is_empty(),
+        "every attachment is soft-deleted after the note delete"
+    );
+
+    let revived = Store::cascade_resources_note_restored(&pool, note.id, note_ts)
+        .await
+        .unwrap();
+    assert_eq!(
+        revived, 2,
+        "only the two attachments the note dragged are revived"
+    );
+
+    let ids: Vec<_> = store
+        .list_resources_for_note(user.id, note.id, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![r1.id, r2.id],
+        "restore recovers r1 and r2 in created_at order; the directly-deleted r3 stays deleted"
+    );
+}
+```
+
+**What it does** — The server-side cascade (issue #125, D5) at the `Store` layer: three
+attachments hang off a note; one (`r3`) is deleted directly with its own future tombstone ts and
+a dominating version vector (so its delete wins LWW). `soft_delete_note` then tombstones the note
+and, in the same transaction, cascades `deleted_at` onto the two still-live attachments
+(`list_resources_for_note` goes empty). `cascade_resources_note_restored` with the note's
+tombstone ts revives exactly the two the note dragged (`r1`, `r2`, in `created_at` order); `r3`,
+carrying its own distinct ts, stays deleted.
+
+**Dependencies** —
+- `Store::new`, `create_user`, `create_note`, `upsert_resource_meta`, `delete_resource`,
+  `soft_delete_note`, `list_resources_for_note`, `cascade_resources_note_restored` — the store
+  API under test; expects `soft_delete_note` to hook `cascade_resources_note_deleted` and the
+  restore to match only on the note's tombstone ts.
+- `note_log::increment` — builds a dominating vv so the direct `r3` delete wins resolution.
+
+**Used by** — n/a (integration test; requires Postgres via `#[sqlx::test]`).
+
+**Repeated context** — the cascade is hooked where the server applies the note delete
+(`store.rs::soft_delete_note`), not in `sync.rs::materialize` (which skips `Change::Note*`).
 
 ---
 
@@ -1029,3 +1147,4 @@ refresh with `graphify update .` after refactors.
 | 20 | `fn same_batch_id_across_users_is_not_deduplicated` | `// md:fn same_batch_id_across_users_is_not_deduplicated` |
 | 21 | `fn a_never_connected_device_does_not_block_pruning` | `// md:fn a_never_connected_device_does_not_block_pruning` |
 | 22 | `fn deleted_resource_frees_quota_and_blob_is_purgeable` | `// md:fn deleted_resource_frees_quota_and_blob_is_purgeable` |
+| 23 | `fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged` | `// md:fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged` |

@@ -34,7 +34,7 @@ sqlx = { version = "0.8", features = [
 # `tag = "vX.Y.Z"` over a bare commit. This rev is keeplin main + the GET /version
 # protocol handshake (compat.rs; CollabBackend::start now returns Result) + the
 # out-of-band resource blob upload fix (eager metadata push before PUT).
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "85c129b1bade8653ef32f06dafa87b6a163de2d7" }
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "2571b5651d8fb075e6cd4f82cd7cbb14bf8f54bb" }
 argon2 = "0.5"
 password-hash = "0.5"
 # At-rest encryption of note content/title (issue keeplin#110). AES-256-GCM with

@@ -76,6 +76,7 @@
   "74": "`{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}",
   "75": "0004_domain_entities.sql",
   "76": "`0015_resource_media_meta.sql` — plaintext media metadata on resources",
+  "77": "`0016_resource_note_id.sql` — owning note on resources",
   "78": "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)",
   "79": "`tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries",
   "82": "`scripts/check-docs.sh` — contractual-docs CI check",
