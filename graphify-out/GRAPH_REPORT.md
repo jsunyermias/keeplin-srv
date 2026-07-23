@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-19)
+# Graph Report - keeplin-srv  (2026-07-23)
 
 ## Corpus Check
-- 102 files · ~151,230 words
+- 105 files · ~152,550 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1660 nodes · 3523 edges · 92 communities (80 shown, 12 thin omitted)
+- 1638 nodes · 3502 edges · 81 communities (76 shown, 5 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `3a842e3e`
+- Built from commit: `4f5a895b`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -90,19 +90,11 @@
 - `tests/soak.rs` — multi-instance collaborative soak/load drill
 - `{{lib.rs | main.rs}}` — {{crate name}} {{crate root | entry point}}
 - 0004_domain_entities.sql
-- 0001_initial.sql
-- 0010_collab_bus.sql
 - `tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)
 - `tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries
-- email_tokens
-- notes
 - `scripts/check-docs.sh` — contractual-docs CI check
-- note_shares
 - CLAUDE.md
 - check-docs.sh
-- notebook_shares
-- changes
-- login_attempts
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 157 edges
@@ -131,7 +123,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (92 total, 12 thin omitted)
+## Communities (81 total, 5 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -202,8 +194,8 @@ Cohesion: 0.02
 Nodes (81): CAPABILITIES, Coverage checklist, fn access_cutoff, fn change_password, fn compatible_with, fn create_device, fn create_note, fn create_notebook_share (+73 more)
 
 ### Community 17 - "`permissions.rs` — note capabilities"
-Cohesion: 0.08
-Nodes (25): accessors, can_* accessors, Coverage checklist, fn all, fn bits, fn contains, fn empty, fn from_bits (+17 more)
+Cohesion: 0.07
+Nodes (26): accessors, can_* accessors, consts, Coverage checklist, fn all, fn bits, fn contains, fn empty (+18 more)
 
 ### Community 18 - "`sync.rs` — the device sync relay"
 Cohesion: 0.09
@@ -394,8 +386,8 @@ Cohesion: 0.33
 Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
 
 ### Community 69 - "notes"
-Cohesion: 0.67
-Nodes (5): lines, note_line_order, note_shares, notes, users
+Cohesion: 0.25
+Nodes (7): Contract, Database & compatibility, Linked issues, Summary, Type of change, Verification, What changed
 
 ### Community 70 - "0008_changes_history_index.sql"
 Cohesion: 0.33
@@ -418,12 +410,8 @@ Cohesion: 0.05
 Nodes (34): Configuration / key reference, Graph context, Notes & gotchas, `{{path/to/file}}` — {{what it configures / generates}}, Purpose, Related files, What it {{generates | defines | runs}}, Dependency graph (intra-crate) (+26 more)
 
 ### Community 75 - "0004_domain_entities.sql"
-Cohesion: 0.40
-Nodes (5): note_tags, notebooks, resource_blobs, resources, tags
-
-### Community 76 - "0001_initial.sql"
-Cohesion: 0.70
-Nodes (4): changes, device_cursors, user_devices, users
+Cohesion: 0.33
+Nodes (5): `0014_tag_system.sql` — transport-only `system` marker on tags, Forward-only, Related files, What it does, Why
 
 ### Community 78 - "`tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (real client)"
 Cohesion: 0.33
@@ -438,21 +426,21 @@ Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ## Knowledge Gaps
-- **753 isolated node(s):** `notes`, `notebooks`, `tags`, `note_tags`, `note_shares` (+748 more)
+- **755 isolated node(s):** `dr-drill.sh script`, `Severity`, `Where`, `Problem`, `Impact` (+750 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **12 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.099) - this node is a cross-community bridge._
+  _High betweenness centrality (0.103) - this node is a cross-community bridge._
 - **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+  _High betweenness centrality (0.051) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
-  _High betweenness centrality (0.044) - this node is a cross-community bridge._
-- **What connects `notes`, `notebooks`, `tags` to the rest of the system?**
-  _753 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _High betweenness centrality (0.046) - this node is a cross-community bridge._
+- **What connects `dr-drill.sh script`, `Severity`, `Where` to the rest of the system?**
+  _755 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06439288043984717 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
