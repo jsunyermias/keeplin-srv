@@ -668,8 +668,18 @@ pub struct ResourceMeta {
     pub size: i64,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
 }
 ```
+
+`duration_ms`/`width`/`height` (issue #129) are the plaintext media metadata mirrored from
+`keeplin-core`'s `Resource.duration_ms`/`Resource.dimensions`: the server stores and returns
+them (a frontend renders an attachment without downloading the blob) but never computes or
+validates them. All three are nullable; a non-media attachment has `NULL`. `width`/`height`
+travel together (both-or-neither). Every `SELECT` mapping into this `FromRow` struct must list
+the three columns, or the row decode fails at runtime.
 
 ---
 
@@ -3640,13 +3650,14 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         }
         sqlx::query(
             r#"INSERT INTO resources
-                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, mime_type = EXCLUDED.mime_type,
                    file_name = EXCLUDED.file_name, size = EXCLUDED.size,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
-                   last_writer = EXCLUDED.last_writer"#,
+                   last_writer = EXCLUDED.last_writer, duration_ms = EXCLUDED.duration_ms,
+                   width = EXCLUDED.width, height = EXCLUDED.height"#,
         )
         .bind(r.id)
         .bind(user_id)
@@ -3658,6 +3669,9 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         .bind(r.deleted_at)
         .bind(Json(&r.vv))
         .bind(&r.last_writer)
+        .bind(r.duration_ms.map(|d| d as i64))
+        .bind(r.dimensions.map(|(w, _)| w as i32))
+        .bind(r.dimensions.map(|(_, h)| h as i32))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -3912,7 +3926,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     ) -> Result<Vec<ResourceMeta>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, ResourceMeta>(
-            "SELECT id, title, mime_type, file_name, size, created_at, deleted_at
+            "SELECT id, title, mime_type, file_name, size, created_at, deleted_at, duration_ms, width, height
              FROM resources
              WHERE user_id = $1 AND deleted_at IS NULL
                AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4))
