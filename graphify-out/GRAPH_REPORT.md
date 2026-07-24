@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-23)
+# Graph Report - keeplin-srv  (2026-07-24)
 
 ## Corpus Check
-- 113 files · ~156,919 words
+- 113 files · ~157,064 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1684 nodes · 3567 edges · 87 communities (81 shown, 6 thin omitted)
+- 1685 nodes · 3568 edges · 87 communities (81 shown, 6 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `5ac3edec`
+- Built from commit: `0aeb1e89`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -133,11 +133,11 @@
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
-Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
+Nodes (46): AppError, Error, IntoResponse, Response, String, MailKind, cascade_notebook_to_notes_tx(), incoming_wins() (+38 more)
 
 ### Community 1 - "AppState"
-Cohesion: 0.09
-Nodes (100): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+92 more)
+Cohesion: 0.10
+Nodes (96): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+88 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
@@ -160,20 +160,20 @@ Cohesion: 0.04
 Nodes (45): At-rest encryption, Collaborative protocol (`GET /api/ws?token=<jwt>`), Connecting a keeplin-daemon, Device sync relay (`GET /api/sync`), Docker, Environment variables, Keeplin Server, License (+37 more)
 
 ### Community 7 - "soak.rs"
-Cohesion: 0.11
-Nodes (31): handle_collab_op(), handle_collab_presence(), handle_sync_batch(), Arc, Result, run(), spawn(), main() (+23 more)
+Cohesion: 0.23
+Nodes (17): editor(), env_or(), export_body(), merge_vv(), PgPool, Result, SocketAddr, String (+9 more)
 
 ### Community 8 - "Cipher"
 Cohesion: 0.11
 Nodes (24): Aes256Gcm, main(), parse_args(), Result, disabled_is_passthrough(), nonce_is_random_per_value(), reads_legacy_plaintext_when_enabled(), round_trips_and_tags() (+16 more)
 
 ### Community 9 - "sync.rs"
-Cohesion: 0.14
-Nodes (27): authenticate(), changes_frame(), deliver_backlog(), handle_incoming(), handler(), materialize(), relay_loop(), Arc (+19 more)
+Cohesion: 0.09
+Nodes (41): handle_collab_op(), handle_collab_presence(), handle_sync_batch(), Arc, Result, run(), spawn(), main() (+33 more)
 
 ### Community 10 - "resolve_note_access"
-Cohesion: 0.19
-Nodes (5): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Capabilities, Self, unknown_bits_are_masked_off()
+Cohesion: 0.12
+Nodes (9): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), resolve_notebook_access(), Access, Capabilities, Result, Self, Uuid (+1 more)
 
 ### Community 11 - "materialize.rs"
 Cohesion: 0.23
@@ -192,8 +192,8 @@ Cohesion: 0.13
 Nodes (21): Body, auth_mw(), create_token(), dummy_password_hash(), hash_password(), Arc, Claims, Error (+13 more)
 
 ### Community 15 - "Mailer"
-Cohesion: 0.19
-Nodes (9): Client, Mailer, MailKind, DateTime, Option, Result, Self, String (+1 more)
+Cohesion: 0.21
+Nodes (8): Client, Mailer, DateTime, Option, Result, Self, String, Utc
 
 ### Community 16 - "`http.rs` — the REST router and handlers"
 Cohesion: 0.02
@@ -448,28 +448,28 @@ Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ### Community 84 - "CLAUDE.md"
-Cohesion: 0.33
-Nodes (5): Companion .md format, Completion rule, Documentation & Knowledge Consistency Policy, graphify, Mandatory completion checks
+Cohesion: 0.29
+Nodes (6): Companion .md format, Completion rule, Cross-repo compatibility (keeplin ↔ keeplin-srv), Documentation & Knowledge Consistency Policy, graphify, Mandatory completion checks
 
 ## Knowledge Gaps
-- **784 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+779 more)
+- **785 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+780 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
+- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
   _High betweenness centrality (0.093) - this node is a cross-community bridge._
-- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
+- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `sync.rs`, `materialize.rs`, `mod.rs`?**
   _High betweenness centrality (0.047) - this node is a cross-community bridge._
-- **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
+- **Why does `AppError` connect `AppError` to `AppState`, `collab.rs`, `Cipher`, `resolve_note_access`, `auth_mw`?**
   _High betweenness centrality (0.047) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _784 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _785 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
-  _Cohesion score 0.06398210290827741 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06256535378180551 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.08501896333754741 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09978644923315862 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08502939846223428 - nodes in this community are weakly interconnected._

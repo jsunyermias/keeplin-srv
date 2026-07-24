@@ -359,8 +359,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_rs_crates_keeplin_srv_src_bus",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "bus.rs"
     },
     {
@@ -370,8 +370,8 @@
       "source_location": "L16",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_spawn",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "spawn()"
     },
     {
@@ -381,8 +381,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_rs_arc",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "arc"
     },
     {
@@ -392,8 +392,8 @@
       "source_location": "L28",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_run",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "run()"
     },
     {
@@ -403,8 +403,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_rs_result",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "result"
     },
     {
@@ -414,8 +414,8 @@
       "source_location": "L46",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_handle_collab_op",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "handle_collab_op()"
     },
     {
@@ -425,8 +425,8 @@
       "source_location": "L64",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_handle_collab_presence",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "handle_collab_presence()"
     },
     {
@@ -436,8 +436,8 @@
       "source_location": "L78",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_bus_handle_sync_batch",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "handle_sync_batch()"
     },
     {
@@ -2526,8 +2526,8 @@
       "source_location": "L6",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_mail_rs_crates_keeplin_srv_src_mail_mailkind",
-      "community": 15,
-      "community_name": "Mailer",
+      "community": 0,
+      "community_name": "AppError",
       "norm_label": "mailkind"
     },
     {
@@ -2537,8 +2537,8 @@
       "source_location": "L14",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_mail_mailkind_as_str",
-      "community": 15,
-      "community_name": "Mailer",
+      "community": 0,
+      "community_name": "AppError",
       "norm_label": ".as_str()"
     },
     {
@@ -2669,8 +2669,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_rs_crates_keeplin_srv_src_main",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "main.rs"
     },
     {
@@ -2680,8 +2680,8 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_main",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "main()"
     },
     {
@@ -2691,8 +2691,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_rs_result",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "result"
     },
     {
@@ -2702,8 +2702,8 @@
       "source_location": "L86",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_shutdown_signal",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "shutdown_signal()"
     },
     {
@@ -2713,8 +2713,8 @@
       "source_location": "L117",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_maintenance_loop",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "maintenance_loop()"
     },
     {
@@ -2724,8 +2724,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_rs_arc",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "arc"
     },
     {
@@ -2735,8 +2735,8 @@
       "source_location": "L155",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_main_run_retention",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "run_retention()"
     },
     {
@@ -2900,8 +2900,8 @@
       "source_location": "L81",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_crates_keeplin_srv_src_permissions_access",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": "access"
     },
     {
@@ -2911,8 +2911,8 @@
       "source_location": "L89",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_owner",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".owner()"
     },
     {
@@ -2922,8 +2922,8 @@
       "source_location": "L97",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_granted",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".granted()"
     },
     {
@@ -2933,8 +2933,8 @@
       "source_location": "L105",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_read",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_read()"
     },
     {
@@ -2944,8 +2944,8 @@
       "source_location": "L108",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_write",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_write()"
     },
     {
@@ -2955,8 +2955,8 @@
       "source_location": "L111",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_share_write",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_share_write()"
     },
     {
@@ -2966,8 +2966,8 @@
       "source_location": "L114",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_delete",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_delete()"
     },
     {
@@ -2977,8 +2977,8 @@
       "source_location": "L117",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_transfer_ownership",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_transfer_ownership()"
     },
     {
@@ -2999,8 +2999,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_uuid",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": "uuid"
     },
     {
@@ -3010,8 +3010,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_result",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": "result"
     },
     {
@@ -3021,8 +3021,8 @@
       "source_location": "L143",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_resolve_notebook_access",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": "resolve_notebook_access()"
     },
     {
@@ -7949,8 +7949,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "duration",
-      "community": 7,
-      "community_name": "soak.rs",
+      "community": 9,
+      "community_name": "sync.rs",
       "norm_label": "duration"
     },
     {
@@ -8688,6 +8688,17 @@
       "community": 84,
       "community_name": "CLAUDE.md",
       "norm_label": "completion rule"
+    },
+    {
+      "label": "Cross-repo compatibility (keeplin \u2194 keeplin-srv)",
+      "file_type": "document",
+      "source_file": "CLAUDE.md",
+      "source_location": "L52",
+      "_origin": "ast",
+      "id": "claude_cross_repo_compatibility_keeplin_keeplin_srv",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "cross-repo compatibility (keeplin \u2194 keeplin-srv)"
     },
     {
       "label": "Dockerfile.md",
@@ -50622,6 +50633,17 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "CLAUDE.md",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "claude",
+      "target": "claude_cross_repo_compatibility_keeplin_keeplin_srv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CLAUDE.md",
       "source_location": "L17",
       "weight": 1.0,
       "_origin": "ast",
@@ -59981,5 +60003,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "5ac3edec54929ad5fd925c9677cdab6a31f7466b"
+  "built_at_commit": "0aeb1e898d7ff16d780e699ca44de687bed8c4cc"
 }
