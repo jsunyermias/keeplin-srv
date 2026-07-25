@@ -115,6 +115,7 @@ header (preferred) or the WS query string (fallback).
 - Relay: `src/sync.md`.
 - Auth & permissions: `src/auth.md`, `src/permissions.md`.
 - Operability: `src/main.md`, `src/ratelimit.md`, `src/config.md`.
+- Accepted architecture decisions and cross-repository links: [`docs/adr/`](docs/adr/README.md).
 - User-facing API and setup: `README.md`.
 - The client half lives in [jsunyermias/keeplin](https://github.com/jsunyermias/keeplin)
   (`keeplin-core/src/collab/`).
