@@ -36,7 +36,7 @@ sqlx = { version = "0.8", features = [
 # MAX_NOTES_PER_NOTEBOOK and their wire codes, keeplin#130), which this crate
 # imports rather than redefining, plus the optional `note_id` on
 # CollabServerMsg::Error.
-keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "cd45492036ad8007a1a59a68b5b48bb83b8703de" }
+keeplin-core = { git = "https://github.com/jsunyermias/keeplin.git", rev = "3d195f6da65a000b1005d2d432bf67eaafd9077c" }
 argon2 = "0.5"
 password-hash = "0.5"
 # At-rest encryption of note content/title (issue keeplin#110). AES-256-GCM with
