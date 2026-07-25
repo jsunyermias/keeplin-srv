@@ -21,6 +21,7 @@ how), update its companion in the same change — a stale companion is worse tha
 | A crate root (`lib.rs` / `main.rs` that mostly wires modules) | [`crate-root.md`](crate-root.md) | next to the root `.rs` |
 | A build script, config, or schema (`build.rs`, `*.toml`, `*.proto`, `*.yml`, `*.sh`) | [`config-file.md`](config-file.md) | `<file>.md` next to it |
 | A cross-cutting design or policy doc (architecture, security, threat model) | [`design-doc.md`](design-doc.md) | repository root |
+| A high-risk architectural decision with alternatives and approval state | [`docs/adr/README.md`](../adr/README.md) and the canonical template it links | `docs/adr/NNNN-short-title.md` in the repository that owns the decision |
 
 ## House style
 
