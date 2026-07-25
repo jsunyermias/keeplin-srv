@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-25)
 
 ## Corpus Check
-- 121 files · ~166,262 words
+- 130 files · ~176,963 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1763 nodes · 3693 edges · 97 communities (91 shown, 6 thin omitted)
-- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
+- 1837 nodes · 3825 edges · 105 communities (96 shown, 9 thin omitted)
+- Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 38 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `d08cc773`
+- Built from commit: `60095693`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -111,6 +111,14 @@
 - 0.C — Revisión independiente y adversarial
 - Restore
 - 0.C — Revisión independiente y adversarial
+- `scripts/companion_tool.py` — deterministic companion fidelity engine
+- `scripts/tests/test_companion_tool.py` — fidelity-tool regression suite
+- `scripts/context-pack` — reproducible companion context packs
+- `scripts/sync-companion-code` — synchronize embedded Rust blocks
+- Key rotation & re-encryption (`AT_REST_KEY`)
+- context-pack script
+- sync-companion-code script
+- Restore
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 162 edges
@@ -139,7 +147,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (97 total, 6 thin omitted)
+## Communities (105 total, 9 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
@@ -246,8 +254,8 @@ Cohesion: 0.25
 Nodes (7): 1. What keeplin-srv is, 2. The data model (PostgreSQL), 3. The surfaces (request flow), 4. Collaboration in one paragraph, 5. Operability, 6. Where to read next, keeplin-srv — Architecture overview
 
 ### Community 26 - "`auth.rs` — passwords, tokens, and the auth middleware"
-Cohesion: 0.13
-Nodes (14): `auth.rs` — passwords, tokens, and the auth middleware, Coverage checklist, fn auth_mw, fn create_token, fn dummy_password_hash, fn from_request_parts, fn hash_password, fn verify_password (+6 more)
+Cohesion: 0.12
+Nodes (15): `auth.rs` — passwords, tokens, and the auth middleware, Coverage checklist, fn auth_mw, fn create_token, fn dummy_password_hash, fn from_request_parts, fn hash_password, fn verify_password (+7 more)
 
 ### Community 27 - "`src/crypto.rs` — at-rest encryption of note titles and line content"
 Cohesion: 0.10
@@ -398,8 +406,8 @@ Cohesion: 0.40
 Nodes (4): `0007_per_user_batch_dedup.sql` — scope batch dedup to the owning user, Purpose, Related files, What it changes
 
 ### Community 68 - "reencrypt.rs"
-Cohesion: 0.33
-Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
+Cohesion: 0.19
+Nodes (29): Exception, build_manifest(), build_pack(), _bullets(), CompanionError, _extract_item(), Fence, _item_kind() (+21 more)
 
 ### Community 69 - "notes"
 Cohesion: 0.25
@@ -454,8 +462,8 @@ Cohesion: 0.29
 Nodes (6): Behaviour, Enabling, `.githooks/pre-commit` — auto-refresh the knowledge graph on commit, Purpose, Related files, Version
 
 ### Community 82 - "`scripts/check-docs.sh` — contractual-docs CI check"
-Cohesion: 0.22
-Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
+Cohesion: 0.25
+Nodes (7): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks
 
 ### Community 84 - "CLAUDE.md"
 Cohesion: 0.40
@@ -471,7 +479,7 @@ Nodes (14): Coverage checklist, fn a_limit_rejection_names_the_note_and_an_old_c
 
 ### Community 89 - "keeplin-srv operator runbook"
 Cohesion: 0.12
-Nodes (17): Backup, Capacity & quotas, Disaster-recovery drill, Enabling the key on an existing deployment (one-off re-encrypt pass), Incident quick reference, keeplin-srv operator runbook, Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`) (+9 more)
+Nodes (17): After any restore, Backup, Capacity & quotas, Disaster-recovery drill, From a logical dump, From physical backup / PITR, Incident quick reference, keeplin-srv operator runbook (+9 more)
 
 ### Community 90 - "Keeplin agent guide"
 Cohesion: 0.12
@@ -489,10 +497,6 @@ Nodes (4): 0.A — Contexto común y preparación del issue, Entrada, Instruccio
 Cohesion: 0.22
 Nodes (4): Claude Code instructions, Architecture decision records, Canonical cross-repository decisions, Server-specific decisions
 
-### Community 94 - "0.C — Revisión independiente y adversarial"
-Cohesion: 0.50
-Nodes (4): After any restore, From a logical dump, From physical backup / PITR, Restore
-
 ### Community 95 - "Restore"
 Cohesion: 0.40
 Nodes (4): 0.B — Implementación de un issue, Antes de editar, Implementación, Verificación y entrega
@@ -501,22 +505,46 @@ Nodes (4): 0.B — Implementación de un issue, Antes de editar, Implementación
 Cohesion: 0.50
 Nodes (3): 0.C — Revisión independiente y adversarial, Método, Salida
 
+### Community 97 - "`scripts/companion_tool.py` — deterministic companion fidelity engine"
+Cohesion: 0.25
+Nodes (7): Context metadata, Failure behavior, Fidelity model, Purpose, Related files, `scripts/companion_tool.py` — deterministic companion fidelity engine, Tests
+
+### Community 98 - "`scripts/tests/test_companion_tool.py` — fidelity-tool regression suite"
+Cohesion: 0.33
+Nodes (5): Fixtures, Related files, Run, `scripts/tests/test_companion_tool.py` — fidelity-tool regression suite, What is tested
+
+### Community 99 - "`scripts/context-pack` — reproducible companion context packs"
+Cohesion: 0.40
+Nodes (4): Purpose, Related files, `scripts/context-pack` — reproducible companion context packs, Usage
+
+### Community 100 - "`scripts/sync-companion-code` — synchronize embedded Rust blocks"
+Cohesion: 0.40
+Nodes (4): Purpose, Related files, `scripts/sync-companion-code` — synchronize embedded Rust blocks, Usage
+
+### Community 101 - "Key rotation & re-encryption (`AT_REST_KEY`)"
+Cohesion: 0.33
+Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
+
+### Community 104 - "Restore"
+Cohesion: 0.50
+Nodes (4): Enabling the key on an existing deployment (one-off re-encrypt pass), Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`), Rotating the key
+
 ## Knowledge Gaps
-- **827 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+822 more)
+- **843 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+838 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **9 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.092) - this node is a cross-community bridge._
+  _High betweenness centrality (0.086) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
-  _High betweenness centrality (0.051) - this node is a cross-community bridge._
-- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.043) - this node is a cross-community bridge._
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
+- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `Key rotation & re-encryption (`AT_REST_KEY`)`, `soak.rs`, `materialize.rs`, `mod.rs`?**
+  _High betweenness centrality (0.040) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _827 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _843 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06308818403624956 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**

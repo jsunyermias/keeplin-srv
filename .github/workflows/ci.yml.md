@@ -20,7 +20,9 @@ the steps run.
 
 | Step | What it enforces |
 |------|------------------|
-| `./scripts/check-docs.sh` | every `.rs` has a companion `.md` in the block-complete format: `## Graph context`, every `// md:` marker mirrored + unique, `## Coverage checklist` rows == marker count, no fence elision, no non-marker `.rs` comments (the two-layer navigation model; see README "Navigating this repo") |
+| `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
+| `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
+| `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | syntax fixtures, drift/error detection, fence-only sync and reproducible context packs |
 | `cargo fmt --check --all` | formatting is committed |
 | `cargo test --workspace` | unit + integration tests pass (against the PG service) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero clippy warnings (`--all-targets` also subsumes `cargo check`, so no separate check step) |
