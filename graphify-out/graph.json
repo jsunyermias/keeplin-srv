@@ -2922,8 +2922,8 @@
       "source_location": "L89",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_owner",
-      "community": 10,
-      "community_name": "resolve_note_access",
+      "community": 1,
+      "community_name": "AppState",
       "norm_label": ".owner()"
     },
     {
@@ -3010,8 +3010,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_uuid",
-      "community": 10,
-      "community_name": "resolve_note_access",
+      "community": 1,
+      "community_name": "AppState",
       "norm_label": "uuid"
     },
     {
@@ -3021,8 +3021,8 @@
       "source_location": "",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_result",
-      "community": 10,
-      "community_name": "resolve_note_access",
+      "community": 1,
+      "community_name": "AppState",
       "norm_label": "result"
     },
     {
@@ -3032,8 +3032,8 @@
       "source_location": "L143",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_resolve_notebook_access",
-      "community": 10,
-      "community_name": "resolve_note_access",
+      "community": 1,
+      "community_name": "AppState",
       "norm_label": "resolve_notebook_access()"
     },
     {
@@ -8495,7 +8495,7 @@
       "label": "Summary",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L6",
+      "source_location": "L1",
       "_origin": "ast",
       "id": "github_pull_request_template_summary",
       "community": 69,
@@ -8503,70 +8503,70 @@
       "norm_label": "summary"
     },
     {
-      "label": "Linked issues",
+      "label": "Linked work",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L10",
+      "source_location": "L5",
       "_origin": "ast",
-      "id": "github_pull_request_template_linked_issues",
+      "id": "github_pull_request_template_linked_work",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "linked issues"
+      "norm_label": "linked work"
     },
     {
-      "label": "Type of change",
+      "label": "Author assertions",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L14",
+      "source_location": "L9",
       "_origin": "ast",
-      "id": "github_pull_request_template_type_of_change",
+      "id": "github_pull_request_template_author_assertions",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "type of change"
+      "norm_label": "author assertions"
     },
     {
-      "label": "What changed",
+      "label": "Verification reported by the author",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
       "source_location": "L22",
       "_origin": "ast",
-      "id": "github_pull_request_template_what_changed",
+      "id": "github_pull_request_template_verification_reported_by_the_author",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "what changed"
+      "norm_label": "verification reported by the author"
     },
     {
-      "label": "Database & compatibility",
+      "label": "Verified by CI",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L26",
+      "source_location": "L34",
       "_origin": "ast",
-      "id": "github_pull_request_template_database_compatibility",
+      "id": "github_pull_request_template_verified_by_ci",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "database & compatibility"
+      "norm_label": "verified by ci"
     },
     {
-      "label": "Contract",
+      "label": "Independent review",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L33",
+      "source_location": "L42",
       "_origin": "ast",
-      "id": "github_pull_request_template_contract",
+      "id": "github_pull_request_template_independent_review",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "contract"
+      "norm_label": "independent review"
     },
     {
-      "label": "Verification",
+      "label": "Merge readiness",
       "file_type": "document",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L40",
+      "source_location": "L54",
       "_origin": "ast",
-      "id": "github_pull_request_template_verification",
+      "id": "github_pull_request_template_merge_readiness",
       "community": 69,
       "community_name": "notes",
-      "norm_label": "verification"
+      "norm_label": "merge readiness"
     },
     {
       "label": "ci.yml.md",
@@ -8655,6 +8655,193 @@
       "community": 40,
       "community_name": "`ci.yml` \u2014 continuous integration",
       "norm_label": "related files"
+    },
+    {
+      "label": "AGENTS.md",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "agents",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "norm_label": "agents.md"
+    },
+    {
+      "label": "Keeplin agent guide",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "agents_keeplin_agent_guide",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "keeplin agent guide"
+    },
+    {
+      "label": "What Keeplin is and where work belongs",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L8",
+      "_origin": "ast",
+      "id": "agents_what_keeplin_is_and_where_work_belongs",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "what keeplin is and where work belongs"
+    },
+    {
+      "label": "Commands",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L26",
+      "_origin": "ast",
+      "id": "agents_commands",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "commands"
+    },
+    {
+      "label": "graphify",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L60",
+      "_origin": "ast",
+      "id": "agents_graphify",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "graphify"
+    },
+    {
+      "label": "Companion .md format",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L70",
+      "_origin": "ast",
+      "id": "agents_companion_md_format",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "companion .md format"
+    },
+    {
+      "label": "Documentation & Knowledge Consistency Policy",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L95",
+      "_origin": "ast",
+      "id": "agents_documentation_knowledge_consistency_policy",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "documentation & knowledge consistency policy"
+    },
+    {
+      "label": "Mandatory completion checks",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L101",
+      "_origin": "ast",
+      "id": "agents_mandatory_completion_checks",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "mandatory completion checks"
+    },
+    {
+      "label": "Completion rule",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L119",
+      "_origin": "ast",
+      "id": "agents_completion_rule",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "completion rule"
+    },
+    {
+      "label": "Cross-repo compatibility (keeplin \u2194 keeplin-srv)",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L130",
+      "_origin": "ast",
+      "id": "agents_cross_repo_compatibility_keeplin_keeplin_srv",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "cross-repo compatibility (keeplin \u2194 keeplin-srv)"
+    },
+    {
+      "label": "Persistence and wire invariants",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L147",
+      "_origin": "ast",
+      "id": "agents_persistence_and_wire_invariants",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "persistence and wire invariants"
+    },
+    {
+      "label": "`keeplin`",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L152",
+      "_origin": "ast",
+      "id": "agents_keeplin",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "`keeplin`"
+    },
+    {
+      "label": "`keeplin-srv`",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L157",
+      "_origin": "ast",
+      "id": "agents_keeplin_srv",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "`keeplin-srv`"
+    },
+    {
+      "label": "Workflow and review independence",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L164",
+      "_origin": "ast",
+      "id": "agents_workflow_and_review_independence",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "workflow and review independence"
+    },
+    {
+      "label": "ADR requirements",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L181",
+      "_origin": "ast",
+      "id": "agents_adr_requirements",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "adr requirements"
+    },
+    {
+      "label": "Definition of done",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L189",
+      "_origin": "ast",
+      "id": "agents_definition_of_done",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "definition of done"
+    },
+    {
+      "label": "Protected `main`",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L200",
+      "_origin": "ast",
+      "id": "agents_protected_main",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "protected `main`"
     },
     {
       "label": "ARCHITECTURE.md",
@@ -8872,75 +9059,86 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "claude",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "claude.md"
     },
     {
-      "label": "graphify",
+      "label": "Claude Code instructions",
       "file_type": "document",
       "source_file": "CLAUDE.md",
       "source_location": "L1",
       "_origin": "ast",
-      "id": "claude_graphify",
-      "community": 84,
-      "community_name": "CLAUDE.md",
-      "norm_label": "graphify"
+      "id": "claude_claude_code_instructions",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "norm_label": "claude code instructions"
     },
     {
-      "label": "Companion .md format",
+      "label": "CONTRIBUTING.md",
       "file_type": "document",
-      "source_file": "CLAUDE.md",
-      "source_location": "L11",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L1",
       "_origin": "ast",
-      "id": "claude_companion_md_format",
+      "id": "contributing",
       "community": 84,
       "community_name": "CLAUDE.md",
-      "norm_label": "companion .md format"
+      "norm_label": "contributing.md"
     },
     {
-      "label": "Documentation & Knowledge Consistency Policy",
+      "label": "Contributing to Keeplin",
       "file_type": "document",
-      "source_file": "CLAUDE.md",
-      "source_location": "L17",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L1",
       "_origin": "ast",
-      "id": "claude_documentation_knowledge_consistency_policy",
+      "id": "contributing_contributing_to_keeplin",
       "community": 84,
       "community_name": "CLAUDE.md",
-      "norm_label": "documentation & knowledge consistency policy"
+      "norm_label": "contributing to keeplin"
     },
     {
-      "label": "Mandatory completion checks",
+      "label": "Contribution flow",
       "file_type": "document",
-      "source_file": "CLAUDE.md",
-      "source_location": "L23",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L6",
       "_origin": "ast",
-      "id": "claude_mandatory_completion_checks",
+      "id": "contributing_contribution_flow",
       "community": 84,
       "community_name": "CLAUDE.md",
-      "norm_label": "mandatory completion checks"
+      "norm_label": "contribution flow"
     },
     {
-      "label": "Completion rule",
+      "label": "Cross-repository changes",
       "file_type": "document",
-      "source_file": "CLAUDE.md",
-      "source_location": "L41",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L27",
       "_origin": "ast",
-      "id": "claude_completion_rule",
+      "id": "contributing_cross_repository_changes",
       "community": 84,
       "community_name": "CLAUDE.md",
-      "norm_label": "completion rule"
+      "norm_label": "cross-repository changes"
     },
     {
-      "label": "Cross-repo compatibility (keeplin \u2194 keeplin-srv)",
+      "label": "Branch protection contract",
       "file_type": "document",
-      "source_file": "CLAUDE.md",
-      "source_location": "L52",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L34",
       "_origin": "ast",
-      "id": "claude_cross_repo_compatibility_keeplin_keeplin_srv",
+      "id": "contributing_branch_protection_contract",
       "community": 84,
       "community_name": "CLAUDE.md",
-      "norm_label": "cross-repo compatibility (keeplin \u2194 keeplin-srv)"
+      "norm_label": "branch protection contract"
+    },
+    {
+      "label": "Prompt roles",
+      "file_type": "document",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L48",
+      "_origin": "ast",
+      "id": "contributing_prompt_roles",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "prompt roles"
     },
     {
       "label": "Dockerfile.md",
@@ -9059,8 +9257,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "readme",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "readme.md"
     },
     {
@@ -9221,7 +9419,7 @@
       "label": "Operating in production",
       "file_type": "document",
       "source_file": "README.md",
-      "source_location": "L266",
+      "source_location": "L271",
       "_origin": "ast",
       "id": "readme_operating_in_production",
       "community": 6,
@@ -9232,7 +9430,7 @@
       "label": "Running multiple replicas",
       "file_type": "document",
       "source_file": "README.md",
-      "source_location": "L277",
+      "source_location": "L282",
       "_origin": "ast",
       "id": "readme_running_multiple_replicas",
       "community": 6,
@@ -9243,7 +9441,7 @@
       "label": "Tests",
       "file_type": "document",
       "source_file": "README.md",
-      "source_location": "L285",
+      "source_location": "L290",
       "_origin": "ast",
       "id": "readme_tests",
       "community": 6,
@@ -9254,7 +9452,7 @@
       "label": "License",
       "file_type": "document",
       "source_file": "README.md",
-      "source_location": "L301",
+      "source_location": "L306",
       "_origin": "ast",
       "id": "readme_license",
       "community": 6,
@@ -9268,8 +9466,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "runbook",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "runbook.md"
     },
     {
@@ -9279,7 +9477,7 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "runbook_keeplin_srv_operator_runbook",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "keeplin-srv operator runbook"
     },
@@ -9290,7 +9488,7 @@
       "source_location": "L12",
       "_origin": "ast",
       "id": "runbook_what_to_back_up",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "what to back up"
     },
@@ -9301,7 +9499,7 @@
       "source_location": "L23",
       "_origin": "ast",
       "id": "runbook_backup",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "backup"
     },
@@ -9312,7 +9510,7 @@
       "source_location": "L25",
       "_origin": "ast",
       "id": "runbook_simple_logical_dump_pg_dump",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "simple: logical dump (pg_dump)"
     },
@@ -9323,7 +9521,7 @@
       "source_location": "L45",
       "_origin": "ast",
       "id": "runbook_robust_physical_backups_pitr",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "robust: physical backups + pitr"
     },
@@ -9334,8 +9532,8 @@
       "source_location": "L54",
       "_origin": "ast",
       "id": "runbook_restore",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 95,
+      "community_name": "Restore",
       "norm_label": "restore"
     },
     {
@@ -9345,8 +9543,8 @@
       "source_location": "L56",
       "_origin": "ast",
       "id": "runbook_from_a_logical_dump",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 95,
+      "community_name": "Restore",
       "norm_label": "from a logical dump"
     },
     {
@@ -9356,8 +9554,8 @@
       "source_location": "L72",
       "_origin": "ast",
       "id": "runbook_from_physical_backup_pitr",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 95,
+      "community_name": "Restore",
       "norm_label": "from physical backup / pitr"
     },
     {
@@ -9367,8 +9565,8 @@
       "source_location": "L78",
       "_origin": "ast",
       "id": "runbook_after_any_restore",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 95,
+      "community_name": "Restore",
       "norm_label": "after any restore"
     },
     {
@@ -9378,7 +9576,7 @@
       "source_location": "L88",
       "_origin": "ast",
       "id": "runbook_routine_maintenance",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "routine maintenance"
     },
@@ -9389,8 +9587,8 @@
       "source_location": "L100",
       "_origin": "ast",
       "id": "runbook_key_rotation_re_encryption_at_rest_key",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "key rotation & re-encryption (`at_rest_key`)"
     },
     {
@@ -9400,8 +9598,8 @@
       "source_location": "L106",
       "_origin": "ast",
       "id": "runbook_enabling_the_key_on_an_existing_deployment_one_off_re_encrypt_pass",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "enabling the key on an existing deployment (one-off re-encrypt pass)"
     },
     {
@@ -9411,8 +9609,8 @@
       "source_location": "L126",
       "_origin": "ast",
       "id": "runbook_rotating_the_key",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "rotating the key"
     },
     {
@@ -9422,8 +9620,8 @@
       "source_location": "L142",
       "_origin": "ast",
       "id": "runbook_key_backup_separate_from_database_backups",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "key backup \u2014 separate from database backups"
     },
     {
@@ -9433,7 +9631,7 @@
       "source_location": "L149",
       "_origin": "ast",
       "id": "runbook_capacity_quotas",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "capacity & quotas"
     },
@@ -9444,7 +9642,7 @@
       "source_location": "L156",
       "_origin": "ast",
       "id": "runbook_upgrades",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "upgrades"
     },
@@ -9455,7 +9653,7 @@
       "source_location": "L164",
       "_origin": "ast",
       "id": "runbook_disaster_recovery_drill",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "disaster-recovery drill"
     },
@@ -9466,7 +9664,7 @@
       "source_location": "L179",
       "_origin": "ast",
       "id": "runbook_monitoring_alerting",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "monitoring & alerting"
     },
@@ -9477,7 +9675,7 @@
       "source_location": "L200",
       "_origin": "ast",
       "id": "runbook_incident_quick_reference",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "incident quick reference"
     },
@@ -9488,7 +9686,7 @@
       "source_location": "L210",
       "_origin": "ast",
       "id": "runbook_related_files",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "related files"
     },
@@ -9499,7 +9697,7 @@
       "source_location": "L216",
       "_origin": "ast",
       "id": "runbook_load_soak_drill",
-      "community": 6,
+      "community": 89,
       "community_name": "keeplin-srv operator runbook",
       "norm_label": "load / soak drill"
     },
@@ -9510,8 +9708,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "security",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "security.md"
     },
     {
@@ -9521,8 +9719,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "security_security_keeplin_srv",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "security \u2014 keeplin-srv"
     },
     {
@@ -9532,8 +9730,8 @@
       "source_location": "L3",
       "_origin": "ast",
       "id": "security_threat_model_at_a_glance",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "threat model at a glance"
     },
     {
@@ -9543,8 +9741,8 @@
       "source_location": "L14",
       "_origin": "ast",
       "id": "security_what_the_server_can_read_and_why",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "what the server can read \u2014 and why"
     },
     {
@@ -9554,8 +9752,8 @@
       "source_location": "L34",
       "_origin": "ast",
       "id": "security_operational_hardening_checklist",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "operational hardening checklist"
     },
     {
@@ -9565,8 +9763,8 @@
       "source_location": "L48",
       "_origin": "ast",
       "id": "security_review_status_known_limits",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "review status & known limits"
     },
     {
@@ -9576,8 +9774,8 @@
       "source_location": "L70",
       "_origin": "ast",
       "id": "security_reporting_a_vulnerability",
-      "community": 6,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 91,
+      "community_name": "Security \u2014 keeplin-srv",
       "norm_label": "reporting a vulnerability"
     },
     {
@@ -17301,6 +17499,160 @@
       "community": 38,
       "community_name": "`docker-compose.yml` \u2014 Postgres + server stack",
       "norm_label": "related files"
+    },
+    {
+      "label": "0.A-prompt-comun.md",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_a_prompt_comun",
+      "community": 92,
+      "community_name": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "norm_label": "0.a-prompt-comun.md"
+    },
+    {
+      "label": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_a_prompt_comun_0_a_contexto_com\u00fan_y_preparaci\u00f3n_del_issue",
+      "community": 92,
+      "community_name": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "norm_label": "0.a \u2014 contexto comun y preparacion del issue"
+    },
+    {
+      "label": "Entrada",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L5",
+      "_origin": "ast",
+      "id": "docs_prompts_0_a_prompt_comun_entrada",
+      "community": 92,
+      "community_name": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "norm_label": "entrada"
+    },
+    {
+      "label": "Instrucciones",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L11",
+      "_origin": "ast",
+      "id": "docs_prompts_0_a_prompt_comun_instrucciones",
+      "community": 92,
+      "community_name": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "norm_label": "instrucciones"
+    },
+    {
+      "label": "Salida",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L26",
+      "_origin": "ast",
+      "id": "docs_prompts_0_a_prompt_comun_salida",
+      "community": 92,
+      "community_name": "0.A \u2014 Contexto com\u00fan y preparaci\u00f3n del issue",
+      "norm_label": "salida"
+    },
+    {
+      "label": "0.B-prompt-implementacion-issue.md",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_b_prompt_implementacion_issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "0.b-prompt-implementacion-issue.md"
+    },
+    {
+      "label": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "0.b \u2014 implementacion de un issue"
+    },
+    {
+      "label": "Antes de editar",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L5",
+      "_origin": "ast",
+      "id": "docs_prompts_0_b_prompt_implementacion_issue_antes_de_editar",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "antes de editar"
+    },
+    {
+      "label": "Implementaci\u00f3n",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L14",
+      "_origin": "ast",
+      "id": "docs_prompts_0_b_prompt_implementacion_issue_implementaci\u00f3n",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "implementacion"
+    },
+    {
+      "label": "Verificaci\u00f3n y entrega",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L25",
+      "_origin": "ast",
+      "id": "docs_prompts_0_b_prompt_implementacion_issue_verificaci\u00f3n_y_entrega",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "verificacion y entrega"
+    },
+    {
+      "label": "0.C-prompt-revision-seguridad.md",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_c_prompt_revision_seguridad",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "0.c-prompt-revision-seguridad.md"
+    },
+    {
+      "label": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "docs_prompts_0_c_prompt_revision_seguridad_0_c_revisi\u00f3n_independiente_y_adversarial",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "0.c \u2014 revision independiente y adversarial"
+    },
+    {
+      "label": "M\u00e9todo",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L7",
+      "_origin": "ast",
+      "id": "docs_prompts_0_c_prompt_revision_seguridad_m\u00e9todo",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "metodo"
+    },
+    {
+      "label": "Salida",
+      "file_type": "document",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L25",
+      "_origin": "ast",
+      "id": "docs_prompts_0_c_prompt_revision_seguridad_salida",
+      "community": 84,
+      "community_name": "CLAUDE.md",
+      "norm_label": "salida"
     },
     {
       "label": "templates/README.md",
@@ -51507,40 +51859,51 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L33",
+      "source_location": "L9",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_pull_request_template",
-      "target": "github_pull_request_template_contract",
+      "target": "github_pull_request_template_author_assertions",
       "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L26",
+      "source_location": "L42",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_pull_request_template",
-      "target": "github_pull_request_template_database_compatibility",
+      "target": "github_pull_request_template_independent_review",
       "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L10",
+      "source_location": "L5",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_pull_request_template",
-      "target": "github_pull_request_template_linked_issues",
+      "target": "github_pull_request_template_linked_work",
       "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L6",
+      "source_location": "L54",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "github_pull_request_template",
+      "target": "github_pull_request_template_merge_readiness",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".github/pull_request_template.md",
+      "source_location": "L1",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_pull_request_template",
@@ -51551,33 +51914,22 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": ".github/pull_request_template.md",
-      "source_location": "L14",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "github_pull_request_template",
-      "target": "github_pull_request_template_type_of_change",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": ".github/pull_request_template.md",
-      "source_location": "L40",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "github_pull_request_template",
-      "target": "github_pull_request_template_verification",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": ".github/pull_request_template.md",
       "source_location": "L22",
       "weight": 1.0,
       "_origin": "ast",
       "source": "github_pull_request_template",
-      "target": "github_pull_request_template_what_changed",
+      "target": "github_pull_request_template_verification_reported_by_the_author",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": ".github/pull_request_template.md",
+      "source_location": "L34",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "github_pull_request_template",
+      "target": "github_pull_request_template_verified_by_ci",
       "confidence_score": 1.0
     },
     {
@@ -51655,6 +52007,215 @@
       "_origin": "ast",
       "source": "github_workflows_ci_yml_ci_yml_continuous_integration",
       "target": "github_workflows_ci_yml_when_it_runs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents",
+      "target": "agents_keeplin_agent_guide",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "CLAUDE.md",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "claude",
+      "target": "agents",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing",
+      "target": "agents",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "README.md",
+      "source_location": "L244",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "readme",
+      "target": "agents",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L181",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_adr_requirements",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L26",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_commands",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L70",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_companion_md_format",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L130",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_cross_repo_compatibility_keeplin_keeplin_srv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L189",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_definition_of_done",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L95",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_documentation_knowledge_consistency_policy",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L60",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_graphify",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L147",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_persistence_and_wire_invariants",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L200",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_protected_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L8",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_what_keeplin_is_and_where_work_belongs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L164",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_workflow_and_review_independence",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L119",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_documentation_knowledge_consistency_policy",
+      "target": "agents_completion_rule",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L101",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_documentation_knowledge_consistency_policy",
+      "target": "agents_mandatory_completion_checks",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L152",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_persistence_and_wire_invariants",
+      "target": "agents_keeplin",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L157",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_persistence_and_wire_invariants",
+      "target": "agents_keeplin_srv",
       "confidence_score": 1.0
     },
     {
@@ -51848,66 +52409,110 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "CLAUDE.md",
-      "source_location": "L11",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "claude",
-      "target": "claude_companion_md_format",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "CLAUDE.md",
-      "source_location": "L52",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "claude",
-      "target": "claude_cross_repo_compatibility_keeplin_keeplin_srv",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "CLAUDE.md",
-      "source_location": "L17",
-      "weight": 1.0,
-      "_origin": "ast",
-      "source": "claude",
-      "target": "claude_documentation_knowledge_consistency_policy",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "CLAUDE.md",
       "source_location": "L1",
       "weight": 1.0,
       "_origin": "ast",
       "source": "claude",
-      "target": "claude_graphify",
+      "target": "claude_claude_code_instructions",
       "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
-      "source_file": "CLAUDE.md",
-      "source_location": "L41",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L1",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "claude_documentation_knowledge_consistency_policy",
-      "target": "claude_completion_rule",
+      "source": "contributing",
+      "target": "contributing_contributing_to_keeplin",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L50",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing",
+      "target": "docs_prompts_0_a_prompt_comun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing",
+      "target": "docs_prompts_0_b_prompt_implementacion_issue",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L20",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing",
+      "target": "docs_prompts_0_c_prompt_revision_seguridad",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "README.md",
+      "source_location": "L245",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "readme",
+      "target": "contributing",
       "confidence_score": 1.0
     },
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
-      "source_file": "CLAUDE.md",
-      "source_location": "L23",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L34",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "claude_documentation_knowledge_consistency_policy",
-      "target": "claude_mandatory_completion_checks",
+      "source": "contributing_contributing_to_keeplin",
+      "target": "contributing_branch_protection_contract",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L6",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing_contributing_to_keeplin",
+      "target": "contributing_contribution_flow",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L27",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing_contributing_to_keeplin",
+      "target": "contributing_cross_repository_changes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L48",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "contributing_contributing_to_keeplin",
+      "target": "contributing_prompt_roles",
       "confidence_score": 1.0
     },
     {
@@ -52024,7 +52629,7 @@
       "relation": "references",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L269",
+      "source_location": "L274",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme",
@@ -52035,7 +52640,7 @@
       "relation": "references",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L272",
+      "source_location": "L277",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme",
@@ -52090,7 +52695,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L301",
+      "source_location": "L306",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme_keeplin_server",
@@ -52123,7 +52728,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L266",
+      "source_location": "L271",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme_keeplin_server",
@@ -52167,7 +52772,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L285",
+      "source_location": "L290",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme_keeplin_server",
@@ -52222,7 +52827,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "README.md",
-      "source_location": "L277",
+      "source_location": "L282",
       "weight": 1.0,
       "_origin": "ast",
       "source": "readme_operating_in_production",
@@ -59919,6 +60524,127 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_a_prompt_comun",
+      "target": "docs_prompts_0_a_prompt_comun_0_a_contexto_com\u00fan_y_preparaci\u00f3n_del_issue",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L5",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_a_prompt_comun_0_a_contexto_com\u00fan_y_preparaci\u00f3n_del_issue",
+      "target": "docs_prompts_0_a_prompt_comun_entrada",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L11",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_a_prompt_comun_0_a_contexto_com\u00fan_y_preparaci\u00f3n_del_issue",
+      "target": "docs_prompts_0_a_prompt_comun_instrucciones",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.A-prompt-comun.md",
+      "source_location": "L26",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_a_prompt_comun_0_a_contexto_com\u00fan_y_preparaci\u00f3n_del_issue",
+      "target": "docs_prompts_0_a_prompt_comun_salida",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_b_prompt_implementacion_issue",
+      "target": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L5",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
+      "target": "docs_prompts_0_b_prompt_implementacion_issue_antes_de_editar",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L14",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
+      "target": "docs_prompts_0_b_prompt_implementacion_issue_implementaci\u00f3n",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.B-prompt-implementacion-issue.md",
+      "source_location": "L25",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
+      "target": "docs_prompts_0_b_prompt_implementacion_issue_verificaci\u00f3n_y_entrega",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_c_prompt_revision_seguridad",
+      "target": "docs_prompts_0_c_prompt_revision_seguridad_0_c_revisi\u00f3n_independiente_y_adversarial",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L7",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_c_prompt_revision_seguridad_0_c_revisi\u00f3n_independiente_y_adversarial",
+      "target": "docs_prompts_0_c_prompt_revision_seguridad_m\u00e9todo",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "docs/prompts/0.C-prompt-revision-seguridad.md",
+      "source_location": "L25",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "docs_prompts_0_c_prompt_revision_seguridad_0_c_revisi\u00f3n_independiente_y_adversarial",
+      "target": "docs_prompts_0_c_prompt_revision_seguridad_salida",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "references",
       "confidence": "EXTRACTED",
       "source_file": "docs/templates/README.md",
@@ -61438,5 +62164,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "24016f03798a2e9bec2b9e6ac0025a548680b638"
+  "built_at_commit": "5005e695833ed69d876489a87ea6e1182336b203"
 }

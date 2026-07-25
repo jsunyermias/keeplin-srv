@@ -1,16 +1,16 @@
 # Graph Report - keeplin-srv  (2026-07-25)
 
 ## Corpus Check
-- 115 files · ~163,682 words
+- 120 files · ~165,699 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1727 nodes · 3652 edges · 89 communities (83 shown, 6 thin omitted)
+- 1759 nodes · 3686 edges · 96 communities (89 shown, 7 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `24016f03`
+- Built from commit: `5005e695`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -103,6 +103,13 @@
 - check-graph.sh
 - core_compat.rs
 - `tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted
+- keeplin-srv operator runbook
+- Keeplin agent guide
+- Security — keeplin-srv
+- 0.A — Contexto común y preparación del issue
+- 0.B — Implementación de un issue
+- 0.C — Revisión independiente y adversarial
+- Restore
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 162 edges
@@ -131,15 +138,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (89 total, 6 thin omitted)
+## Communities (96 total, 7 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
 Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
 
 ### Community 1 - "AppState"
-Cohesion: 0.10
-Nodes (96): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+88 more)
+Cohesion: 0.09
+Nodes (99): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+91 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
@@ -158,8 +165,8 @@ Cohesion: 0.16
 Nodes (48): router(), delete_account_requires_password_and_cascades(), device(), device_connecting_later_receives_backlog(), duplicate_batches_are_deduplicated(), email_flows_answer_501_when_unconfigured(), email_is_normalized_and_validated(), email_verification_and_password_reset_flows() (+40 more)
 
 ### Community 6 - "keeplin-srv operator runbook"
-Cohesion: 0.04
-Nodes (45): At-rest encryption, Collaborative protocol (`GET /api/ws?token=<jwt>`), Connecting a keeplin-daemon, Device sync relay (`GET /api/sync`), Docker, Environment variables, Keeplin Server, License (+37 more)
+Cohesion: 0.11
+Nodes (18): At-rest encryption, Collaborative protocol (`GET /api/ws?token=<jwt>`), Connecting a keeplin-daemon, Device sync relay (`GET /api/sync`), Docker, Environment variables, Keeplin Server, License (+10 more)
 
 ### Community 7 - "soak.rs"
 Cohesion: 0.11
@@ -174,8 +181,8 @@ Cohesion: 0.14
 Nodes (27): authenticate(), changes_frame(), deliver_backlog(), handle_incoming(), handler(), materialize(), relay_loop(), Arc (+19 more)
 
 ### Community 10 - "resolve_note_access"
-Cohesion: 0.12
-Nodes (9): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), resolve_notebook_access(), Access, Capabilities, Result, Self, Uuid (+1 more)
+Cohesion: 0.13
+Nodes (6): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Access, Capabilities, Self, unknown_bits_are_masked_off()
 
 ### Community 11 - "materialize.rs"
 Cohesion: 0.23
@@ -395,7 +402,7 @@ Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_
 
 ### Community 69 - "notes"
 Cohesion: 0.25
-Nodes (7): Contract, Database & compatibility, Linked issues, Summary, Type of change, Verification, What changed
+Nodes (7): Author assertions, Independent review, Linked work, Merge readiness, Summary, Verification reported by the author, Verified by CI
 
 ### Community 70 - "0008_changes_history_index.sql"
 Cohesion: 0.33
@@ -450,8 +457,8 @@ Cohesion: 0.22
 Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refactors, Related files, `scripts/check-docs.sh` — contractual-docs CI check, What it checks, What it deliberately does NOT verify
 
 ### Community 84 - "CLAUDE.md"
-Cohesion: 0.29
-Nodes (6): Companion .md format, Completion rule, Cross-repo compatibility (keeplin ↔ keeplin-srv), Documentation & Knowledge Consistency Policy, graphify, Mandatory completion checks
+Cohesion: 0.13
+Nodes (12): Branch protection contract, Contributing to Keeplin, Contribution flow, Cross-repository changes, Prompt roles, 0.B — Implementación de un issue, Antes de editar, Implementación (+4 more)
 
 ### Community 87 - "core_compat.rs"
 Cohesion: 0.19
@@ -461,25 +468,49 @@ Nodes (13): a_limit_rejection_names_the_note_and_an_old_client_still_parses_it()
 Cohesion: 0.13
 Nodes (14): Coverage checklist, fn a_limit_rejection_names_the_note_and_an_old_client_still_parses_it, fn every_client_message_round_trips_against_keeplin_core, fn every_server_message_round_trips_against_keeplin_core, fn fixed_uuid, fn fixed_vv, fn protocol_version_matches_keeplin_core, fn round_trips_through_core (+6 more)
 
+### Community 89 - "keeplin-srv operator runbook"
+Cohesion: 0.15
+Nodes (13): Backup, Capacity & quotas, Disaster-recovery drill, Incident quick reference, keeplin-srv operator runbook, Load / soak drill, Monitoring & alerting, Related files (+5 more)
+
+### Community 90 - "Keeplin agent guide"
+Cohesion: 0.12
+Nodes (16): ADR requirements, Commands, Companion .md format, Completion rule, Cross-repo compatibility (keeplin ↔ keeplin-srv), Definition of done, Documentation & Knowledge Consistency Policy, graphify (+8 more)
+
+### Community 91 - "Security — keeplin-srv"
+Cohesion: 0.33
+Nodes (6): Operational hardening checklist, Reporting a vulnerability, Review status & known limits, Security — keeplin-srv, Threat model at a glance, What the server can read — and why
+
+### Community 92 - "0.A — Contexto común y preparación del issue"
+Cohesion: 0.40
+Nodes (4): 0.A — Contexto común y preparación del issue, Entrada, Instrucciones, Salida
+
+### Community 94 - "0.C — Revisión independiente y adversarial"
+Cohesion: 0.50
+Nodes (4): Enabling the key on an existing deployment (one-off re-encrypt pass), Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`), Rotating the key
+
+### Community 95 - "Restore"
+Cohesion: 0.50
+Nodes (4): After any restore, From a logical dump, From physical backup / PITR, Restore
+
 ## Knowledge Gaps
-- **804 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+799 more)
+- **825 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+820 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.094) - this node is a cross-community bridge._
-- **Why does `AppError` connect `AppError` to `AppState`, `collab.rs`, `Cipher`, `resolve_note_access`, `auth_mw`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
+  _High betweenness centrality (0.092) - this node is a cross-community bridge._
+- **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
+  _High betweenness centrality (0.051) - this node is a cross-community bridge._
 - **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.044) - this node is a cross-community bridge._
+  _High betweenness centrality (0.043) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _804 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _825 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06308818403624956 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.09978644923315862 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0945193171608266 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08604038630377524 - nodes in this community are weakly interconnected._
