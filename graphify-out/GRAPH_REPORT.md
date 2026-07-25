@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-26)
+# Graph Report - keeplin-srv  (2026-07-25)
 
 ## Corpus Check
-- 130 files · ~177,737 words
+- 130 files · ~178,827 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1846 nodes · 3838 edges · 104 communities (96 shown, 8 thin omitted)
+- 1847 nodes · 3840 edges · 105 communities (97 shown, 8 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 38 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `725cbcce`
+- Built from commit: `eb3c2610`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -118,6 +118,7 @@
 - Key rotation & re-encryption (`AT_REST_KEY`)
 - context-pack script
 - sync-companion-code script
+- Capabilities
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 162 edges
@@ -146,15 +147,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (104 total, 8 thin omitted)
+## Communities (105 total, 8 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
 Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
 
 ### Community 1 - "AppState"
-Cohesion: 0.07
-Nodes (105): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+97 more)
+Cohesion: 0.09
+Nodes (99): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+91 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
@@ -528,6 +529,10 @@ Nodes (4): Purpose, Related files, `scripts/sync-companion-code` — synchronize
 Cohesion: 0.33
 Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
 
+### Community 104 - "Capabilities"
+Cohesion: 0.13
+Nodes (6): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Access, Capabilities, Self, unknown_bits_are_masked_off()
+
 ## Knowledge Gaps
 - **848 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+843 more)
   These have ≤1 connection - possible missing edges or undocumented components.
@@ -547,6 +552,6 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06308818403624956 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.06776277157956548 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.0945193171608266 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08604038630377524 - nodes in this community are weakly interconnected._

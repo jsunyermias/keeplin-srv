@@ -102,5 +102,6 @@
   "100": "`scripts/sync-companion-code` — synchronize embedded Rust blocks",
   "101": "Key rotation & re-encryption (`AT_REST_KEY`)",
   "102": "context-pack script",
-  "103": "sync-companion-code script"
+  "103": "sync-companion-code script",
+  "104": "Capabilities"
 }
