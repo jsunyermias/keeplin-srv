@@ -398,6 +398,23 @@ environment mutation, so the tests are parallel-safe).
 
 **Repeated context** — Issue #19's contract in executable form.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::*;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
 ### fn weak_secrets_are_rejected
 
 **Identification** — `#[test]`; marker
@@ -501,5 +518,6 @@ and carrying its marker in the code:
 | 7 | `impl Config` | `// md:impl Config` | impl Config |
 | 8 | `fn from_env` | `// md:impl Config > fn from_env` | impl Config › fn from_env |
 | 9 | `mod tests` | `// md:mod tests` | mod tests |
-| 10 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
-| 11 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |
+| 10 | `imports` | `// md:mod tests > imports` |
+| 11 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
+| 12 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |

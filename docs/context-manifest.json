@@ -17,24 +17,24 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         }
       ],
@@ -97,7 +97,7 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/reencrypt.rs",
           "required": false
         }
@@ -153,7 +153,7 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         }
@@ -218,39 +218,39 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/protocol.rs",
           "required": true
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         }
       ],
@@ -339,57 +339,57 @@
       "direct_dependencies": [],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/integration.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/materialize.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/quotas.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/soak.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/integration.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/soak.rs"
         }
       ],
@@ -409,6 +409,7 @@
           "impl Config",
           "impl Config > fn from_env",
           "mod tests",
+          "mod tests > imports",
           "mod tests > fn weak_secrets_are_rejected",
           "mod tests > fn a_strong_secret_is_accepted"
         ]
@@ -451,28 +452,28 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
@@ -492,6 +493,7 @@
           "impl Cipher > fn encrypt",
           "impl Cipher > fn decrypt",
           "mod tests",
+          "mod tests > imports",
           "mod tests > fn test_key",
           "mod tests > fn disabled_is_passthrough",
           "mod tests > fn round_trips_and_tags",
@@ -545,57 +547,57 @@
       "direct_dependencies": [],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/crypto.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/crypto.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
@@ -657,97 +659,97 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/mail.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/main.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/integration.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/materialize.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/quotas.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/soak.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/integration.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/reencrypt.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/soak.rs"
         }
       ],
@@ -840,6 +842,7 @@
           "ExportResponse",
           "fn export_note",
           "mod tests",
+          "mod tests > imports",
           "mod tests > fn protocol_compatibility_is_exact_match"
         ]
       },
@@ -931,21 +934,21 @@
       "direct_dependencies": [],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs"
         }
       ],
@@ -1006,12 +1009,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         }
@@ -1071,29 +1074,29 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         }
       ],
@@ -1123,6 +1126,7 @@
           "fn resolve_note_access",
           "fn resolve_notebook_access",
           "mod tests",
+          "mod tests > imports",
           "mod tests > fn higher_bits_imply_lower_ones",
           "mod tests > fn read_alone_implies_nothing_more",
           "mod tests > fn unknown_bits_are_masked_off",
@@ -1172,13 +1176,13 @@
       "direct_dependencies": [],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         }
       ],
@@ -1244,14 +1248,14 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         }
       ],
@@ -1276,6 +1280,7 @@
           "impl RateLimiter > fn bucket_count",
           "fn rate_limit_mw",
           "mod tests",
+          "mod tests > imports",
           "mod tests > fn ip",
           "mod tests > fn disabled_always_allows",
           "mod tests > fn burst_then_throttle_then_refill",
@@ -1321,25 +1326,25 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/crypto.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/bin/reencrypt.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/bin/reencrypt.rs"
         }
       ],
@@ -1401,85 +1406,85 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/mail.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/ratelimit.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/sync.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/bus.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/main.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/ratelimit.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/sync.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/sync.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab.rs"
         }
       ],
@@ -1538,62 +1543,62 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/crypto.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/error.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/mail.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/sync.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/auth.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/collab.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/permissions.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/sync.rs"
         }
       ],
@@ -1775,19 +1780,19 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/store.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/state.rs"
         }
       ],
@@ -1856,12 +1861,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
@@ -1965,7 +1970,7 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs",
           "required": false
         }
@@ -2019,7 +2024,7 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs",
           "required": false
         }
@@ -2073,7 +2078,7 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_e2e_common/mod.rs",
           "required": false
         }
@@ -2133,41 +2138,41 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
       ],
       "direct_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_e2e.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_resources_e2e.rs"
         }
       ],
       "high_risk_dependents": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_e2e.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs"
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/tests/collab_client_resources_e2e.rs"
         }
       ],
@@ -2318,12 +2323,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
@@ -2412,12 +2417,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
@@ -2493,12 +2498,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
@@ -2565,12 +2570,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }
@@ -2632,12 +2637,12 @@
       },
       "direct_dependencies": [
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/config.rs",
           "required": false
         },
         {
-          "origin": "INFERRED",
+          "origin": "EXTRACTED",
           "path": "crates/keeplin-srv/src/http.rs",
           "required": false
         }

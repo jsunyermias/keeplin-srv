@@ -3053,6 +3053,23 @@ below.
 **Dependencies** — `super::*`. **Used by** — `cargo test`. **Repeated context** —
 none.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::*;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
 ### fn protocol_compatibility_is_exact_match
 
 **Identification** — `#[test]`; marker
@@ -3212,4 +3229,5 @@ and carrying its marker in the code:
 | 80 | `struct ExportResponse` | `// md:ExportResponse` |
 | 81 | `fn export_note` | `// md:fn export_note` |
 | 82 | `mod tests` | `// md:mod tests` |
-| 83 | `fn protocol_compatibility_is_exact_match` | `// md:mod tests > fn protocol_compatibility_is_exact_match` |
+| 83 | `imports` | `// md:mod tests > imports` |
+| 84 | `fn protocol_compatibility_is_exact_match` | `// md:mod tests > fn protocol_compatibility_is_exact_match` |

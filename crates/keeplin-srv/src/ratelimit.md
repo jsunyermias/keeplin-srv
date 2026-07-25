@@ -434,6 +434,24 @@ via the `now` parameter — no sleeping, no wall clock).
 **Repeated context** — These pin the operational contract: disabled = unlimited,
 burst-then-throttle-then-refill, per-IP isolation, and bounded memory (issue #33).
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::*;
+    use std::time::Duration;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
 ### fn ip
 
 **Identification** — test helper; marker `// md:mod tests > fn ip`.
@@ -633,8 +651,9 @@ points) and carrying its marker in the code:
 | 11 | `fn bucket_count` | `// md:impl RateLimiter > fn bucket_count` | impl RateLimiter › fn bucket_count |
 | 12 | `fn rate_limit_mw` | `// md:fn rate_limit_mw` | fn rate_limit_mw |
 | 13 | `mod tests` | `// md:mod tests` | mod tests |
-| 14 | `fn ip` | `// md:mod tests > fn ip` | mod tests › fn ip |
-| 15 | `fn disabled_always_allows` | `// md:mod tests > fn disabled_always_allows` | mod tests › fn disabled_always_allows |
-| 16 | `fn burst_then_throttle_then_refill` | `// md:mod tests > fn burst_then_throttle_then_refill` | mod tests › fn burst_then_throttle_then_refill |
-| 17 | `fn separate_ips_have_separate_buckets` | `// md:mod tests > fn separate_ips_have_separate_buckets` | mod tests › fn separate_ips_have_separate_buckets |
-| 18 | `fn idle_buckets_are_swept_after_the_interval` | `// md:mod tests > fn idle_buckets_are_swept_after_the_interval` | mod tests › fn idle_buckets_are_swept_after_the_interval |
+| 14 | `imports` | `// md:mod tests > imports` |
+| 15 | `fn ip` | `// md:mod tests > fn ip` | mod tests › fn ip |
+| 16 | `fn disabled_always_allows` | `// md:mod tests > fn disabled_always_allows` | mod tests › fn disabled_always_allows |
+| 17 | `fn burst_then_throttle_then_refill` | `// md:mod tests > fn burst_then_throttle_then_refill` | mod tests › fn burst_then_throttle_then_refill |
+| 18 | `fn separate_ips_have_separate_buckets` | `// md:mod tests > fn separate_ips_have_separate_buckets` | mod tests › fn separate_ips_have_separate_buckets |
+| 19 | `fn idle_buckets_are_swept_after_the_interval` | `// md:mod tests > fn idle_buckets_are_swept_after_the_interval` | mod tests › fn idle_buckets_are_swept_after_the_interval |

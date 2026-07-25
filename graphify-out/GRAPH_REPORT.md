@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-25)
+# Graph Report - keeplin-srv  (2026-07-26)
 
 ## Corpus Check
-- 130 files · ~176,963 words
+- 130 files · ~177,737 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1837 nodes · 3825 edges · 105 communities (96 shown, 9 thin omitted)
+- 1846 nodes · 3838 edges · 104 communities (96 shown, 8 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 38 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `60095693`
+- Built from commit: `725cbcce`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -118,7 +118,6 @@
 - Key rotation & re-encryption (`AT_REST_KEY`)
 - context-pack script
 - sync-companion-code script
-- Restore
 
 ## God Nodes (most connected - your core abstractions)
 1. `AppError` - 162 edges
@@ -147,15 +146,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (105 total, 9 thin omitted)
+## Communities (104 total, 8 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
 Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
 
 ### Community 1 - "AppState"
-Cohesion: 0.09
-Nodes (100): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+92 more)
+Cohesion: 0.07
+Nodes (105): Bytes, AuthedUser, access_cutoff(), change_password(), create_device(), create_note(), create_notebook_share(), create_share() (+97 more)
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
@@ -166,12 +165,12 @@ Cohesion: 0.19
 Nodes (57): a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected(), capability_grants_enforce_hierarchy_and_escalation(), concurrent_updates_resolve_deterministically(), create_note(), deleting_a_device_revokes_its_collab_token(), deleting_a_device_revokes_its_token(), export_body(), forged_writer_is_rejected() (+49 more)
 
 ### Community 4 - "quotas.rs"
-Cohesion: 0.12
-Nodes (30): dev_insecure(), env_parse(), is_weak_secret(), resolve_jwt_secret(), Config, Option, Self, String (+22 more)
+Cohesion: 0.32
+Nodes (18): device(), login(), note_quota_blocks_creation_past_the_limit(), note_quota_disabled_by_default(), post_note(), put_blob(), quota_config(), register() (+10 more)
 
 ### Community 5 - "integration.rs"
-Cohesion: 0.16
-Nodes (48): router(), delete_account_requires_password_and_cascades(), device(), device_connecting_later_receives_backlog(), duplicate_batches_are_deduplicated(), email_flows_answer_501_when_unconfigured(), email_is_normalized_and_validated(), email_verification_and_password_reset_flows() (+40 more)
+Cohesion: 0.10
+Nodes (60): dev_insecure(), env_parse(), is_weak_secret(), resolve_jwt_secret(), Config, Option, Self, String (+52 more)
 
 ### Community 6 - "keeplin-srv operator runbook"
 Cohesion: 0.11
@@ -190,8 +189,8 @@ Cohesion: 0.14
 Nodes (27): authenticate(), changes_frame(), deliver_backlog(), handle_incoming(), handler(), materialize(), relay_loop(), Arc (+19 more)
 
 ### Community 10 - "resolve_note_access"
-Cohesion: 0.19
-Nodes (5): higher_bits_imply_lower_ones(), read_alone_implies_nothing_more(), Capabilities, Self, unknown_bits_are_masked_off()
+Cohesion: 0.50
+Nodes (4): After any restore, From a logical dump, From physical backup / PITR, Restore
 
 ### Community 11 - "materialize.rs"
 Cohesion: 0.23
@@ -219,7 +218,7 @@ Nodes (82): CAPABILITIES, Coverage checklist, fn access_cutoff, fn change_passwo
 
 ### Community 17 - "`permissions.rs` — note capabilities"
 Cohesion: 0.07
-Nodes (26): accessors, can_* accessors, consts, Coverage checklist, fn all, fn bits, fn contains, fn empty (+18 more)
+Nodes (27): accessors, can_* accessors, consts, Coverage checklist, fn all, fn bits, fn contains, fn empty (+19 more)
 
 ### Community 18 - "`sync.rs` — the device sync relay"
 Cohesion: 0.09
@@ -247,7 +246,7 @@ Nodes (35): `collab.rs` — the collaborative session engine, Constants, Coverag
 
 ### Community 24 - "`ratelimit.rs` — per-IP token-bucket rate limiter"
 Cohesion: 0.09
-Nodes (21): Coverage checklist, fn bucket_count, fn burst_then_throttle_then_refill, fn check, fn disabled_always_allows, fn enabled, fn idle_buckets_are_swept_after_the_interval, fn ip (+13 more)
+Nodes (22): Coverage checklist, fn bucket_count, fn burst_then_throttle_then_refill, fn check, fn disabled_always_allows, fn enabled, fn idle_buckets_are_swept_after_the_interval, fn ip (+14 more)
 
 ### Community 25 - "keeplin-srv — Architecture overview"
 Cohesion: 0.25
@@ -259,7 +258,7 @@ Nodes (15): `auth.rs` — passwords, tokens, and the auth middleware, Coverage c
 
 ### Community 27 - "`src/crypto.rs` — at-rest encryption of note titles and line content"
 Cohesion: 0.10
-Nodes (19): Constants, Coverage checklist, `crypto.rs` — at-rest encryption of note titles and line content, fn bad_key_length_rejected, fn decrypt, fn disabled_is_passthrough, fn enabled, fn encrypt (+11 more)
+Nodes (20): Constants, Coverage checklist, `crypto.rs` — at-rest encryption of note titles and line content, fn bad_key_length_rejected, fn decrypt, fn disabled_is_passthrough, fn enabled, fn encrypt (+12 more)
 
 ### Community 28 - "`main.rs` — keeplin-srv entry point"
 Cohesion: 0.22
@@ -335,7 +334,7 @@ Nodes (6): `bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper, Coverage chec
 
 ### Community 46 - "`config.rs` — runtime configuration"
 Cohesion: 0.12
-Nodes (15): `config.rs` — runtime configuration, Coverage checklist, fn a_strong_secret_is_accepted, fn dev_insecure, fn env_parse, fn from_env, fn is_weak_secret, fn resolve_jwt_secret (+7 more)
+Nodes (16): `config.rs` — runtime configuration, Coverage checklist, fn a_strong_secret_is_accepted, fn dev_insecure, fn env_parse, fn from_env, fn is_weak_secret, fn resolve_jwt_secret (+8 more)
 
 ### Community 47 - "`lib.rs` — keeplin-srv library root"
 Cohesion: 0.40
@@ -401,13 +400,17 @@ Nodes (7): fn forged_writer_is_rejected, fn import_then_export_roundtrip, fn out
 Cohesion: 0.29
 Nodes (6): Purpose, Related files, Safety, `scripts/dr-drill.sh` — disaster-recovery restore drill, Usage, What it does
 
+### Community 65 - "note_shares"
+Cohesion: 0.67
+Nodes (3): fn protocol_compatibility_is_exact_match, imports, mod tests
+
 ### Community 67 - "0007_per_user_batch_dedup.sql"
 Cohesion: 0.40
 Nodes (4): `0007_per_user_batch_dedup.sql` — scope batch dedup to the owning user, Purpose, Related files, What it changes
 
 ### Community 68 - "reencrypt.rs"
-Cohesion: 0.19
-Nodes (29): Exception, build_manifest(), build_pack(), _bullets(), CompanionError, _extract_item(), Fence, _item_kind() (+21 more)
+Cohesion: 0.18
+Nodes (31): Exception, build_manifest(), build_pack(), _bullets(), CompanionError, _container_preamble_error(), _extract_item(), Fence (+23 more)
 
 ### Community 69 - "notes"
 Cohesion: 0.25
@@ -479,7 +482,7 @@ Nodes (14): Coverage checklist, fn a_limit_rejection_names_the_note_and_an_old_c
 
 ### Community 89 - "keeplin-srv operator runbook"
 Cohesion: 0.12
-Nodes (17): After any restore, Backup, Capacity & quotas, Disaster-recovery drill, From a logical dump, From physical backup / PITR, Incident quick reference, keeplin-srv operator runbook (+9 more)
+Nodes (17): Backup, Capacity & quotas, Disaster-recovery drill, Enabling the key on an existing deployment (one-off re-encrypt pass), Incident quick reference, keeplin-srv operator runbook, Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`) (+9 more)
 
 ### Community 90 - "Keeplin agent guide"
 Cohesion: 0.12
@@ -525,29 +528,25 @@ Nodes (4): Purpose, Related files, `scripts/sync-companion-code` — synchronize
 Cohesion: 0.33
 Nodes (14): dry_run_reports_but_does_not_modify(), raw_values(), reencrypts_pre_key_rows_and_server_still_serves_plaintext(), refuses_to_run_without_a_key(), Option, PgPool, SocketAddr, String (+6 more)
 
-### Community 104 - "Restore"
-Cohesion: 0.50
-Nodes (4): Enabling the key on an existing deployment (one-off re-encrypt pass), Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`), Rotating the key
-
 ## Knowledge Gaps
-- **843 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+838 more)
+- **848 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+843 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **9 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **8 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.086) - this node is a cross-community bridge._
+- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `Cipher`, `AppState`, `collab.rs`, `auth_mw`?**
   _High betweenness centrality (0.044) - this node is a cross-community bridge._
 - **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `Key rotation & re-encryption (`AT_REST_KEY`)`, `soak.rs`, `materialize.rs`, `mod.rs`?**
   _High betweenness centrality (0.040) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _843 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _848 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
   _Cohesion score 0.06308818403624956 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
-  _Cohesion score 0.08501896333754741 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06776277157956548 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
   _Cohesion score 0.08604038630377524 - nodes in this community are weakly interconnected._

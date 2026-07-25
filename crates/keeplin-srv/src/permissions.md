@@ -611,6 +611,23 @@ Four tests, below.
 
 **Repeated context** — These pin the implication table in *impl Capabilities*.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::Capabilities as C;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
 ### fn higher_bits_imply_lower_ones
 
 **Identification** — `#[test]`; marker
@@ -768,7 +785,8 @@ points) and carrying its marker in the code:
 | 17 | `fn resolve_note_access` | `// md:fn resolve_note_access` | fn resolve_note_access |
 | 18 | `fn resolve_notebook_access` | `// md:fn resolve_notebook_access` | fn resolve_notebook_access |
 | 19 | `mod tests` | `// md:mod tests` | mod tests |
-| 20 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
-| 21 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
-| 22 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
-| 23 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |
+| 20 | `imports` | `// md:mod tests > imports` |
+| 21 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
+| 22 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
+| 23 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
+| 24 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |

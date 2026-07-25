@@ -139,6 +139,7 @@ impl Config {
 // md:mod tests
 #[cfg(test)]
 mod tests {
+    // md:mod tests > imports
     use super::*;
 
     // md:mod tests > fn weak_secrets_are_rejected
