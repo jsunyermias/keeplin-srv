@@ -355,6 +355,14 @@ verbatim.
 **What it does** — Brings the parent module API and test-only dependencies into
 scope.
 
+**Dependencies** —
+
+- `super::*` — the items under test from the parent module; expects: the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal.
+
+**Used by** — every block of `mod tests` in this file: `fn test_key`, `fn disabled_is_passthrough`, `fn round_trips_and_tags`, `fn nonce_is_random_per_value`, `fn reads_legacy_plaintext_when_enabled`, `fn wrong_key_fails_loudly`, `fn bad_key_length_rejected`. Nothing outside the module can use it: the preamble is private to `mod tests`.
+
+**Repeated context** — This preamble is a leaf block, not scaffolding: only the `mod` declaration, its attributes and its braces are exempt from coverage, so these `use` lines carry their own marker and are verified verbatim against the source (template v2.5.0, RULE 6). Changing an import here without updating this fence fails `scripts/check-docs.sh`.
+
 ### fn test_key
 
 **Identification** — test helper; marker `// md:mod tests > fn test_key`.
