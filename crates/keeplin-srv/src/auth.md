@@ -398,19 +398,9 @@ re-assigned from crossing user boundaries.
 `// md:impl FromRequestParts for AuthedUser`. Contains `fn from_request_parts`
 (next section).
 
-**Code** — container (one member, `fn from_request_parts`, documented below). The impl
-header, `where` clause and the `Rejection` associated type are the container's own body
-— complete and verbatim:
-
-```rust
-// md:impl FromRequestParts for AuthedUser
-#[async_trait::async_trait]
-impl<S> FromRequestParts<S> for AuthedUser
-where
-    S: Send + Sync,
-{
-    type Rejection = AppError;
-```
+**Code** — container; its associated type and method are documented as sub-blocks below.
+The attribute, impl header, `where` clause and closing brace are container scaffolding and
+therefore own no fence (RULE 6).
 
 **What it does** — Makes `AuthedUser` an axum extractor so protected handlers declare
 it as a plain parameter. The `Rejection = AppError` associated type means a failed
@@ -424,6 +414,27 @@ bound is what axum requires of any state type the extractor is generic over.
 `user: AuthedUser` parameter.
 
 **Repeated context** — none beyond the method's own (below).
+
+### type Rejection
+
+**Identification** — associated rejection type; marker
+`// md:impl FromRequestParts for AuthedUser > type Rejection`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl FromRequestParts for AuthedUser > type Rejection
+    type Rejection = AppError;
+```
+
+**What it does** — Makes extractor failures use the crate's standard `AppError` response.
+
+**Dependencies** — `AppError` (this crate); expects its `IntoResponse` mapping to remain the
+single HTTP error contract.
+
+**Used by** — axum's `FromRequestParts` machinery before it invokes protected handlers.
+
+**Repeated context** — Missing authentication fails closed through `AppError`.
 
 ### fn from_request_parts
 
@@ -506,4 +517,5 @@ carrying its marker in the code:
 | 8 | `fn verify_token` | `// md:fn verify_token` | fn verify_token |
 | 9 | `fn auth_mw` | `// md:fn auth_mw` | fn auth_mw |
 | 10 | `impl FromRequestParts for AuthedUser` | `// md:impl FromRequestParts for AuthedUser` | impl FromRequestParts for AuthedUser |
-| 11 | `fn from_request_parts` | `// md:impl FromRequestParts for AuthedUser > fn from_request_parts` | impl FromRequestParts for AuthedUser › fn from_request_parts |
+| 11 | `type Rejection` | `// md:impl FromRequestParts for AuthedUser > type Rejection` | impl FromRequestParts for AuthedUser › type Rejection |
+| 12 | `fn from_request_parts` | `// md:impl FromRequestParts for AuthedUser > fn from_request_parts` | impl FromRequestParts for AuthedUser › fn from_request_parts |

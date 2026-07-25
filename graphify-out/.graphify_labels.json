@@ -95,5 +95,13 @@
   "93": "0.B — Implementación de un issue",
   "94": "0.C — Revisión independiente y adversarial",
   "95": "Restore",
-  "96": "0.C — Revisión independiente y adversarial"
+  "96": "0.C — Revisión independiente y adversarial",
+  "97": "`scripts/companion_tool.py` — deterministic companion fidelity engine",
+  "98": "`scripts/tests/test_companion_tool.py` — fidelity-tool regression suite",
+  "99": "`scripts/context-pack` — reproducible companion context packs",
+  "100": "`scripts/sync-companion-code` — synchronize embedded Rust blocks",
+  "101": "Key rotation & re-encryption (`AT_REST_KEY`)",
+  "102": "context-pack script",
+  "103": "sync-companion-code script",
+  "104": "Capabilities"
 }

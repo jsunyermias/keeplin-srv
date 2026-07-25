@@ -161,6 +161,7 @@ pub async fn resolve_notebook_access(
 // md:mod tests
 #[cfg(test)]
 mod tests {
+    // md:mod tests > imports
     use super::Capabilities as C;
 
     // md:mod tests > fn higher_bits_imply_lower_ones

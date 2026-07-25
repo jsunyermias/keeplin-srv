@@ -86,6 +86,7 @@ impl Cipher {
 // md:mod tests
 #[cfg(test)]
 mod tests {
+    // md:mod tests > imports
     use super::*;
 
     // md:mod tests > fn test_key

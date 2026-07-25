@@ -132,6 +132,7 @@ impl<S> FromRequestParts<S> for AuthedUser
 where
     S: Send + Sync,
 {
+    // md:impl FromRequestParts for AuthedUser > type Rejection
     type Rejection = AppError;
 
     // md:impl FromRequestParts for AuthedUser > fn from_request_parts

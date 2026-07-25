@@ -398,6 +398,31 @@ environment mutation, so the tests are parallel-safe).
 
 **Repeated context** — Issue #19's contract in executable form.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::*;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
+**Dependencies** —
+
+- `super::*` — the items under test from the parent module; expects: the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal.
+
+**Used by** — every block of `mod tests` in this file: `fn weak_secrets_are_rejected`, `fn a_strong_secret_is_accepted`. Nothing outside the module can use it: the preamble is private to `mod tests`.
+
+**Repeated context** — This preamble is a leaf block, not scaffolding: only the `mod` declaration, its attributes and its braces are exempt from coverage, so these `use` lines carry their own marker and are verified verbatim against the source (template v2.5.0, RULE 6). Changing an import here without updating this fence fails `scripts/check-docs.sh`.
+
 ### fn weak_secrets_are_rejected
 
 **Identification** — `#[test]`; marker
@@ -501,5 +526,6 @@ and carrying its marker in the code:
 | 7 | `impl Config` | `// md:impl Config` | impl Config |
 | 8 | `fn from_env` | `// md:impl Config > fn from_env` | impl Config › fn from_env |
 | 9 | `mod tests` | `// md:mod tests` | mod tests |
-| 10 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
-| 11 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |
+| 10 | `imports` | `// md:mod tests > imports` |
+| 11 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
+| 12 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |

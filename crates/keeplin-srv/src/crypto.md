@@ -338,6 +338,31 @@ key validation.
 **Repeated context** — These tests are the executable form of the invariants listed
 in *Overview*; a change that breaks one is a contract change, not a test problem.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::*;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
+**Dependencies** —
+
+- `super::*` — the items under test from the parent module; expects: the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal.
+
+**Used by** — every block of `mod tests` in this file: `fn test_key`, `fn disabled_is_passthrough`, `fn round_trips_and_tags`, `fn nonce_is_random_per_value`, `fn reads_legacy_plaintext_when_enabled`, `fn wrong_key_fails_loudly`, `fn bad_key_length_rejected`. Nothing outside the module can use it: the preamble is private to `mod tests`.
+
+**Repeated context** — This preamble is a leaf block, not scaffolding: only the `mod` declaration, its attributes and its braces are exempt from coverage, so these `use` lines carry their own marker and are verified verbatim against the source (template v2.5.0, RULE 6). Changing an import here without updating this fence fails `scripts/check-docs.sh`.
+
 ### fn test_key
 
 **Identification** — test helper; marker `// md:mod tests > fn test_key`.
@@ -568,10 +593,11 @@ and carrying its marker in the code:
 | 7 | `fn encrypt` | `// md:impl Cipher > fn encrypt` | impl Cipher › fn encrypt |
 | 8 | `fn decrypt` | `// md:impl Cipher > fn decrypt` | impl Cipher › fn decrypt |
 | 9 | `mod tests` | `// md:mod tests` | mod tests |
-| 10 | `fn test_key` | `// md:mod tests > fn test_key` | mod tests › fn test_key |
-| 11 | `fn disabled_is_passthrough` | `// md:mod tests > fn disabled_is_passthrough` | mod tests › fn disabled_is_passthrough |
-| 12 | `fn round_trips_and_tags` | `// md:mod tests > fn round_trips_and_tags` | mod tests › fn round_trips_and_tags |
-| 13 | `fn nonce_is_random_per_value` | `// md:mod tests > fn nonce_is_random_per_value` | mod tests › fn nonce_is_random_per_value |
-| 14 | `fn reads_legacy_plaintext_when_enabled` | `// md:mod tests > fn reads_legacy_plaintext_when_enabled` | mod tests › fn reads_legacy_plaintext_when_enabled |
-| 15 | `fn wrong_key_fails_loudly` | `// md:mod tests > fn wrong_key_fails_loudly` | mod tests › fn wrong_key_fails_loudly |
-| 16 | `fn bad_key_length_rejected` | `// md:mod tests > fn bad_key_length_rejected` | mod tests › fn bad_key_length_rejected |
+| 10 | `imports` | `// md:mod tests > imports` |
+| 11 | `fn test_key` | `// md:mod tests > fn test_key` | mod tests › fn test_key |
+| 12 | `fn disabled_is_passthrough` | `// md:mod tests > fn disabled_is_passthrough` | mod tests › fn disabled_is_passthrough |
+| 13 | `fn round_trips_and_tags` | `// md:mod tests > fn round_trips_and_tags` | mod tests › fn round_trips_and_tags |
+| 14 | `fn nonce_is_random_per_value` | `// md:mod tests > fn nonce_is_random_per_value` | mod tests › fn nonce_is_random_per_value |
+| 15 | `fn reads_legacy_plaintext_when_enabled` | `// md:mod tests > fn reads_legacy_plaintext_when_enabled` | mod tests › fn reads_legacy_plaintext_when_enabled |
+| 16 | `fn wrong_key_fails_loudly` | `// md:mod tests > fn wrong_key_fails_loudly` | mod tests › fn wrong_key_fails_loudly |
+| 17 | `fn bad_key_length_rejected` | `// md:mod tests > fn bad_key_length_rejected` | mod tests › fn bad_key_length_rejected |

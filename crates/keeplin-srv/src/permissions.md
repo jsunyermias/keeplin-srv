@@ -611,6 +611,31 @@ Four tests, below.
 
 **Repeated context** — These pin the implication table in *impl Capabilities*.
 
+The explicit `imports` leaf below preserves the test-module dependency preamble
+verbatim.
+
+### imports
+
+**Identification** — test-module dependencies; marker `// md:mod tests > imports`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > imports
+    use super::Capabilities as C;
+```
+
+**What it does** — Brings the parent module API and test-only dependencies into
+scope.
+
+**Dependencies** —
+
+- `super::Capabilities as C` — the capability bitflags under test, aliased to keep the assertion table readable; expects: the alias is local to this module and `Capabilities` keeps its bit values: renumbering a bit changes what every assertion below means without breaking compilation.
+
+**Used by** — every block of `mod tests` in this file: `fn higher_bits_imply_lower_ones`, `fn read_alone_implies_nothing_more`, `fn unknown_bits_are_masked_off`, `fn owner_has_every_capability`. Nothing outside the module can use it: the preamble is private to `mod tests`.
+
+**Repeated context** — This preamble is a leaf block, not scaffolding: only the `mod` declaration, its attributes and its braces are exempt from coverage, so these `use` lines carry their own marker and are verified verbatim against the source (template v2.5.0, RULE 6). Changing an import here without updating this fence fails `scripts/check-docs.sh`.
+
 ### fn higher_bits_imply_lower_ones
 
 **Identification** — `#[test]`; marker
@@ -768,7 +793,8 @@ points) and carrying its marker in the code:
 | 17 | `fn resolve_note_access` | `// md:fn resolve_note_access` | fn resolve_note_access |
 | 18 | `fn resolve_notebook_access` | `// md:fn resolve_notebook_access` | fn resolve_notebook_access |
 | 19 | `mod tests` | `// md:mod tests` | mod tests |
-| 20 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
-| 21 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
-| 22 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
-| 23 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |
+| 20 | `imports` | `// md:mod tests > imports` |
+| 21 | `fn higher_bits_imply_lower_ones` | `// md:mod tests > fn higher_bits_imply_lower_ones` | mod tests › fn higher_bits_imply_lower_ones |
+| 22 | `fn read_alone_implies_nothing_more` | `// md:mod tests > fn read_alone_implies_nothing_more` | mod tests › fn read_alone_implies_nothing_more |
+| 23 | `fn unknown_bits_are_masked_off` | `// md:mod tests > fn unknown_bits_are_masked_off` | mod tests › fn unknown_bits_are_masked_off |
+| 24 | `fn owner_has_every_capability` | `// md:mod tests > fn owner_has_every_capability` | mod tests › fn owner_has_every_capability |
