@@ -1153,13 +1153,14 @@ dependencies = [
 [[package]]
 name = "keeplin-core"
 version = "0.1.0"
-source = "git+https://github.com/jsunyermias/keeplin.git?rev=2571b5651d8fb075e6cd4f82cd7cbb14bf8f54bb#2571b5651d8fb075e6cd4f82cd7cbb14bf8f54bb"
+source = "git+https://github.com/jsunyermias/keeplin.git?rev=3d195f6da65a000b1005d2d432bf67eaafd9077c#3d195f6da65a000b1005d2d432bf67eaafd9077c"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
  "async-trait",
  "base64",
+ "blake2",
  "chrono",
  "futures-util",
  "libsql",

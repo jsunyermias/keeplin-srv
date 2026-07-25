@@ -1,16 +1,16 @@
-# Graph Report - keeplin-srv  (2026-07-24)
+# Graph Report - keeplin-srv  (2026-07-25)
 
 ## Corpus Check
-- 113 files · ~157,064 words
+- 115 files · ~163,682 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1685 nodes · 3568 edges · 87 communities (81 shown, 6 thin omitted)
+- 1727 nodes · 3652 edges · 89 communities (83 shown, 6 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 37 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0aeb1e89`
+- Built from commit: `24016f03`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -101,18 +101,20 @@
 - CLAUDE.md
 - check-docs.sh
 - check-graph.sh
+- core_compat.rs
+- `tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted
 
 ## God Nodes (most connected - your core abstractions)
-1. `AppError` - 160 edges
-2. `Store` - 101 edges
-3. `impl Store` - 95 edges
+1. `AppError` - 162 edges
+2. `Store` - 103 edges
+3. `impl Store` - 97 edges
 4. ``http.rs` — the REST router and handlers` - 84 edges
 5. `AppState` - 81 edges
-6. `AuthedUser` - 37 edges
-7. `send()` - 36 edges
+6. `send()` - 38 edges
+7. `AuthedUser` - 37 edges
 8. ``store.rs` — the PostgreSQL data-access layer` - 31 edges
-9. ``collab.rs` — the collaborative session engine` - 29 edges
-10. `user()` - 28 edges
+9. `user()` - 30 edges
+10. ``collab.rs` — the collaborative session engine` - 30 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `handle_msg()` --calls--> `resolve_note_access()`  [INFERRED]
@@ -129,11 +131,11 @@
 ## Import Cycles
 - None detected.
 
-## Communities (87 total, 6 thin omitted)
+## Communities (89 total, 6 thin omitted)
 
 ### Community 0 - "AppError"
 Cohesion: 0.06
-Nodes (46): AppError, Error, IntoResponse, Response, String, MailKind, cascade_notebook_to_notes_tx(), incoming_wins() (+38 more)
+Nodes (45): AppError, Error, IntoResponse, Response, String, cascade_notebook_to_notes_tx(), incoming_wins(), replace_note_shares_from_notebook_tx() (+37 more)
 
 ### Community 1 - "AppState"
 Cohesion: 0.10
@@ -141,11 +143,11 @@ Nodes (96): Bytes, AuthedUser, access_cutoff(), change_password(), create_device
 
 ### Community 2 - "collab.rs"
 Cohesion: 0.09
-Nodes (59): AtomicU64, advances_writer(), announce_presence(), apply_op(), clear_presence(), deliver_event(), deliver_presence(), handle_msg() (+51 more)
+Nodes (60): AtomicU64, advances_writer(), announce_presence(), apply_op(), clear_presence(), deliver_event(), deliver_presence(), handle_msg() (+52 more)
 
 ### Community 3 - "collab.rs"
-Cohesion: 0.18
-Nodes (55): capability_grants_enforce_hierarchy_and_escalation(), concurrent_updates_resolve_deterministically(), create_note(), deleting_a_device_revokes_its_collab_token(), deleting_a_device_revokes_its_token(), export_body(), forged_writer_is_rejected(), gc_compacts_old_tombstones() (+47 more)
+Cohesion: 0.19
+Nodes (57): a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected(), capability_grants_enforce_hierarchy_and_escalation(), concurrent_updates_resolve_deterministically(), create_note(), deleting_a_device_revokes_its_collab_token(), deleting_a_device_revokes_its_token(), export_body(), forged_writer_is_rejected() (+49 more)
 
 ### Community 4 - "quotas.rs"
 Cohesion: 0.12
@@ -160,16 +162,16 @@ Cohesion: 0.04
 Nodes (45): At-rest encryption, Collaborative protocol (`GET /api/ws?token=<jwt>`), Connecting a keeplin-daemon, Device sync relay (`GET /api/sync`), Docker, Environment variables, Keeplin Server, License (+37 more)
 
 ### Community 7 - "soak.rs"
-Cohesion: 0.23
-Nodes (17): editor(), env_or(), export_body(), merge_vv(), PgPool, Result, SocketAddr, String (+9 more)
+Cohesion: 0.11
+Nodes (31): handle_collab_op(), handle_collab_presence(), handle_sync_batch(), Arc, Result, run(), spawn(), main() (+23 more)
 
 ### Community 8 - "Cipher"
 Cohesion: 0.11
 Nodes (24): Aes256Gcm, main(), parse_args(), Result, disabled_is_passthrough(), nonce_is_random_per_value(), reads_legacy_plaintext_when_enabled(), round_trips_and_tags() (+16 more)
 
 ### Community 9 - "sync.rs"
-Cohesion: 0.09
-Nodes (41): handle_collab_op(), handle_collab_presence(), handle_sync_batch(), Arc, Result, run(), spawn(), main() (+33 more)
+Cohesion: 0.14
+Nodes (27): authenticate(), changes_frame(), deliver_backlog(), handle_incoming(), handler(), materialize(), relay_loop(), Arc (+19 more)
 
 ### Community 10 - "resolve_note_access"
 Cohesion: 0.12
@@ -192,8 +194,8 @@ Cohesion: 0.13
 Nodes (21): Body, auth_mw(), create_token(), dummy_password_hash(), hash_password(), Arc, Claims, Error (+13 more)
 
 ### Community 15 - "Mailer"
-Cohesion: 0.21
-Nodes (8): Client, Mailer, DateTime, Option, Result, Self, String, Utc
+Cohesion: 0.19
+Nodes (9): Client, Mailer, MailKind, DateTime, Option, Result, Self, String (+1 more)
 
 ### Community 16 - "`http.rs` — the REST router and handlers"
 Cohesion: 0.02
@@ -220,12 +222,12 @@ Cohesion: 0.20
 Nodes (9): `Dockerfile` — reproducible server image, Notes & gotchas, Purpose, Related files, Runtime contract, Stages, Usage, Why the runtime image is tiny (+1 more)
 
 ### Community 22 - "[Unreleased]"
-Cohesion: 0.20
-Nodes (9): [0.1.0], 2026-07 production-readiness audit follow-up, Added, Added, Added, Changed, Changelog, Security (+1 more)
+Cohesion: 0.18
+Nodes (10): [0.1.0], 2026-07 production-readiness audit follow-up, Added, Added, Added, Changed, Changelog, Hard format limits imported from keeplin-core (keeplin#130) (+2 more)
 
 ### Community 23 - "`collab.rs` — the collaborative session engine"
 Cohesion: 0.06
-Nodes (34): `collab.rs` — the collaborative session engine, Constants, Coverage checklist, fn advances_writer, fn announce_presence, fn apply_op, fn broadcast, fn clear_presence (+26 more)
+Nodes (35): `collab.rs` — the collaborative session engine, Constants, Coverage checklist, fn advances_writer, fn announce_presence, fn apply_op, fn broadcast, fn clear_presence (+27 more)
 
 ### Community 24 - "`ratelimit.rs` — per-IP token-bucket rate limiter"
 Cohesion: 0.09
@@ -357,15 +359,15 @@ Nodes (3): 0011 — login brute-force lockout, Design notes, Semantics
 
 ### Community 58 - "reencrypt.rs"
 Cohesion: 0.02
-Nodes (95): fn advance_cursor, fn append_changes, fn apply_notebook_shares_to_note, fn cascade_notebook_to_notes, fn cascade_resources_note_deleted, fn cascade_resources_note_restored, fn changes_after, fn clear_login_failures (+87 more)
+Nodes (97): fn advance_cursor, fn append_changes, fn apply_notebook_shares_to_note, fn cascade_notebook_to_notes, fn cascade_resources_note_deleted, fn cascade_resources_note_restored, fn changes_after, fn clear_login_failures (+89 more)
 
 ### Community 59 - "notes"
 Cohesion: 0.12
 Nodes (17): fn create_note, fn export_body, fn insert_op, fn join, fn recv_until, fn send, fn share, fn spawn_instance (+9 more)
 
 ### Community 60 - "0004_domain_entities.sql"
-Cohesion: 0.17
-Nodes (12): Capability-model tests (Front B), fn capability_grants_enforce_hierarchy_and_escalation, fn move_note, fn move_note_status, fn nil_notebook_id_patch_means_inbox_and_keeps_shares, fn note_move_requires_write_on_destination_notebook, fn note_status, fn notebook_owner_can_manage_child_notes_they_do_not_own (+4 more)
+Cohesion: 0.14
+Nodes (14): Capability-model tests (Front B), fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected, fn capability_grants_enforce_hierarchy_and_escalation, fn move_note, fn move_note_status, fn nil_notebook_id_patch_means_inbox_and_keeps_shares, fn note_move_requires_write_on_destination_notebook, fn note_status (+6 more)
 
 ### Community 61 - "0001_initial.sql"
 Cohesion: 0.20
@@ -451,25 +453,33 @@ Nodes (8): Behaviour, Known caveat, Purpose, Refresh procedure after large refac
 Cohesion: 0.29
 Nodes (6): Companion .md format, Completion rule, Cross-repo compatibility (keeplin ↔ keeplin-srv), Documentation & Knowledge Consistency Policy, graphify, Mandatory completion checks
 
+### Community 87 - "core_compat.rs"
+Cohesion: 0.19
+Nodes (13): a_limit_rejection_names_the_note_and_an_old_client_still_parses_it(), every_client_message_round_trips_against_keeplin_core(), every_server_message_round_trips_against_keeplin_core(), fixed_uuid(), fixed_vv(), round_trips_through_core(), S, Uuid (+5 more)
+
+### Community 88 - "`tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted"
+Cohesion: 0.13
+Nodes (14): Coverage checklist, fn a_limit_rejection_names_the_note_and_an_old_client_still_parses_it, fn every_client_message_round_trips_against_keeplin_core, fn every_server_message_round_trips_against_keeplin_core, fn fixed_uuid, fn fixed_vv, fn protocol_version_matches_keeplin_core, fn round_trips_through_core (+6 more)
+
 ## Knowledge Gaps
-- **785 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+780 more)
+- **804 isolated node(s):** `check-graph.sh script`, `dr-drill.sh script`, `Purpose`, `Enabling`, `Behaviour` (+799 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
-  _High betweenness centrality (0.093) - this node is a cross-community bridge._
-- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `sync.rs`, `materialize.rs`, `mod.rs`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `AppState` connect `AppState` to `AppError`, `collab.rs`, `collab.rs`, `quotas.rs`, `integration.rs`, `soak.rs`, `sync.rs`, `ratelimit.rs`, `auth_mw`, `Mailer`?**
+  _High betweenness centrality (0.094) - this node is a cross-community bridge._
 - **Why does `AppError` connect `AppError` to `AppState`, `collab.rs`, `Cipher`, `resolve_note_access`, `auth_mw`?**
-  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+  _High betweenness centrality (0.052) - this node is a cross-community bridge._
+- **Why does `router()` connect `integration.rs` to `AppState`, `collab.rs`, `quotas.rs`, `reencrypt.rs`, `soak.rs`, `materialize.rs`, `mod.rs`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
 - **What connects `check-graph.sh script`, `dr-drill.sh script`, `Purpose` to the rest of the system?**
-  _785 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _804 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AppError` be split into smaller, more focused modules?**
-  _Cohesion score 0.06256535378180551 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06308818403624956 - nodes in this community are weakly interconnected._
 - **Should `AppState` be split into smaller, more focused modules?**
   _Cohesion score 0.09978644923315862 - nodes in this community are weakly interconnected._
 - **Should `collab.rs` be split into smaller, more focused modules?**
-  _Cohesion score 0.08502939846223428 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.08604038630377524 - nodes in this community are weakly interconnected._

@@ -1323,3 +1323,97 @@ async fn nil_notebook_id_patch_means_inbox_and_keeps_shares(pool: PgPool) {
     assert_eq!(note["title"], "renamed");
     assert_eq!(note_status(addr, &token_b, &note_id, "GET").await, 200);
 }
+
+// md:fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "Límites").await;
+
+    let mut ws = ws_connect(addr, &token).await;
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
+
+    let at_limit = "a".repeat(keeplin_core::format::MAX_LINE_BYTES);
+    let accepted = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &accepted, None, &at_limit, &did, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, &at_limit).await;
+
+    let over_limit = "a".repeat(keeplin_core::format::MAX_LINE_BYTES + 1);
+    let rejected = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(
+            &note_id,
+            &rejected,
+            Some(&accepted),
+            &over_limit,
+            &did,
+            2,
+            T2,
+        ),
+    )
+    .await;
+    let err = recv_until(&mut ws, "Error", |v| v["type"] == "Error").await;
+    assert_eq!(err["code"], keeplin_core::format::CODE_LINE_TOO_LONG);
+    assert_eq!(
+        err["note_id"], note_id,
+        "the rejection names the note so the client can resynchronise it"
+    );
+    assert_eq!(
+        export_body(addr, &token, &note_id).await,
+        at_limit,
+        "the rejected line was not stored"
+    );
+}
+
+// md:fn the_note_line_limit_counts_live_lines_only
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_note_line_limit_counts_live_lines_only(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "Recompte").await;
+
+    let mut ws = ws_connect(addr, &token).await;
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
+
+    let line_id = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &line_id, None, "primera", &did, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "primera").await;
+
+    send(
+        &mut ws,
+        json!({
+            "type": "Op",
+            "note_id": note_id,
+            "ops": [{
+                "op": "Delete",
+                "line_id": line_id,
+                "deleted_at": T2,
+                "vv": { did.clone(): 2 },
+                "last_writer": did,
+                "updated_at": T2,
+            }],
+        }),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "").await;
+
+    let reused = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &reused, None, "segona", &did, 3, T3),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "segona").await;
+}

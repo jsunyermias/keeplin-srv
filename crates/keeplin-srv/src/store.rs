@@ -2185,6 +2185,31 @@ impl Store {
         .await?;
         Ok(count)
     }
+
+    // md:impl Store > fn count_live_notes_in_notebook
+    pub async fn count_live_notes_in_notebook(&self, notebook_id: Uuid) -> Result<i64, AppError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(notebook_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    // md:impl Store > fn count_live_lines_on
+    pub async fn count_live_lines_on<'e, E>(&self, exec: E, note_id: Uuid) -> Result<i64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lines WHERE note_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .fetch_one(exec)
+        .await?;
+        Ok(count)
+    }
 }
 
 // md:fn replace_note_shares_from_notebook_tx

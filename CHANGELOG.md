@@ -10,6 +10,38 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### Hard format limits imported from keeplin-core (keeplin#130)
+
+- **The limits are no longer this crate's to define.** `src/collab.rs` drops its local
+  `MAX_LINE_LEN = 10_000` / `MAX_LINES_PER_NOTE = 100_000` and imports
+  `keeplin_core::format::{MAX_LINE_BYTES, MAX_LINES_PER_NOTE}` — 2¹² = 4 096 UTF‑8
+  **bytes** per line and 2¹⁶ = 65 536 lines per note — together with the wire codes
+  `too_long` / `too_many_lines`. keeplin-core is the single source of truth and this
+  crate pins it to an exact `rev`, so server and client cannot drift. **Breaking, no
+  migration**: lines and notes over the new limits are refused.
+- **The lines-per-note limit now counts live lines** (`Store::count_live_lines_on`, a
+  `deleted_at IS NULL` count on the advisory-locked connection) instead of
+  `order.order.len()`, which included tombstones. A note whose order vector was full of
+  deleted lines could otherwise be refused while the client, counting the materialised
+  body, still considered it under the limit.
+- **New notes-per-notebook cap**: `PATCH /api/notes/:id` refuses a move into a notebook
+  already holding `keeplin_core::format::MAX_NOTES_PER_NOTEBOOK` (2²⁴) live notes with
+  `413` (`Store::count_live_notes_in_notebook`). That `PATCH` is the only path by which
+  a note enters a notebook server-side.
+- **`CollabServerMsg::Error` gained an optional `note_id`** (`#[serde(default)]` +
+  `skip_serializing_if`, so `protocol_version` is **unchanged** and old clients parse
+  both shapes). Every `OpOutcome::Invalid` now names its note, which is what lets the
+  client drop that note's mirror and rejoin instead of keeping an edit the server
+  refused.
+- **New cross-repo compatibility test** `tests/core_compat.rs`: round-trips every
+  `CollabClientMsg` and `CollabServerMsg` variant (and all four `LineOp`s) against
+  keeplin-core's real types in both directions, and asserts the three format limits,
+  the three limit codes and `PROTOCOL_VERSION` against keeplin-core. Runs without a
+  database.
+- **New collab boundary tests** in `tests/collab.rs`: a 4 096-byte line is accepted and
+  4 097 is rejected with `too_long` **and the note id**, without persisting; and a
+  delete frees line-count capacity, pinning the live-lines counting rule.
+
 ### 2026-07 production-readiness audit follow-up
 
 - **AT_REST_KEY re-encrypt pass**: new `keeplin-reencrypt` binary

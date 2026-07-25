@@ -85,5 +85,7 @@
   "83": "pre-commit script",
   "84": "CLAUDE.md",
   "85": "check-docs.sh",
-  "86": "check-graph.sh"
+  "86": "check-graph.sh",
+  "87": "core_compat.rs",
+  "88": "`tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted"
 }

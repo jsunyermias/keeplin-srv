@@ -1913,6 +1913,166 @@ collaborator's share survives.
 
 ---
 
+### fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected
+
+**Identification** — `#[sqlx::test]` integration test; marker
+`// md:fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "Límites").await;
+
+    let mut ws = ws_connect(addr, &token).await;
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
+
+    let at_limit = "a".repeat(keeplin_core::format::MAX_LINE_BYTES);
+    let accepted = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &accepted, None, &at_limit, &did, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, &at_limit).await;
+
+    let over_limit = "a".repeat(keeplin_core::format::MAX_LINE_BYTES + 1);
+    let rejected = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(
+            &note_id,
+            &rejected,
+            Some(&accepted),
+            &over_limit,
+            &did,
+            2,
+            T2,
+        ),
+    )
+    .await;
+    let err = recv_until(&mut ws, "Error", |v| v["type"] == "Error").await;
+    assert_eq!(err["code"], keeplin_core::format::CODE_LINE_TOO_LONG);
+    assert_eq!(
+        err["note_id"], note_id,
+        "the rejection names the note so the client can resynchronise it"
+    );
+    assert_eq!(
+        export_body(addr, &token, &note_id).await,
+        at_limit,
+        "the rejected line was not stored"
+    );
+}
+```
+
+**What it does** — The server half of issue keeplin#130's boundary coverage, driven
+over a real WebSocket against a real Postgres. A line of exactly
+`MAX_LINE_BYTES` (4096) bytes is accepted and materialises through
+`GET /api/notes/:id/export`; a line of 4097 bytes comes back as an `Error` whose
+`code` is `CODE_LINE_TOO_LONG` — both constants read from `keeplin_core::format`,
+so the test fails if the server ever stops sharing the client's numbers rather than
+merely if a hard-coded literal changes.
+
+Two assertions carry the issue's intent beyond the threshold itself: the error
+**names the note** (`err["note_id"] == note_id`), which is what lets the client
+resynchronise instead of diverging; and the export still shows only the accepted
+line, proving the rejection happened **before** persistence.
+
+**Dependencies** — `spawn_server`, `user`, `create_note`, `ws_connect`, `send`,
+`join`, `insert_op`, `recv_until`, `wait_export`, `export_body` (this file);
+`keeplin_core::format::{MAX_LINE_BYTES, CODE_LINE_TOO_LONG}`.
+
+**Used by** — CI only.
+
+**Repeated context** — an `Error` frame never closes the connection; the client's
+recovery is always "resynchronise this note".
+
+---
+
+### fn the_note_line_limit_counts_live_lines_only
+
+**Identification** — `#[sqlx::test]` integration test; marker
+`// md:fn the_note_line_limit_counts_live_lines_only`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn the_note_line_limit_counts_live_lines_only
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_note_line_limit_counts_live_lines_only(pool: PgPool) {
+    let addr = spawn_server(pool).await;
+    let (_uid, did, token) = user(addr, "a@example.com").await;
+    let note_id = create_note(addr, &token, "Recompte").await;
+
+    let mut ws = ws_connect(addr, &token).await;
+    send(&mut ws, join(&note_id)).await;
+    recv_until(&mut ws, "Welcome", |v| v["type"] == "Welcome").await;
+
+    let line_id = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &line_id, None, "primera", &did, 1, T1),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "primera").await;
+
+    send(
+        &mut ws,
+        json!({
+            "type": "Op",
+            "note_id": note_id,
+            "ops": [{
+                "op": "Delete",
+                "line_id": line_id,
+                "deleted_at": T2,
+                "vv": { did.clone(): 2 },
+                "last_writer": did,
+                "updated_at": T2,
+            }],
+        }),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "").await;
+
+    let reused = uuid::Uuid::new_v4().to_string();
+    send(
+        &mut ws,
+        insert_op(&note_id, &reused, None, "segona", &did, 3, T3),
+    )
+    .await;
+    wait_export(addr, &token, &note_id, "segona").await;
+}
+```
+
+**What it does** — Pins *what* the lines-per-note limit counts. Insert a line,
+delete it (a soft delete — the row and its order entry survive), then insert
+another: the third step must succeed. It exercises the switch from
+`order.order.len()` (which includes tombstones) to `count_live_lines_on` (a
+`deleted_at IS NULL` count): under the old rule a note whose order vector was full
+of tombstones could be refused while the client, counting the lines of the
+materialised body, still considered it under the limit — a rejection the user could
+not explain and, before the `note_id` on `Error`, could not recover from either.
+Testing the real 65 536 edge would mean inserting 65 536 lines over a WebSocket, so
+the edge lives in `keeplin-core`'s unit tests and the **counting rule** is pinned
+here.
+
+**Dependencies** — `spawn_server`, `user`, `create_note`, `ws_connect`, `send`,
+`join`, `insert_op`, `recv_until`, `wait_export` (this file); a raw `Delete` op
+built inline with `json!` because the file has no `delete_op` helper.
+
+**Used by** — CI only.
+
+**Repeated context** — deletion in the collab model is always a tombstone
+(`deleted_at`), never a row removal, so snapshots still carry deleted lines and an
+offline client converges on the delete.
+
+---
+
 ## Graph context
 
 Repo-tooling metadata, not a code block (no marker in the source). Kept in every
@@ -1990,3 +2150,5 @@ refresh with `graphify update .` after refactors.
 | 47 | `fn note_move_requires_write_on_destination_notebook` | `// md:fn note_move_requires_write_on_destination_notebook` |
 | 48 | `fn notebook_owner_can_manage_child_notes_they_do_not_own` | `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` |
 | 49 | `fn nil_notebook_id_patch_means_inbox_and_keeps_shares` | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` |
+| 50 | `fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected` | `// md:fn a_line_at_the_byte_limit_is_accepted_and_one_byte_over_is_rejected` |
+| 51 | `fn the_note_line_limit_counts_live_lines_only` | `// md:fn the_note_line_limit_counts_live_lines_only` |

@@ -44,7 +44,24 @@ operation is ignored; concurrent ones fall to the deterministic
 `(updated_at, last_writer)` tiebreak, identical on every replica. `Insert`/`Move`
 resolve against the order entity.
 
-**Limits**: 10,000 characters per line, 100,000 lines per note, 1 MB per message.
+**Limits**: the format limits are **not defined here** — they come from
+`keeplin_core::format`, the single definition both this server and the keeplin client
+enforce (`Cargo.toml` pins keeplin-core to an exact `rev`, so the two cannot drift):
+
+| Limit | Value |
+|-------|-------|
+| bytes per line | 2¹² = **4 096** (UTF‑8 bytes, not characters) |
+| lines per note | 2¹⁶ = **65 536** (live lines; tombstones excluded) |
+| notes per notebook | 2²⁴ = **16 777 216** (live notes) |
+
+plus **1 MB per WebSocket message** (`MAX_WS_MESSAGE`, this crate's own).
+
+An op that breaks a line limit is rejected with `CollabServerMsg::Error` — code
+`too_long` or `too_many_lines`, and the `note_id` it applies to, so the client can
+resynchronise that note instead of keeping an edit that will never sync. Moving a note
+into a full notebook answers `413`. Nothing is ever silently truncated. The client
+applies the same checks before it sends, so a well-behaved client never sees these
+rejections.
 
 ## REST API
 

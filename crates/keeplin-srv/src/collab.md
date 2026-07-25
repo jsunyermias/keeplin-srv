@@ -38,6 +38,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use keeplin_core::format::{
+    CODE_LINE_TOO_LONG, CODE_TOO_MANY_LINES, MAX_LINES_PER_NOTE, MAX_LINE_BYTES,
+};
 use keeplin_core::storage::note_log::{resolve, VersionVector, Winner};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use uuid::Uuid;
@@ -104,8 +107,6 @@ rebuildable — which is what makes the multi-replica model (issue #45) sound.
 
 ```rust
 // md:Constants
-const MAX_LINE_LEN: usize = 10_000;
-const MAX_LINES_PER_NOTE: usize = 100_000;
 const MAX_WS_MESSAGE: usize = 1024 * 1024;
 
 const OUTBOUND_CAPACITY: usize = 256;
@@ -113,8 +114,14 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
 ```
 
-**What it does** — The design limits (§11.1): max line length (10 k chars), max lines
-per note (100 k), max incoming WS message (1 MiB). Plus the connection hygiene knobs:
+**What it does** — The one limit this file still owns: `MAX_WS_MESSAGE`, the largest
+incoming WebSocket frame (1 MiB). The **format** limits — max bytes per line and max
+lines per note — are no longer declared here: since issue keeplin#130 they live in
+`keeplin_core::format` (`MAX_LINE_BYTES` = 2¹² = 4096 bytes, `MAX_LINES_PER_NOTE` =
+2¹⁶ = 65 536 lines) and this crate imports them, so the server cannot drift from the
+client that enforces the same numbers before it ever sends an op. They replace the
+former local `MAX_LINE_LEN = 10_000` / `MAX_LINES_PER_NOTE = 100_000`. Plus the
+connection hygiene knobs:
 `OUTBOUND_CAPACITY` — bounded outbound queue per connection; a slow/stalled consumer
 is **dropped** rather than buffering without limit (issue #34), safe because a
 stateful client rebuilds from the next `Welcome` snapshot. `PING_INTERVAL` — periodic
@@ -124,13 +131,14 @@ this window, the peer is treated as dead and the connection closed (issue #35).
 
 **Dependencies** — none.
 
-**Used by** — `apply_op` (limits), `handler` (`MAX_WS_MESSAGE`), `run_connection`
-(the three connection knobs).
+**Used by** — `handler` (`MAX_WS_MESSAGE`), `run_connection` (the three connection
+knobs); the imported format limits are used by `apply_op`.
 
 **Repeated context** — Limits are enforced **before persisting** (in `apply_op`), so
-the database can never hold an over-limit line/order. 10 k × 100 k bounds a note's
-theoretical materialised body at ~1 GB, which is why the REST read path has its own
-`MAX_NOTE_BODY_BYTES` cap (issue #44, `config.rs`).
+the database can never hold an over-limit line/order. 4096 × 65 536 bounds a note's
+theoretical materialised body at ~256 MiB (down from ~1 GB under the old limits),
+which is why the REST read path still has its own `MAX_NOTE_BODY_BYTES` cap
+(issue #44, `config.rs`).
 
 ---
 
@@ -846,27 +854,72 @@ defence of issues #34/#35.
 ```rust
 // md:fn send_error
 fn send_error(tx: &mpsc::Sender<String>, code: &str, message: &str) {
-    let msg = CollabServerMsg::Error {
-        code: code.into(),
-        message: message.into(),
-    };
-    let _ = tx.try_send(serde_json::to_string(&msg).expect("serializable error"));
+    send_note_error(tx, None, code, message);
 }
 ```
 
-**What it does** — Serialises a `CollabServerMsg::Error { code, message }` and
-`try_send`s it to the connection's outbound queue. Best-effort: if the queue is
-full the error is dropped (the connection is already being dropped as a slow
-consumer). Errors are per-frame; the connection stays open.
+**What it does** — Sends a **connection-level** error: one that belongs to no
+particular note (an unparseable frame, an internal failure). Delegates to
+`send_note_error` with `note_id: None`, which is what the client reads as "nothing
+to resynchronise".
 
-**Dependencies** — `CollabServerMsg` (`protocol.rs`), `serde_json`.
+**Dependencies** — `send_note_error` (this file); expects it to keep `None` meaning
+"not attributable to a note", because the client only repairs a rejection it can
+attribute.
 
 **Used by** — `run_connection`, `handle_msg` (this file).
 
 **Repeated context** — Error codes used across this file: `bad_message`,
 `not_found`, `forbidden`, `not_joined`, `bad_writer`, `bad_content`, `too_long`,
 `too_many_lines`, `line_exists`, `bad_after`, `bad_move`, `internal`. They are a
-client-facing contract (tests assert them).
+client-facing contract (tests assert them); the two format-limit codes come from
+`keeplin_core::format` rather than being typed out here.
+
+---
+
+## fn send_note_error
+
+**Identification** — private function; marker `// md:fn send_note_error`.
+`fn send_note_error(tx: &mpsc::Sender<String>, note_id: Option<Uuid>, code: &str, message: &str)`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn send_note_error
+fn send_note_error(tx: &mpsc::Sender<String>, note_id: Option<Uuid>, code: &str, message: &str) {
+    let msg = CollabServerMsg::Error {
+        code: code.into(),
+        message: message.into(),
+        note_id,
+    };
+    let _ = tx.try_send(serde_json::to_string(&msg).expect("serializable error"));
+}
+```
+
+**What it does** — Serialises a `CollabServerMsg::Error { code, message, note_id }`
+and `try_send`s it to the connection's outbound queue. Best-effort: if the queue is
+full the error is dropped (that connection is already being dropped as a slow
+consumer). Errors are per-frame; the connection stays open.
+
+`note_id` is the point of this function (issue keeplin#130). A rejection the client
+cannot attribute to a note is a rejection the client cannot repair: it used to
+`warn!` and move on, leaving the refused edit sitting on that device, apparently
+saved and never syncing. With the note named, the client drops that note's mirror
+and rejoins, so the server's snapshot replaces the divergent body. The field is
+`skip_serializing_if = "Option::is_none"`, so connection-level errors put nothing
+extra on the wire and an older client — which does not know the field — parses both
+shapes unchanged.
+
+**Dependencies** — `CollabServerMsg` (`protocol.rs`) — expects its `Error` variant
+to keep the optional `note_id` and keep it optional, since dropping the default
+would break older clients; `serde_json`.
+
+**Used by** — `send_error` (the `None` case) and `handle_msg`, which passes
+`Some(note_id)` for every `OpOutcome::Invalid` — every op rejection is attributable
+by construction, because ops only arrive inside an `Op { note_id, .. }` message.
+
+**Repeated context** — the collaborative channel never closes on a rejected frame;
+recovery is always "resynchronise this note", never "reconnect".
 
 ---
 
@@ -970,7 +1023,7 @@ async fn handle_msg(
                         OpOutcome::Applied(op) => applied.push(op),
                         OpOutcome::Ignored => {}
                         OpOutcome::Invalid { code, message } => {
-                            send_error(tx, &code, &message);
+                            send_note_error(tx, Some(note_id), &code, &message);
                         }
                     }
                 }
@@ -1059,7 +1112,9 @@ async fn handle_msg(
   `pg_advisory_xact_lock`), so two instances editing the same order serialise at
   the database and cannot lose an update (issue #45). Per op, `apply_op` on the
   lock's connection: `Applied` ops are collected, `Ignored` ops dropped silently,
-  `Invalid` ops answered with an error frame. Commit (releases the advisory lock);
+  `Invalid` ops answered with an error frame **naming the note**
+(`send_note_error(tx, Some(note_id), …)`), so a client whose op was refused over a
+format limit can resynchronise that note instead of diverging. Commit (releases the advisory lock);
   if anything applied, stamp `server_seq` and broadcast to the note's other local
   subscribers (skipping the originator). Finally, cross-instance fan-out
   (issue #45): serialise the applied ops into the `collab_events` outbox and NOTIFY
@@ -1073,8 +1128,8 @@ async fn handle_msg(
 
 **Dependencies** — `resolve_note_access` (`permissions.rs`); `Store::{get_note,
 lock_note_order, insert_collab_event, notify}` (`store.rs`); `read_snapshot`,
-`apply_op`, `send_error`, `touch_presence`, `clear_presence`, session/registry
-methods (this file); wire types (`protocol.rs`).
+`apply_op`, `send_error`, `send_note_error`, `touch_presence`, `clear_presence`,
+session/registry methods (this file); wire types (`protocol.rs`).
 
 **Used by** — `run_connection` (this file) only.
 
@@ -1312,8 +1367,11 @@ async fn apply_op(
             if content.contains('\n') {
                 return Ok(invalid("bad_content", "line content must not contain \\n"));
             }
-            if content.len() > MAX_LINE_LEN {
-                return Ok(invalid("too_long", "line exceeds maximum length"));
+            if content.len() > MAX_LINE_BYTES {
+                return Ok(invalid(
+                    CODE_LINE_TOO_LONG,
+                    format!("line exceeds the format limit of {MAX_LINE_BYTES} bytes"),
+                ));
             }
             if state
                 .store
@@ -1328,8 +1386,12 @@ async fn apply_op(
                 .get_note_order_on(&mut *conn, note_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if order.order.len() >= MAX_LINES_PER_NOTE {
-                return Ok(invalid("too_many_lines", "note line limit reached"));
+            let live_lines = state.store.count_live_lines_on(&mut *conn, note_id).await?;
+            if live_lines >= MAX_LINES_PER_NOTE as i64 {
+                return Ok(invalid(
+                    CODE_TOO_MANY_LINES,
+                    format!("note exceeds the format limit of {MAX_LINES_PER_NOTE} lines"),
+                ));
             }
             let position = match position_after(&order.order, *after_line_id) {
                 Some(pos) => pos,
@@ -1379,8 +1441,11 @@ async fn apply_op(
             if content.contains('\n') {
                 return Ok(invalid("bad_content", "line content must not contain \\n"));
             }
-            if content.len() > MAX_LINE_LEN {
-                return Ok(invalid("too_long", "line exceeds maximum length"));
+            if content.len() > MAX_LINE_BYTES {
+                return Ok(invalid(
+                    CODE_LINE_TOO_LONG,
+                    format!("line exceeds the format limit of {MAX_LINE_BYTES} bytes"),
+                ));
             }
             let line = match state.store.get_line_on(&mut *conn, *line_id).await? {
                 Some(line) if line.note_id == note_id => line,
@@ -1508,9 +1573,13 @@ replays). Presence stays user-based; only the vv actor is the device.
 
 Per variant:
 
-- **`Insert`** — content checks (`bad_content` on `\n`, `too_long` over
-  `MAX_LINE_LEN`); `line_exists` if the line id is already taken; load the order
-  (`NotFound` without one); `too_many_lines` at `MAX_LINES_PER_NOTE`; `bad_after`
+- **`Insert`** — content checks (`bad_content` on `\n`, `CODE_LINE_TOO_LONG` over
+  `MAX_LINE_BYTES` — UTF-8 **bytes**, exactly what the client counts);
+  `line_exists` if the line id is already taken; load the order (`NotFound` without
+  one); `CODE_TOO_MANY_LINES` when the note already holds `MAX_LINES_PER_NOTE`
+  **live** lines (`count_live_lines_on`, a `deleted_at IS NULL` count — not
+  `order.order.len()`, which includes tombstones and would refuse notes the client
+  considers under the limit); `bad_after`
   if the anchor is not in the order (`None` anchor = insert at the beginning).
   Resolution **against the order entity** (design §5.2): `advances_writer` +
   `winner` — a stale insert loses against the current order and is `Ignored`.
@@ -1532,7 +1601,13 @@ Per variant:
 store variants `get_line_on`, `get_note_order_on`, `insert_line_on`,
 `update_line_on`, `soft_delete_line_on`, `set_note_order_on` (`store.rs`);
 `invalid`, `merge_vv`, `advances_writer`, `winner`, `line_winner`,
-`position_after`, the limits (this file).
+`position_after` (this file); `Store::count_live_lines_on` (expects it to count
+only `deleted_at IS NULL` rows, which is what makes the server's line count mean
+the same as the client's); `keeplin_core::format::{MAX_LINE_BYTES,
+MAX_LINES_PER_NOTE, CODE_LINE_TOO_LONG, CODE_TOO_MANY_LINES}` — expects these to
+be the very constants the client validates against, which is guaranteed by
+importing them rather than redeclaring them and by pinning keeplin-core to an
+exact `rev`.
 
 **Used by** — `handle_msg` (`Op` arm) only.
 
@@ -1694,7 +1769,7 @@ and carrying its marker in the code:
 | # | Block (source order) | Marker in code | Documented in section |
 |---|----------------------|----------------|-----------------------|
 | 1 | imports (`use …`) | `// md:Overview` | Overview |
-| 2 | the six consts | `// md:Constants` | Constants |
+| 2 | the four consts | `// md:Constants` | Constants |
 | 3 | `struct Subscriber` | `// md:Subscriber` | Subscriber |
 | 4 | `struct CollabSession` | `// md:CollabSession` | CollabSession |
 | 5 | `struct CollabRegistry` | `// md:CollabRegistry` | CollabRegistry |
@@ -1713,14 +1788,15 @@ and carrying its marker in the code:
 | 18 | `fn handler` | `// md:fn handler` | fn handler |
 | 19 | `fn run_connection` | `// md:fn run_connection` | fn run_connection |
 | 20 | `fn send_error` | `// md:fn send_error` | fn send_error |
-| 21 | `fn handle_msg` | `// md:fn handle_msg` | fn handle_msg |
-| 22 | `fn read_snapshot` | `// md:fn read_snapshot` | fn read_snapshot |
-| 23 | `fn line_snapshot` | `// md:fn line_snapshot` | fn line_snapshot |
-| 24 | `enum OpOutcome` | `// md:OpOutcome` | OpOutcome |
-| 25 | `fn invalid` | `// md:fn invalid` | fn invalid |
-| 26 | `fn merge_vv` | `// md:fn merge_vv` | fn merge_vv |
-| 27 | `fn advances_writer` | `// md:fn advances_writer` | fn advances_writer |
-| 28 | `fn apply_op` | `// md:fn apply_op` | fn apply_op |
-| 29 | `fn winner` | `// md:fn winner` | fn winner |
-| 30 | `fn line_winner` | `// md:fn line_winner` | fn line_winner |
-| 31 | `fn position_after` | `// md:fn position_after` | fn position_after |
+| 21 | `fn send_note_error` | `// md:fn send_note_error` | fn send_note_error |
+| 22 | `fn handle_msg` | `// md:fn handle_msg` | fn handle_msg |
+| 23 | `fn read_snapshot` | `// md:fn read_snapshot` | fn read_snapshot |
+| 24 | `fn line_snapshot` | `// md:fn line_snapshot` | fn line_snapshot |
+| 25 | `enum OpOutcome` | `// md:OpOutcome` | OpOutcome |
+| 26 | `fn invalid` | `// md:fn invalid` | fn invalid |
+| 27 | `fn merge_vv` | `// md:fn merge_vv` | fn merge_vv |
+| 28 | `fn advances_writer` | `// md:fn advances_writer` | fn advances_writer |
+| 29 | `fn apply_op` | `// md:fn apply_op` | fn apply_op |
+| 30 | `fn winner` | `// md:fn winner` | fn winner |
+| 31 | `fn line_winner` | `// md:fn line_winner` | fn line_winner |
+| 32 | `fn position_after` | `// md:fn position_after` | fn position_after |
