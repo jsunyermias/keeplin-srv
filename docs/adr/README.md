@@ -8,13 +8,17 @@ Use the canonical
 [`0000-template.md`](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0000-template.md)
 for every ADR. Cross-repository decisions are accepted and versioned in `keeplin`; this registry
 links them rather than copying their reasoning. Decisions that affect only server internals live
-in this directory and use this repository's own next unused four-digit number.
+in this directory and use this repository's own next unused four-digit number. Because numbering is
+per repository, a bare number is ambiguous across the two registries: always qualify a reference
+with its repository, as in `keeplin ADR 0002` or `keeplin-srv ADR 0001`.
 
 The lifecycle is `proposed` → `accepted` or `rejected`, with later accepted decisions marking old
 ones `superseded`. `proposed` blocks implementation. Only the maintainer accepts or rejects an
-ADR. Once accepted, the decision body is immutable historical record; replace it with a new ADR
-rather than rewriting it to fit later code. Issues and acceptance PRs link the ADR in both
-directions.
+ADR. `(retrospective)` is a qualifier that may accompany any status and records that the ADR
+documents already-implemented behavior rather than proposing new behavior; it does not weaken the
+blocking effect of `proposed`. Once accepted, the decision body is immutable historical record;
+replace it with a new ADR rather than rewriting it to fit later code. Issues and acceptance PRs
+link the ADR in both directions.
 
 ## Canonical cross-repository decisions
 

@@ -1,7 +1,7 @@
 # Graph Report - keeplin-srv  (2026-07-25)
 
 ## Corpus Check
-- 121 files · ~166,210 words
+- 121 files · ~166,262 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `25bde78f`
+- Built from commit: `d08cc773`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -471,7 +471,7 @@ Nodes (14): Coverage checklist, fn a_limit_rejection_names_the_note_and_an_old_c
 
 ### Community 89 - "keeplin-srv operator runbook"
 Cohesion: 0.12
-Nodes (17): After any restore, Backup, Capacity & quotas, Disaster-recovery drill, From a logical dump, From physical backup / PITR, Incident quick reference, keeplin-srv operator runbook (+9 more)
+Nodes (17): Backup, Capacity & quotas, Disaster-recovery drill, Enabling the key on an existing deployment (one-off re-encrypt pass), Incident quick reference, keeplin-srv operator runbook, Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`) (+9 more)
 
 ### Community 90 - "Keeplin agent guide"
 Cohesion: 0.12
@@ -491,7 +491,7 @@ Nodes (4): Claude Code instructions, Architecture decision records, Canonical cr
 
 ### Community 94 - "0.C — Revisión independiente y adversarial"
 Cohesion: 0.50
-Nodes (4): Enabling the key on an existing deployment (one-off re-encrypt pass), Key backup — separate from database backups, Key rotation & re-encryption (`AT_REST_KEY`), Rotating the key
+Nodes (4): After any restore, From a logical dump, From physical backup / PITR, Restore
 
 ### Community 95 - "Restore"
 Cohesion: 0.40
