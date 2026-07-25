@@ -87,5 +87,12 @@
   "85": "check-docs.sh",
   "86": "check-graph.sh",
   "87": "core_compat.rs",
-  "88": "`tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted"
+  "88": "`tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted",
+  "89": "keeplin-srv operator runbook",
+  "90": "Keeplin agent guide",
+  "91": "Security — keeplin-srv",
+  "92": "0.A — Contexto común y preparación del issue",
+  "93": "0.B — Implementación de un issue",
+  "94": "0.C — Revisión independiente y adversarial",
+  "95": "Restore"
 }
