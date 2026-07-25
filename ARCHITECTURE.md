@@ -76,6 +76,19 @@ out to the note's other live subscribers with a monotonic `server_seq`. On conne
 gets a full `Welcome` snapshot and rebuilds — there is no infinite op log. See
 `crates/keeplin-srv/src/collab.md`.
 
+**Format limits are a shared contract, not a server policy.** The maximum bytes per
+line (2¹² = 4 096), lines per note (2¹⁶ = 65 536) and notes per notebook
+(2²⁴ = 16 777 216) live in `keeplin_core::format` and are *imported* here rather than
+redeclared, with `Cargo.toml` pinning keeplin-core to an exact git `rev` so the server
+can never drift from the client that enforces the same numbers before sending. Both
+sides count the same things: UTF‑8 **bytes** for line length, **live** (non-tombstoned)
+lines and notes for the counts — which is why the `Insert` path counts rows with
+`deleted_at IS NULL` rather than measuring the order vector. A rejection is a
+`CollabServerMsg::Error` carrying the `note_id`, so the client can drop that note's
+mirror and rejoin instead of leaving a refused edit sitting on one device forever.
+`crates/keeplin-srv/tests/core_compat.rs` round-trips every protocol message and every
+shared constant against keeplin-core's real types.
+
 ---
 
 ## 5. Operability

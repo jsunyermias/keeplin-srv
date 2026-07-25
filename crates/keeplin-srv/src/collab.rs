@@ -14,6 +14,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use keeplin_core::format::{
+    CODE_LINE_TOO_LONG, CODE_TOO_MANY_LINES, MAX_LINES_PER_NOTE, MAX_LINE_BYTES,
+};
 use keeplin_core::storage::note_log::{resolve, VersionVector, Winner};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use uuid::Uuid;
@@ -31,8 +34,6 @@ use crate::{
 };
 
 // md:Constants
-const MAX_LINE_LEN: usize = 10_000;
-const MAX_LINES_PER_NOTE: usize = 100_000;
 const MAX_WS_MESSAGE: usize = 1024 * 1024;
 
 const OUTBOUND_CAPACITY: usize = 256;
@@ -350,9 +351,15 @@ async fn run_connection(
 
 // md:fn send_error
 fn send_error(tx: &mpsc::Sender<String>, code: &str, message: &str) {
+    send_note_error(tx, None, code, message);
+}
+
+// md:fn send_note_error
+fn send_note_error(tx: &mpsc::Sender<String>, note_id: Option<Uuid>, code: &str, message: &str) {
     let msg = CollabServerMsg::Error {
         code: code.into(),
         message: message.into(),
+        note_id,
     };
     let _ = tx.try_send(serde_json::to_string(&msg).expect("serializable error"));
 }
@@ -450,7 +457,7 @@ async fn handle_msg(
                         OpOutcome::Applied(op) => applied.push(op),
                         OpOutcome::Ignored => {}
                         OpOutcome::Invalid { code, message } => {
-                            send_error(tx, &code, &message);
+                            send_note_error(tx, Some(note_id), &code, &message);
                         }
                     }
                 }
@@ -603,8 +610,11 @@ async fn apply_op(
             if content.contains('\n') {
                 return Ok(invalid("bad_content", "line content must not contain \\n"));
             }
-            if content.len() > MAX_LINE_LEN {
-                return Ok(invalid("too_long", "line exceeds maximum length"));
+            if content.len() > MAX_LINE_BYTES {
+                return Ok(invalid(
+                    CODE_LINE_TOO_LONG,
+                    format!("line exceeds the format limit of {MAX_LINE_BYTES} bytes"),
+                ));
             }
             if state
                 .store
@@ -619,8 +629,12 @@ async fn apply_op(
                 .get_note_order_on(&mut *conn, note_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if order.order.len() >= MAX_LINES_PER_NOTE {
-                return Ok(invalid("too_many_lines", "note line limit reached"));
+            let live_lines = state.store.count_live_lines_on(&mut *conn, note_id).await?;
+            if live_lines >= MAX_LINES_PER_NOTE as i64 {
+                return Ok(invalid(
+                    CODE_TOO_MANY_LINES,
+                    format!("note exceeds the format limit of {MAX_LINES_PER_NOTE} lines"),
+                ));
             }
             let position = match position_after(&order.order, *after_line_id) {
                 Some(pos) => pos,
@@ -670,8 +684,11 @@ async fn apply_op(
             if content.contains('\n') {
                 return Ok(invalid("bad_content", "line content must not contain \\n"));
             }
-            if content.len() > MAX_LINE_LEN {
-                return Ok(invalid("too_long", "line exceeds maximum length"));
+            if content.len() > MAX_LINE_BYTES {
+                return Ok(invalid(
+                    CODE_LINE_TOO_LONG,
+                    format!("line exceeds the format limit of {MAX_LINE_BYTES} bytes"),
+                ));
             }
             let line = match state.store.get_line_on(&mut *conn, *line_id).await? {
                 Some(line) if line.note_id == note_id => line,

@@ -760,7 +760,7 @@ pub struct Store {
 
 **Identification** — the inherent impl block; marker `// md:impl Store`.
 
-**Code** — container: members documented as sub-blocks below: fn new, fn with_cipher, fn create_user, fn get_user_by_email, fn get_user_by_id, fn update_password, fn delete_user, fn login_locked, fn record_login_failure, fn clear_login_failures, fn prune_login_attempts, fn create_email_token, fn consume_email_token, fn mark_email_verified, fn prune_email_tokens, fn create_device, fn get_device, fn list_devices_by_user, fn delete_device, fn delete_all_devices, fn touch_device, fn append_changes, fn changes_after, fn entity_history, fn get_cursor, fn advance_cursor, fn prune_delivered_changes, fn purge_deleted_resource_blobs, fn gc_line_tombstones, fn ping, fn counts, fn create_note, fn get_note, fn list_notes_for_user, fn update_note_meta, fn decrypt_note_title, fn soft_delete_note, fn set_note_owner, fn create_or_update_share, fn get_share, fn list_shares, fn delete_share, fn notebook_owner, fn set_notebook_owner, fn get_notebook_share, fn list_notebook_shares, fn create_or_update_notebook_share, fn delete_notebook_share, fn cascade_notebook_to_notes, fn apply_notebook_shares_to_note, fn get_line, fn get_line_on, fn list_lines, fn insert_line, fn insert_line_on, fn update_line, fn update_line_on, fn soft_delete_line, fn soft_delete_line_on, fn get_note_order, fn get_note_order_on, fn set_note_order, fn set_note_order_on, fn pool, fn notify, fn lock_note_order, fn insert_collab_event, fn get_collab_event, fn prune_collab_events, fn upsert_presence, fn delete_presence, fn list_presence, fn touch_instance_presence, fn sweep_presence, fn delete_instance_presence, fn upsert_notebook, fn delete_notebook, fn upsert_tag, fn delete_tag, fn upsert_note_tag, fn upsert_resource_meta, fn delete_resource, fn put_resource_blob, fn get_resource_blob, fn resource_owned_by, fn list_notebooks, fn list_tags, fn list_resources, fn list_note_tag_ids, fn user_blob_bytes_excluding, fn count_live_notes_for_user.
+**Code** — container: members documented as sub-blocks below: fn new, fn with_cipher, fn create_user, fn get_user_by_email, fn get_user_by_id, fn update_password, fn delete_user, fn login_locked, fn record_login_failure, fn clear_login_failures, fn prune_login_attempts, fn create_email_token, fn consume_email_token, fn mark_email_verified, fn prune_email_tokens, fn create_device, fn get_device, fn list_devices_by_user, fn delete_device, fn delete_all_devices, fn touch_device, fn append_changes, fn changes_after, fn entity_history, fn get_cursor, fn advance_cursor, fn prune_delivered_changes, fn purge_deleted_resource_blobs, fn gc_line_tombstones, fn ping, fn counts, fn create_note, fn get_note, fn list_notes_for_user, fn update_note_meta, fn decrypt_note_title, fn soft_delete_note, fn set_note_owner, fn create_or_update_share, fn get_share, fn list_shares, fn delete_share, fn notebook_owner, fn set_notebook_owner, fn get_notebook_share, fn list_notebook_shares, fn create_or_update_notebook_share, fn delete_notebook_share, fn cascade_notebook_to_notes, fn apply_notebook_shares_to_note, fn get_line, fn get_line_on, fn list_lines, fn insert_line, fn insert_line_on, fn update_line, fn update_line_on, fn soft_delete_line, fn soft_delete_line_on, fn get_note_order, fn get_note_order_on, fn set_note_order, fn set_note_order_on, fn pool, fn notify, fn lock_note_order, fn insert_collab_event, fn get_collab_event, fn prune_collab_events, fn upsert_presence, fn delete_presence, fn list_presence, fn touch_instance_presence, fn sweep_presence, fn delete_instance_presence, fn upsert_notebook, fn delete_notebook, fn upsert_tag, fn delete_tag, fn upsert_note_tag, fn upsert_resource_meta, fn delete_resource, fn put_resource_blob, fn get_resource_blob, fn resource_owned_by, fn list_notebooks, fn list_tags, fn list_resources, fn list_note_tag_ids, fn user_blob_bytes_excluding, fn count_live_notes_for_user, fn count_live_notes_in_notebook, fn count_live_lines_on.
 
 **What it does** — The relay's entire data-access surface. Every method carries its own `// md:impl Store > fn <name>` marker and is documented as a sub-block below, in source order. The methods fall into these regions: Constructors; Users; Login lockout; Email-flow tokens; Devices; Change journal; Delivery cursors; Retention / maintenance / metrics; Notes; Note shares; Notebook ownership & shares; Lines (each with a pool form and an `_on(executor)` form that runs on the connection holding the note's advisory lock); Line order; Cross-instance bus primitives; Domain-entity materialisation (server = source of truth, every write resolved by `incoming_wins` under `SELECT … FOR UPDATE`); Domain-entity reads (cold rehydration); Per-user quotas. All queries run through `self.pool` (or an `_on` executor) and encrypt/decrypt human-readable columns through `self.cipher`.
 
@@ -4192,6 +4192,80 @@ attachments).
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
 
+### fn count_live_notes_in_notebook
+
+**Identification** — method of `impl Store`; marker `// md:impl Store > fn count_live_notes_in_notebook`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn count_live_notes_in_notebook
+    pub async fn count_live_notes_in_notebook(&self, notebook_id: Uuid) -> Result<i64, AppError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(notebook_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+```
+
+**What it does** — Live notes in one notebook — the input to the notes-per-notebook
+cap (`keeplin_core::format::MAX_NOTES_PER_NOTEBOOK`, issue keeplin#130). `deleted_at
+IS NULL` is what makes "live" mean the same thing here as on the client, whose
+`NotebookSortProfile::live_notes` is likewise built from non-deleted notes: tombstones
+never consume capacity on either side.
+
+**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+
+**Used by** — `http.rs`'s `update_note`, on the only path by which a note enters a
+notebook server-side (a `PATCH` that sets `notebook_id`).
+
+**Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn count_live_lines_on
+
+**Identification** — method of `impl Store`; marker `// md:impl Store > fn count_live_lines_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn count_live_lines_on
+    pub async fn count_live_lines_on<'e, E>(&self, exec: E, note_id: Uuid) -> Result<i64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lines WHERE note_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .fetch_one(exec)
+        .await?;
+        Ok(count)
+    }
+```
+
+**What it does** — Live (non-tombstoned) lines of one note — the input to the
+lines-per-note limit (`keeplin_core::format::MAX_LINES_PER_NOTE`). Takes an
+`Executor` rather than using `self.pool` because it runs inside the note-order
+advisory-lock transaction in `collab.rs`: reading the count on any other connection
+would both risk pool deadlock and read state the in-flight batch has not yet
+committed.
+
+Counting live rows is the point. The obvious alternative, `order.order.len()`,
+includes tombstones, so a heavily edited note could be refused at the server while
+the client — which counts the lines of the materialised body — still considered it
+under the limit. That mismatch is exactly the silent divergence issue keeplin#130
+removes.
+
+**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+
+**Used by** — `collab.rs`'s `apply_op`, on the `Insert` arm, before persisting a new
+line.
+
+**Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
 ## fn replace_note_shares_from_notebook_tx
 
 **Identification** — free async fn; marker
@@ -4451,5 +4525,7 @@ refresh with `graphify update .` after refactors.
 | 124 | `fn list_note_tag_ids` | `// md:impl Store > fn list_note_tag_ids` |
 | 125 | `fn user_blob_bytes_excluding` | `// md:impl Store > fn user_blob_bytes_excluding` |
 | 126 | `fn count_live_notes_for_user` | `// md:impl Store > fn count_live_notes_for_user` |
+| 127 | `fn count_live_notes_in_notebook` | `// md:impl Store > fn count_live_notes_in_notebook` |
+| 128 | `fn count_live_lines_on` | `// md:impl Store > fn count_live_lines_on` |
 | 127 | `fn replace_note_shares_from_notebook_tx` | `// md:fn replace_note_shares_from_notebook_tx` |
 | 128 | `fn cascade_notebook_to_notes_tx` | `// md:fn cascade_notebook_to_notes_tx` |

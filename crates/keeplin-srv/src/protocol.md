@@ -561,6 +561,8 @@ pub enum CollabServerMsg {
     Error {
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_id: Option<Uuid>,
     },
 }
 ```
@@ -578,8 +580,19 @@ pub enum CollabServerMsg {
 - `Presence` — the **full** presence list for a note, sent after every
   join/leave/cursor move; receivers replace their list, never merge.
 - `Error` — a machine-readable `code` (e.g. `bad_writer`, `bad_message`, `forbidden`,
-  `unknown_line`) plus a human-readable `message`. Errors are per-frame; the connection
-  stays open.
+  `unknown_line`) plus a human-readable `message`, and an **optional `note_id`** naming
+  the note the rejected frame belonged to. Errors are per-frame; the connection stays
+  open.
+
+  `note_id` was added for the format limits (issue keeplin#130) and is additive in both
+  directions: `#[serde(default)]` lets an older sender omit it, and
+  `skip_serializing_if = "Option::is_none"` keeps it off the wire for
+  connection-level errors, so `PROTOCOL_VERSION` does **not** move. It exists because
+  a rejection the client cannot attribute to a note is a rejection the client cannot
+  repair — with the note named, the client drops that note's mirror and rejoins, and
+  the server's snapshot replaces the divergent local body instead of the edit sitting
+  on one device forever. `keeplin-core`'s mirror of this enum carries the identical
+  field; `crates/keeplin-srv/tests/core_compat.rs` round-trips both shapes.
 
 **Dependencies** — `NoteLinesSnapshot`, `UserId`, `LineOp`, `PresenceInfo` (this file);
 `uuid::Uuid`; serde derives (internal tag `type`).

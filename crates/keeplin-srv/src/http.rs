@@ -903,6 +903,13 @@ async fn update_note(
         if !nb_access.can_write() {
             return Err(AppError::Forbidden);
         }
+        let live = state.store.count_live_notes_in_notebook(nb).await?;
+        if live >= keeplin_core::format::MAX_NOTES_PER_NOTEBOOK as i64 {
+            return Err(AppError::PayloadTooLarge(format!(
+                "notebook already holds the format limit of {} notes",
+                keeplin_core::format::MAX_NOTES_PER_NOTEBOOK
+            )));
+        }
     }
     let note = state
         .store

@@ -2047,6 +2047,13 @@ async fn update_note(
         if !nb_access.can_write() {
             return Err(AppError::Forbidden);
         }
+        let live = state.store.count_live_notes_in_notebook(nb).await?;
+        if live >= keeplin_core::format::MAX_NOTES_PER_NOTEBOOK as i64 {
+            return Err(AppError::PayloadTooLarge(format!(
+                "notebook already holds the format limit of {} notes",
+                keeplin_core::format::MAX_NOTES_PER_NOTEBOOK
+            )));
+        }
     }
     let note = state
         .store
@@ -2069,14 +2076,25 @@ would 404 below). Build the `NotePatch`. If the patch moves the note **into** a
 (different, real) notebook: the move adopts that notebook's grants (destructive
 cascade) — both disclosing the note to the notebook's members and replacing the
 note's own shares — so the mover needs `write` on the **destination notebook**
-too (`resolve_notebook_access`; unknown destination → `404`). Moving out (to the
-inbox) needs no destination check. Apply the metadata patch; then, for a real
-move-in, `apply_notebook_shares_to_note` performs the cascade.
+too (`resolve_notebook_access`; unknown destination → `404`), and the destination
+must have room: the **notes-per-notebook cap** (issue keeplin#130) refuses a move
+with `413` once the destination already holds
+`keeplin_core::format::MAX_NOTES_PER_NOTEBOOK` (2²⁴) live notes. This is the only
+server path by which a note enters a notebook — notes are created notebook-less —
+so checking here covers the whole surface, mirroring `ordering::place_new_note` on
+the client. Moving out (to the inbox) needs no destination check. Apply the
+metadata patch; then, for a real move-in, `apply_notebook_shares_to_note` performs
+the cascade.
 
 **Dependencies** — `resolve_note_access`/`resolve_notebook_access`
 (`permissions.rs`); `Store::{get_note, update_note_meta,
-apply_notebook_shares_to_note}`; `NotePatch` (`store.rs`); `present`
-(this file).
+apply_notebook_shares_to_note, count_live_notes_in_notebook}` — the count expects
+to exclude soft-deleted notes, so tombstones never consume capacity; `NotePatch`
+(`store.rs`); `present` (this file);
+`keeplin_core::format::MAX_NOTES_PER_NOTEBOOK`, imported rather than redeclared so
+client and server cap at the same number. `AppError::PayloadTooLarge` is reused for
+the refusal so a format-limit breach answers `413` on both repositories'
+surfaces.
 
 **Used by** — routed in `router`.
 
