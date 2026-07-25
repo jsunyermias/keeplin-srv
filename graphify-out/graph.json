@@ -8704,7 +8704,7 @@
       "label": "graphify",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L59",
+      "source_location": "L60",
       "_origin": "ast",
       "id": "agents_graphify",
       "community": 90,
@@ -52123,7 +52123,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L59",
+      "source_location": "L60",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -62164,5 +62164,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "010ac1c1f49e638b5e7b5ef57e859215ed329d70"
+  "built_at_commit": "5005e695833ed69d876489a87ea6e1182336b203"
 }
