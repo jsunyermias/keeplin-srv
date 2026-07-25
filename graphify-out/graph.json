@@ -2911,8 +2911,8 @@
       "source_location": "L81",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_rs_crates_keeplin_srv_src_permissions_access",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": "access"
     },
     {
@@ -2933,8 +2933,8 @@
       "source_location": "L97",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_granted",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".granted()"
     },
     {
@@ -2944,8 +2944,8 @@
       "source_location": "L105",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_read",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_read()"
     },
     {
@@ -2955,8 +2955,8 @@
       "source_location": "L108",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_write",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_write()"
     },
     {
@@ -2966,8 +2966,8 @@
       "source_location": "L111",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_share_write",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_share_write()"
     },
     {
@@ -2977,8 +2977,8 @@
       "source_location": "L114",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_delete",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_delete()"
     },
     {
@@ -2988,8 +2988,8 @@
       "source_location": "L117",
       "_origin": "ast",
       "id": "crates_keeplin_srv_src_permissions_access_can_transfer_ownership",
-      "community": 1,
-      "community_name": "AppState",
+      "community": 10,
+      "community_name": "resolve_note_access",
       "norm_label": ".can_transfer_ownership()"
     },
     {
@@ -8663,8 +8663,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "agents",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "agents.md"
     },
     {
@@ -8704,7 +8704,7 @@
       "label": "graphify",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L49",
+      "source_location": "L59",
       "_origin": "ast",
       "id": "agents_graphify",
       "community": 90,
@@ -8715,7 +8715,7 @@
       "label": "Companion .md format",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L59",
+      "source_location": "L70",
       "_origin": "ast",
       "id": "agents_companion_md_format",
       "community": 90,
@@ -8726,7 +8726,7 @@
       "label": "Documentation & Knowledge Consistency Policy",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L84",
+      "source_location": "L95",
       "_origin": "ast",
       "id": "agents_documentation_knowledge_consistency_policy",
       "community": 90,
@@ -8737,7 +8737,7 @@
       "label": "Mandatory completion checks",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L90",
+      "source_location": "L101",
       "_origin": "ast",
       "id": "agents_mandatory_completion_checks",
       "community": 90,
@@ -8748,7 +8748,7 @@
       "label": "Completion rule",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L108",
+      "source_location": "L119",
       "_origin": "ast",
       "id": "agents_completion_rule",
       "community": 90,
@@ -8759,7 +8759,7 @@
       "label": "Cross-repo compatibility (keeplin \u2194 keeplin-srv)",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L119",
+      "source_location": "L130",
       "_origin": "ast",
       "id": "agents_cross_repo_compatibility_keeplin_keeplin_srv",
       "community": 90,
@@ -8767,10 +8767,43 @@
       "norm_label": "cross-repo compatibility (keeplin \u2194 keeplin-srv)"
     },
     {
+      "label": "Persistence and wire invariants",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L147",
+      "_origin": "ast",
+      "id": "agents_persistence_and_wire_invariants",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "persistence and wire invariants"
+    },
+    {
+      "label": "`keeplin`",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L152",
+      "_origin": "ast",
+      "id": "agents_keeplin",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "`keeplin`"
+    },
+    {
+      "label": "`keeplin-srv`",
+      "file_type": "document",
+      "source_file": "AGENTS.md",
+      "source_location": "L157",
+      "_origin": "ast",
+      "id": "agents_keeplin_srv",
+      "community": 90,
+      "community_name": "Keeplin agent guide",
+      "norm_label": "`keeplin-srv`"
+    },
+    {
       "label": "Workflow and review independence",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L136",
+      "source_location": "L164",
       "_origin": "ast",
       "id": "agents_workflow_and_review_independence",
       "community": 90,
@@ -8781,7 +8814,7 @@
       "label": "ADR requirements",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L152",
+      "source_location": "L181",
       "_origin": "ast",
       "id": "agents_adr_requirements",
       "community": 90,
@@ -8792,7 +8825,7 @@
       "label": "Definition of done",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L160",
+      "source_location": "L189",
       "_origin": "ast",
       "id": "agents_definition_of_done",
       "community": 90,
@@ -8803,7 +8836,7 @@
       "label": "Protected `main`",
       "file_type": "document",
       "source_file": "AGENTS.md",
-      "source_location": "L171",
+      "source_location": "L200",
       "_origin": "ast",
       "id": "agents_protected_main",
       "community": 90,
@@ -9026,8 +9059,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "claude",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "claude.md"
     },
     {
@@ -9037,8 +9070,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "claude_claude_code_instructions",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "claude code instructions"
     },
     {
@@ -9224,8 +9257,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "readme",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "readme.md"
     },
     {
@@ -9433,8 +9466,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "runbook",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "runbook.md"
     },
     {
@@ -9554,8 +9587,8 @@
       "source_location": "L100",
       "_origin": "ast",
       "id": "runbook_key_rotation_re_encryption_at_rest_key",
-      "community": 89,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "key rotation & re-encryption (`at_rest_key`)"
     },
     {
@@ -9565,8 +9598,8 @@
       "source_location": "L106",
       "_origin": "ast",
       "id": "runbook_enabling_the_key_on_an_existing_deployment_one_off_re_encrypt_pass",
-      "community": 89,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "enabling the key on an existing deployment (one-off re-encrypt pass)"
     },
     {
@@ -9576,8 +9609,8 @@
       "source_location": "L126",
       "_origin": "ast",
       "id": "runbook_rotating_the_key",
-      "community": 89,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "rotating the key"
     },
     {
@@ -9587,8 +9620,8 @@
       "source_location": "L142",
       "_origin": "ast",
       "id": "runbook_key_backup_separate_from_database_backups",
-      "community": 89,
-      "community_name": "keeplin-srv operator runbook",
+      "community": 94,
+      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
       "norm_label": "key backup \u2014 separate from database backups"
     },
     {
@@ -9675,8 +9708,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "security",
-      "community": 84,
-      "community_name": "CLAUDE.md",
+      "community": 93,
+      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
       "norm_label": "security.md"
     },
     {
@@ -17540,8 +17573,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "docs_prompts_0_b_prompt_implementacion_issue_0_b_implementaci\u00f3n_de_un_issue",
-      "community": 93,
-      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "0.b \u2014 implementacion de un issue"
     },
     {
@@ -17551,8 +17584,8 @@
       "source_location": "L5",
       "_origin": "ast",
       "id": "docs_prompts_0_b_prompt_implementacion_issue_antes_de_editar",
-      "community": 93,
-      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "antes de editar"
     },
     {
@@ -17562,8 +17595,8 @@
       "source_location": "L14",
       "_origin": "ast",
       "id": "docs_prompts_0_b_prompt_implementacion_issue_implementaci\u00f3n",
-      "community": 93,
-      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "implementacion"
     },
     {
@@ -17573,8 +17606,8 @@
       "source_location": "L25",
       "_origin": "ast",
       "id": "docs_prompts_0_b_prompt_implementacion_issue_verificaci\u00f3n_y_entrega",
-      "community": 93,
-      "community_name": "0.B \u2014 Implementaci\u00f3n de un issue",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "verificacion y entrega"
     },
     {
@@ -17584,8 +17617,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "docs_prompts_0_c_prompt_revision_seguridad",
-      "community": 94,
-      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "0.c-prompt-revision-seguridad.md"
     },
     {
@@ -17595,8 +17628,8 @@
       "source_location": "L1",
       "_origin": "ast",
       "id": "docs_prompts_0_c_prompt_revision_seguridad_0_c_revisi\u00f3n_independiente_y_adversarial",
-      "community": 94,
-      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "0.c \u2014 revision independiente y adversarial"
     },
     {
@@ -17606,8 +17639,8 @@
       "source_location": "L7",
       "_origin": "ast",
       "id": "docs_prompts_0_c_prompt_revision_seguridad_m\u00e9todo",
-      "community": 94,
-      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "metodo"
     },
     {
@@ -17617,8 +17650,8 @@
       "source_location": "L25",
       "_origin": "ast",
       "id": "docs_prompts_0_c_prompt_revision_seguridad_salida",
-      "community": 94,
-      "community_name": "0.C \u2014 Revisi\u00f3n independiente y adversarial",
+      "community": 84,
+      "community_name": "CLAUDE.md",
       "norm_label": "salida"
     },
     {
@@ -52024,7 +52057,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L152",
+      "source_location": "L181",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52046,7 +52079,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L59",
+      "source_location": "L70",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52057,7 +52090,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L119",
+      "source_location": "L130",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52068,7 +52101,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L160",
+      "source_location": "L189",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52079,7 +52112,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L84",
+      "source_location": "L95",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52090,7 +52123,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L49",
+      "source_location": "L59",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52101,7 +52134,18 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L171",
+      "source_location": "L147",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_keeplin_agent_guide",
+      "target": "agents_persistence_and_wire_invariants",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L200",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52123,7 +52167,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L136",
+      "source_location": "L164",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_keeplin_agent_guide",
@@ -52134,7 +52178,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L108",
+      "source_location": "L119",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_documentation_knowledge_consistency_policy",
@@ -52145,11 +52189,33 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "AGENTS.md",
-      "source_location": "L90",
+      "source_location": "L101",
       "weight": 1.0,
       "_origin": "ast",
       "source": "agents_documentation_knowledge_consistency_policy",
       "target": "agents_mandatory_completion_checks",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L152",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_persistence_and_wire_invariants",
+      "target": "agents_keeplin",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "AGENTS.md",
+      "source_location": "L157",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "agents_persistence_and_wire_invariants",
+      "target": "agents_keeplin_srv",
       "confidence_score": 1.0
     },
     {
@@ -62098,5 +62164,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "787f444a5e8cb92357cc198597d2f2a263d0f732"
+  "built_at_commit": "010ac1c1f49e638b5e7b5ef57e859215ed329d70"
 }
