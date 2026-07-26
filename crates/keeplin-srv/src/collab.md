@@ -1762,6 +1762,10 @@ this companion.
 
 - `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
 
+**Cross-repo contracts**
+
+- `format-limits` — server enforcement imports keeplin-core's canonical limits and wire codes.
+
 ## Coverage checklist
 
 Every code block of `collab.rs`, in source order, each documented above (five points)

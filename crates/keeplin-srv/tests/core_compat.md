@@ -592,6 +592,13 @@ this companion.
   keeplin-srv's own.
 - `PROTOCOL_VERSION` is identical on both sides.
 
+**Cross-repo contracts**
+
+- `collab-wire` — round-trips every collaboration message against keeplin-core.
+- `format-limits` — asserts the canonical limit constants and wire codes.
+- `note-log-resolution` — asserts version-vector and winner behavior.
+- `protocol-version` — asserts exact version equality across repositories.
+
 ---
 
 ## Coverage checklist

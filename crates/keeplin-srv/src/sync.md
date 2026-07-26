@@ -963,6 +963,10 @@ this companion.
 
 - `crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)
 
+**Cross-repo contracts**
+
+- `sync-change-envelope` — opaque server relay consumes keeplin-core's canonical `Change` variants.
+
 ## Coverage checklist
 
 Every code block of `sync.rs`, in source order, each documented above (five points)
