@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# md:dr-drill
 # Disaster-recovery drill for keeplin-srv: prove the backup is actually
 # restorable, end to end, without touching the live database.
 #

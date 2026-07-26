@@ -2569,6 +2569,898 @@
           "cargo test -p keeplin-srv"
         ]
       }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0001_initial.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0001_initial.sql` — accounts, devices, and the relay journal"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0001_initial.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0002_collab.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0002_collab.sql` — the collaborative note model"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0002_collab.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0003_note_metadata.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0003_note_metadata.sql` — full note metadata"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0003_note_metadata.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0004_domain_entities.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0004_domain_entities.sql` — server-materialised notebooks, tags, resources"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0004_domain_entities.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0005_permissions.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0005_permissions.sql` — note capability bitset"
+      },
+      "risk": {
+        "basis": [
+          "permission"
+        ],
+        "origin": "INFERRED",
+        "value": "security"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0005_permissions.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0006_notebook_permissions.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0006_notebook_permissions.sql` — notebook shares + cascade"
+      },
+      "risk": {
+        "basis": [
+          "permission"
+        ],
+        "origin": "INFERRED",
+        "value": "security"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0006_notebook_permissions.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0007_per_user_batch_dedup.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0007_per_user_batch_dedup.sql` — scope batch dedup to the owning user"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0007_per_user_batch_dedup.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0008_changes_history_index.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0008_changes_history_index.sql` — per-user history indexes on the change journal"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0008_changes_history_index.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0009_changes_entity_index.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0009_changes_entity_index.sql` — re-index history per entity (user-agnostic)"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0009_changes_entity_index.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0010_collab_bus.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "0010 — cross-instance collaboration bus (issue #45)"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0010_collab_bus.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0011_login_attempts.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "0011 — login brute-force lockout"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0011_login_attempts.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0012_email_flows.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "0012 — email flows: verification + password reset (issue #49)"
+      },
+      "risk": {
+        "basis": [
+          "password"
+        ],
+        "origin": "INFERRED",
+        "value": "security"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0012_email_flows.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0013_try_timestamptz.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0013_try_timestamptz.sql` — safe text→timestamptz cast for the history access window"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0013_try_timestamptz.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0014_tag_system.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0014_tag_system.sql` — transport-only `system` marker on tags"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0014_tag_system.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0015_resource_media_meta.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0015_resource_media_meta.sql` — plaintext media metadata on resources"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0015_resource_media_meta.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0016_resource_note_id.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0016_resource_note_id.sql` — owning note on resources"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0016_resource_note_id.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "scripts/check-docs.sh.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "check-docs"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`scripts/check-docs.sh` — contractual-docs CI check"
+      },
+      "risk": {
+        "basis": [
+          "no elevated-risk term matched"
+        ],
+        "origin": "INFERRED",
+        "value": "normal"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "scripts/check-docs.sh"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "scripts/check-graph.sh.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "check-graph"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`scripts/check-graph.sh` — build and validate the knowledge-graph artifact"
+      },
+      "risk": {
+        "basis": [
+          "no elevated-risk term matched"
+        ],
+        "origin": "INFERRED",
+        "value": "normal"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "scripts/check-graph.sh"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "scripts/context-pack.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "context-pack"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`scripts/context-pack` — reproducible companion context packs"
+      },
+      "risk": {
+        "basis": [
+          "no elevated-risk term matched"
+        ],
+        "origin": "INFERRED",
+        "value": "normal"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "scripts/context-pack"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "scripts/dr-drill.sh.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "dr-drill"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`scripts/dr-drill.sh` — disaster-recovery restore drill"
+      },
+      "risk": {
+        "basis": [
+          "no elevated-risk term matched"
+        ],
+        "origin": "INFERRED",
+        "value": "normal"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "scripts/dr-drill.sh"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "scripts/sync-companion-code.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "sync-companion-code"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`scripts/sync-companion-code` — synchronize mechanically covered source blocks"
+      },
+      "risk": {
+        "basis": [
+          "sync"
+        ],
+        "origin": "INFERRED",
+        "value": "protocol"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "scripts/sync-companion-code"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
     }
   ],
   "generator": "scripts/companion_tool.py",
