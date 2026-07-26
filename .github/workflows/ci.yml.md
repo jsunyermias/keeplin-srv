@@ -33,13 +33,14 @@ Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` +
 ## The `graph` job
 
 Runs on `ubuntu-latest` in parallel with `test` (no Rust toolchain or Postgres needed).
-Enforces LAYER 1 of the navigation model: the committed `graphify-out/graph.json` must match
-the code.
+Builds LAYER 1 of the navigation model from the exact checked-out commit, validates its
+focused corpus and reproducibility, and publishes the ignored output.
 
 | Step | What it enforces |
 |------|------------------|
-| `actions/setup-python@v5` (`3.12`) + `pip install "graphifyy==0.9.25"` | the pinned graphify is available so extraction matches the version the committed graph was built with |
-| `./scripts/check-graph.sh` (env `GRAPHIFY_REQUIRED=1`) | re-runs `graphify update .` and fails if the committed graph's code structure is stale; `GRAPHIFY_REQUIRED=1` turns a missing install into a hard failure rather than a silent skip |
+| `actions/setup-python@v5` (`3.12`) + `pip install "graphifyy==0.9.25"` | the pinned extractor used for every CI artifact |
+| `./scripts/check-graph.sh` (env `GRAPHIFY_REQUIRED=1`) | builds twice and verifies same-tree reproducibility, corpus exclusions, cross-file edges, domain hubs and report quality |
+| `actions/upload-artifact@v4` | publishes the complete `graphify-out/` directory as `knowledge-graph-<commit SHA>` for 14 days, including hidden Graphify metadata |
 
 ## Notes & gotchas
 

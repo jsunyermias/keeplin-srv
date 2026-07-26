@@ -10,6 +10,15 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### Graphify graph moved to a CI artifact (keeplin#148)
+
+- `graphify-out/` is no longer versioned. CI generates it with `graphifyy==0.9.25`,
+  validates the focused corpus and same-tree reproducibility, then publishes
+  `knowledge-graph-<commit SHA>` for 14 days.
+- `.graphifyignore` excludes companions, templates and generated/build/vendor trees while
+  retaining the selected architecture, security and ADR documents. The former pre-commit
+  auto-refresh hook was removed because commits no longer carry generated graph files.
+
 ### Hard format limits imported from keeplin-core (keeplin#130)
 
 - **The limits are no longer this crate's to define.** `src/collab.rs` drops its local
@@ -69,7 +78,7 @@ shapes independently of the crate version.
   via the keeplin pin bump).
 - **`legacy/` removed**: the dead Express+Yjs prototype (with its insecure
   default JWT secret) is deleted; git history preserves it.
-- **Graphify integration**: committed knowledge graph
+- **Graphify integration (historical; graph storage superseded by keeplin#148)**: introduced a committed knowledge graph
   (`graphify-out/graph.json` + `GRAPH_REPORT.md`), mandatory
   `## Graph context` section in every companion `.md` (dependencies /
   dependents with inline summaries + restated invariants), CI-enforced by
