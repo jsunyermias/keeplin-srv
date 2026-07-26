@@ -3149,6 +3149,10 @@ this companion.
 - `crates/keeplin-srv/tests/reencrypt.rs` — re-encrypt pass tests (EXTRACTED: calls×1; e.g. `spawn_server()`)
 - `crates/keeplin-srv/tests/soak.rs` — multi-instance collaborative soak/load drill (EXTRACTED: calls×1; e.g. `spawn_instance()`)
 
+**Cross-repo contracts**
+
+- `protocol-version` — server version endpoint and exact-match rule mirrored by keeplin-core.
+
 ## Coverage checklist
 
 Every code block of `http.rs`, in source order, each documented above (five points)

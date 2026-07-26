@@ -648,6 +648,10 @@ this companion.
 
 - `crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×7; e.g. `.broadcast()`, `touch_presence()`, `handle_msg()`)
 
+**Cross-repo contracts**
+
+- `collab-wire` — server-side message shapes kept symmetric with keeplin-core's canonical protocol.
+
 ## Coverage checklist
 
 | # | Block (source order) | Marker in code |

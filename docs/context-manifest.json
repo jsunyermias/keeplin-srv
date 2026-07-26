@@ -7,13 +7,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/auth.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×4; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: calls×1; e.g. `.encode()`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: references×30; e.g. `change_password()`, `create_device()`, `create_note()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -90,10 +84,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/bin/reencrypt.rs`. It documents",
-          "`crates/keeplin-srv/src/reencrypt.rs` — one-off at-rest re-encrypt pass (EXTRACTED: references×1; e.g. `Options`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -145,11 +136,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/bus.rs`. It documents **every code block of",
-          "keeplin-srv run as **more than one replica**. The collaborative channel and the device",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: imports_from×1, references×5; e.g. `AppState`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -206,14 +193,7 @@
       "cross_repo_contracts": {
         "origin": "INFERRED",
         "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/collab.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×6; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×2; e.g. `.resolve()`)",
-          "`crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: calls×1; e.g. `resolve_note_access()`)",
-          "`crates/keeplin-srv/src/protocol.rs` — collaborative wire types (EXTRACTED: references×7; e.g. `CollabServerMsg`, `Cursor`, `CollabClientMsg`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×10; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×4; e.g. `CollabEvent`, `Line`, `NoteOrder`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)"
+          "format-limits"
         ]
       },
       "direct_dependencies": [
@@ -325,16 +305,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/config.rs`. It documents **every",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×2; e.g. `AppState`, `.new()`)",
-          "`crates/keeplin-srv/tests/collab.rs` — collaborative channel & hardening tests (EXTRACTED: references×1; e.g. `test_config()`)",
-          "`crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: references×1; e.g. `test_config()`)",
-          "`crates/keeplin-srv/tests/integration.rs` — device relay tests (real `DbBackend`) (EXTRACTED: references×2; e.g. `spawn_server_with_config()`, `test_config()`)",
-          "`crates/keeplin-srv/tests/materialize.rs` — domain-entity materialisation tests (EXTRACTED: references×1; e.g. `test_config()`)",
-          "`crates/keeplin-srv/tests/quotas.rs` — per-user quota enforcement tests (EXTRACTED: references×2; e.g. `quota_config()`, `spawn()`)",
-          "`crates/keeplin-srv/tests/reencrypt.rs` — re-encrypt pass tests (EXTRACTED: references×1; e.g. `test_config()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [],
       "direct_dependents": [
@@ -395,7 +366,13 @@
       ],
       "invariants": {
         "origin": "INFERRED",
-        "value": []
+        "value": [
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal."
+          }
+        ]
       },
       "markers": {
         "origin": "EXTRACTED",
@@ -443,12 +420,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/crypto.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×2; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/reencrypt.rs` — one-off at-rest re-encrypt pass (EXTRACTED: references×2; e.g. `reencrypt_column()`, `run()`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×2; e.g. `Store`, `.with_cipher()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -479,7 +451,13 @@
       ],
       "invariants": {
         "origin": "INFERRED",
-        "value": []
+        "value": [
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal."
+          }
+        ]
       },
       "markers": {
         "origin": "EXTRACTED",
@@ -533,16 +511,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/error.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: references×4; e.g. `hash_password()`, `verify_password()`, `verify_token()`)",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×6; e.g. `touch_presence()`, `clear_presence()`, `handler()`)",
-          "`crates/keeplin-srv/src/crypto.rs` — at-rest encryption of note titles and line content (EXTRACTED: imports_from×1, references×2; e.g. `crypto.rs`, `.encrypt()`, `.decrypt()`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: references×41; e.g. `change_password()`, `create_device()`, `create_note()`)",
-          "`crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: references×2; e.g. `resolve_note_access()`, `resolve_notebook_access()`)",
-          "`crates/keeplin-srv/src/reencrypt.rs` — one-off at-rest re-encrypt pass (EXTRACTED: imports_from×1, references×2; e.g. `reencrypt_column()`, `reencrypt.rs`, `run()`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: imports_from×1, references×90; e.g. `cascade_notebook_to_notes_tx()`, `replace_note_shares_from_notebook_tx()`, `store.rs`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [],
       "direct_dependents": [
@@ -647,14 +616,7 @@
       "cross_repo_contracts": {
         "origin": "INFERRED",
         "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/http.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: references×30; e.g. `AuthedUser`)",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×41; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/mail.rs` — delegated email delivery (mail webhook) (EXTRACTED: references×1; e.g. `MailKind`)",
-          "`crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: calls×15, references×1; e.g. `resolve_note_access()`, `resolve_notebook_access()`, `Access`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×43; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×19; e.g. `PageCursor`, `User`, `UserDevice`)",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: calls×2; e.g. `winner()`, `line_winner()`)"
+          "protocol-version"
         ]
       },
       "direct_dependencies": [
@@ -755,7 +717,13 @@
       ],
       "invariants": {
         "origin": "INFERRED",
-        "value": []
+        "value": [
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal."
+          }
+        ]
       },
       "markers": {
         "origin": "EXTRACTED",
@@ -875,11 +843,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "# `lib.rs` — keeplin-srv library root",
-          "Self-contained companion for `crates/keeplin-srv/src/lib.rs`. It documents **every code block of",
-          "**What it does** — Declares the public modules of the `keeplin-srv` crate, one per source"
-        ]
+        "value": []
       },
       "direct_dependencies": [],
       "direct_dependents": [],
@@ -923,13 +887,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/mail.rs`. It documents **every code block of",
-          "**What it does** — Delegated email delivery (issue #49). keeplin-srv is **not a mail",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: references×1; e.g. `send_flow_mail()`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×2; e.g. `.consume_email_token()`, `.create_email_token()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [],
       "direct_dependents": [
@@ -999,13 +957,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "# `main.rs` — keeplin-srv entry point",
-          "Self-contained companion for `crates/keeplin-srv/src/main.rs`. It documents **every code block of",
-          "**Used by** — nobody imports it; it is the `keeplin-srv` binary entry point. (The",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×2; e.g. `AppState`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1064,13 +1016,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/permissions.rs`. It documents",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: references×2; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×3; e.g. `Note`, `Store`)",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: calls×1; e.g. `handle_msg()`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×15, references×1; e.g. `get_note()`, `update_note()`, `delete_note()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1102,7 +1048,13 @@
       ],
       "invariants": {
         "origin": "INFERRED",
-        "value": []
+        "value": [
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "the alias is local to this module and `Capabilities` keeps its bit values: renumbering a bit changes what every assertion below means without breaking compilation."
+          }
+        ]
       },
       "markers": {
         "origin": "EXTRACTED",
@@ -1163,14 +1115,7 @@
       "cross_repo_contracts": {
         "origin": "INFERRED",
         "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/protocol.rs`. It documents **every",
-          "`crates/keeplin-srv/src/http.rs` **and** its mirror `keeplin-core/src/compat.rs` — the",
-          "pinned in `crates/keeplin-srv/Cargo.toml`): a version vector — a map from actor id",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine; imports",
-          "`crates/keeplin-srv/src/store.rs` — stores two of these types **opaquely** as JSON:",
-          "`crates/keeplin-srv/tests/collab.rs` — exercises the protocol as raw JSON frames",
-          "fields of `LineOp`. Outside this file, `crates/keeplin-srv/src/collab.rs` handles line ids",
-          "`CollabServerMsg::Op.user_id`. `crates/keeplin-srv/src/collab.rs::apply_op` compares"
+          "collab-wire"
         ]
       },
       "direct_dependencies": [],
@@ -1240,11 +1185,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/ratelimit.rs`. It documents **every",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: imports_from×1, references×1; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1262,7 +1203,18 @@
       "high_risk_dependents": [],
       "invariants": {
         "origin": "INFERRED",
-        "value": []
+        "value": [
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "the parent keeps them at module scope; a rename or a move into a submodule breaks these tests at compile time, which is the intended early signal."
+          },
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "it stays the unit the module under test accepts, so no conversion is hidden here."
+          }
+        ]
       },
       "markers": {
         "origin": "EXTRACTED",
@@ -1317,12 +1269,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/reencrypt.rs`. It documents **every",
-          "`crates/keeplin-srv/src/crypto.rs` — at-rest encryption of note titles and line content (EXTRACTED: references×2; e.g. `Cipher`)",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×2; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/bin/reencrypt.rs` — `keeplin-reencrypt` CLI wrapper (EXTRACTED: references×1; e.g. `parse_args()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1393,16 +1340,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/state.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×1; e.g. `CollabRegistry`)",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×2; e.g. `Config`)",
-          "`crates/keeplin-srv/src/mail.rs` — delegated email delivery (mail webhook) (EXTRACTED: references×1; e.g. `Mailer`)",
-          "`crates/keeplin-srv/src/ratelimit.rs` — per-IP token-bucket rate limiter (EXTRACTED: references×1; e.g. `RateLimiter`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×1; e.g. `Store`)",
-          "`crates/keeplin-srv/src/sync.rs` — the device sync relay (EXTRACTED: references×1; e.g. `SyncHub`)",
-          "`crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: references×1; e.g. `auth_mw()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1530,16 +1468,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/store.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/crypto.rs` — at-rest encryption of note titles and line content (EXTRACTED: references×2; e.g. `Cipher`)",
-          "`crates/keeplin-srv/src/error.rs` — the API error type (EXTRACTED: imports_from×1, references×90; e.g. `AppError`)",
-          "`crates/keeplin-srv/src/mail.rs` — delegated email delivery (mail webhook) (EXTRACTED: references×2; e.g. `MailKind`)",
-          "`crates/keeplin-srv/src/auth.rs` — passwords, tokens, and the auth middleware (EXTRACTED: calls×1; e.g. `create_token()`)",
-          "`crates/keeplin-srv/src/collab.rs` — the collaborative session engine (EXTRACTED: references×4; e.g. `deliver_event()`, `line_snapshot()`, `winner()`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: references×19; e.g. `.resolve()`, `paginated()`, `RegisterResponse`)",
-          "`crates/keeplin-srv/src/permissions.rs` — note capabilities (EXTRACTED: references×3; e.g. `resolve_note_access()`, `resolve_notebook_access()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1772,10 +1701,7 @@
       "cross_repo_contracts": {
         "origin": "INFERRED",
         "value": [
-          "Self-contained companion for `crates/keeplin-srv/src/sync.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×7; e.g. `AppState`)",
-          "`crates/keeplin-srv/src/store.rs` — the PostgreSQL data-access layer (EXTRACTED: references×1; e.g. `UserDevice`)",
-          "`crates/keeplin-srv/src/state.rs` — shared application state (EXTRACTED: references×1; e.g. `AppState`)"
+          "sync-change-envelope"
         ]
       },
       "direct_dependencies": [
@@ -1853,11 +1779,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/collab.rs`. It documents **every",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×3; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -1962,11 +1884,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/collab_client_e2e.rs`. It",
-          "driven against a real `keeplin-srv` on a throwaway PostgreSQL database",
-          "`crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×2; e.g. `collab_device()`, `wait_server_body()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2017,10 +1935,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs`.",
-          "`crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×3; e.g. `collab_device()`, `wait_local_body()`, `wait_server_body()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2071,10 +1986,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "`crates/keeplin-srv/tests/collab_client_resources_e2e.rs`. It documents **every code block of",
-          "`crates/keeplin-srv/tests/collab_e2e_common/mod.rs` — shared harness for the real-client e2e binaries (EXTRACTED: calls×1; e.g. `collab_device()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2125,16 +2037,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/collab_e2e_common/mod.rs`. It",
-          "(`keeplin-srv`); `tokio`. **Used by** — all three e2e binaries.",
-          "protocol handshake — this server is the matching keeplin-srv, so it must negotiate",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)",
-          "`crates/keeplin-srv/tests/collab_client_e2e.rs` — real daemon client ↔ real server (EXTRACTED: calls×2)",
-          "`crates/keeplin-srv/tests/collab_client_reconnect_e2e.rs` — reconnect/rebuild e2e (EXTRACTED: calls×3)",
-          "`crates/keeplin-srv/tests/collab_client_resources_e2e.rs` — out-of-band resource blob e2e (EXTRACTED: calls×1)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2224,14 +2127,10 @@
       "cross_repo_contracts": {
         "origin": "INFERRED",
         "value": [
-          "# `tests/core_compat.rs` — the keeplin ↔ keeplin-srv wire/format contract, asserted",
-          "Self-contained companion for `crates/keeplin-srv/tests/core_compat.rs`. It documents",
-          "**What it does** — This file is the **cross-repo compatibility test**: the mechanical guarantee that",
-          "keeplin-srv and the keeplin client agree on every shared wire/format surface. The",
-          "source of truth for shared types and constants, that keeplin-srv pins it to an exact",
-          "types and constants; keeplin-srv imports them and pins the crate to an exact git `rev`,",
-          "built with keeplin-srv's types. Coverage is the point: a new variant added on one side",
-          "**What it does** — The round-trip itself, in both directions. Serialise the keeplin-srv message to JSON"
+          "collab-wire",
+          "format-limits",
+          "note-log-resolution",
+          "protocol-version"
         ]
       },
       "direct_dependencies": [
@@ -2252,14 +2151,17 @@
         "origin": "INFERRED",
         "value": [
           {
+            "basis": "authored-invariant",
             "origin": "INFERRED",
-            "value": "Every collab protocol message and every shared constant round-trips between the two"
+            "value": "Every collab protocol message and every shared constant round-trips between the two repositories' types; adding a variant or a field on one side without the other fails here."
           },
           {
+            "basis": "authored-invariant",
             "origin": "INFERRED",
-            "value": "The three format limits and the three limit wire codes are keeplin-core's, not"
+            "value": "The three format limits and the three limit wire codes are keeplin-core's, not keeplin-srv's own."
           },
           {
+            "basis": "authored-invariant",
             "origin": "INFERRED",
             "value": "`PROTOCOL_VERSION` is identical on both sides."
           }
@@ -2313,13 +2215,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/integration.rs`. It documents",
-          "draining) — through a real keeplin-srv on a throwaway `#[sqlx::test]` PostgreSQL",
-          "Marker `// md:fn device`. A server-mode `DbBackend` (the real keeplin client) on a",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×2; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×3; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2409,11 +2305,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/materialize.rs`. It documents",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2490,11 +2382,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/quotas.rs`. It documents **every",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×2; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2562,11 +2450,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/reencrypt.rs`. It documents",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2629,11 +2513,7 @@
       },
       "cross_repo_contracts": {
         "origin": "INFERRED",
-        "value": [
-          "Self-contained companion for `crates/keeplin-srv/tests/soak.rs`. It documents **every",
-          "`crates/keeplin-srv/src/config.rs` — runtime configuration (EXTRACTED: references×1; e.g. `Config`)",
-          "`crates/keeplin-srv/src/http.rs` — the REST router and handlers (EXTRACTED: calls×1; e.g. `router()`)"
-        ]
+        "value": []
       },
       "direct_dependencies": [
         {
@@ -2692,5 +2572,5 @@
     }
   ],
   "generator": "scripts/companion_tool.py",
-  "schema_version": 1
+  "schema_version": 2
 }
