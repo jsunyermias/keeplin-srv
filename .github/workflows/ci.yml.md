@@ -30,6 +30,25 @@ the steps run.
 
 Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` + `rustfmt`.
 
+## The `review` job
+
+Runs on `ubuntu-latest` for `pull_request` events only, in parallel with the others (no
+Rust toolchain or Postgres needed). Enforces that independent review is not the
+implementer's to skip: a pull request either names an independent reviewer with the
+independence box ticked, or carries a complete maintainer waiver whose entry already exists
+in `docs/review-debt.md`.
+
+| Step | What it enforces |
+|------|------------------|
+| `printf '%s' "$PR_BODY"` with `PR_BODY` in `env` | untrusted author-written text reaches the check through a file, never through shell interpolation |
+| `companion_tool.py review-gate --body-file … --repo … --number …` | a named reviewer with the box ticked, or four complete waiver fields backed by an open registry entry linking this pull request |
+
+The job name is a branch-protection required-check identifier. Until it is added to the
+required list in Settings → Branches it reports without blocking, which is how it is meant
+to land. It verifies a declaration, not a review: a reviewer who is named but did not
+review still passes. What it removes is the silent path, where an unreviewed merge left no
+trace at all.
+
 ## The `graph` job
 
 Runs on `ubuntu-latest` in parallel with `test` (no Rust toolchain or Postgres needed).
