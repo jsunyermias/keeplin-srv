@@ -926,7 +926,7 @@ already valid JSON values).
 
 **Repeated context** — This envelope is half of the relay's wire contract (the other
 half is the incoming `changes` envelope parsed in `handle_incoming`); the client
-mirror lives in `keeplin-core/src/storage/db.rs`.
+mirror lives in `keeplin-core/src/storage/db/sync.rs`.
 
 ---
 
