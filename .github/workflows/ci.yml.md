@@ -2,14 +2,17 @@
 
 ## Purpose
 
-The GitHub Actions workflow that gates every push to `main` / `claude/**` and every PR into
+The GitHub Actions workflow that gates every push to `main` and every PR into
 `main`. It enforces pull-request review governance, runs the full workspace check, the
 real-Postgres integration suite, lint, and a dependency audit. Green CI is the merge bar
 for this repo.
 
 ## When it runs
 
-- **push** to `main` and any `claude/**` branch.
+- **push** to `main` only. `claude/**` was removed deliberately: a push run and a
+  pull-request run publish the same `Check, Test & Lint` check for the same commit, and
+  the push run skips the governance step, so a governance failure could be overwritten
+  by a later green from the run that never checked it.
 - **pull_request** targeting `main` on `opened`, `synchronize`, `reopened`, `edited`, and
   `ready_for_review`.
 
@@ -27,7 +30,8 @@ the steps run.
 | Step | What it enforces |
 |------|------------------|
 | `node --test .github/scripts/check-review-governance.test.js` | the reviewed and maintainer-waiver paths, including negative cases |
-| `actions/github-script@v7` (non-draft pull requests only) | either an independent review with evidence, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md` |
+| `./scripts/check-review-debt.sh` (`MAX_OPEN_REVIEW_DEBT: 2`) | at most two open entries in `docs/review-debt.md`. A waiver defers a review; past the cap the repository stops accepting new code until the backlog is paid down |
+| `actions/github-script@v7` (non-draft pull requests only) | an independent review with evidence from a **different model family**, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md`; plus the companion-marker citation, the revert answer, and the sequential-exception protocol |
 | `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
 | `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
 | `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | syntax fixtures, drift/error detection, fence-only sync and reproducible context packs |
