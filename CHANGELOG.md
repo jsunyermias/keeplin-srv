@@ -10,6 +10,32 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### Deterministic convergence for the review loop (keeplin ADR 0004)
+
+- **The implementation↔review loop now terminates on a computed condition.** Previously the
+  only mechanical gate was `.github/scripts/check-review-governance.js`, which never inspected
+  findings: what stood for "the loop finished" was the pull-request checkbox `Blocking findings
+  are resolved and conversations are closed`, an assertion by the agents inside the loop. No
+  repository state held finding identity, round count or round-to-round comparison, so settled
+  findings returned as new and a stalled loop was indistinguishable from a progressing one.
+- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s and wired into
+  CI as `Check review-loop convergence` for non-draft pull requests. A finding blocks only when
+  *reified* — named as a test, property, contract assertion or `check-docs` check that fails;
+  anything not reducible to a failing check is `advisory`, recorded but not blocking.
+  Convergence is required checks green **and** zero open reified findings.
+- **Findings are identified and durable.** The new `## Review ledger` section of
+  `.github/pull_request_template.md` carries a stable ID and one state per finding (`open` /
+  `resolved` / `dismissed` / `advisory`). A `dismissed` finding cites the priority decision or
+  accepted ADR that settles it and does not reopen when re-raised.
+- **The stagnation brake measures state, not a clock.** The loop-state hash is
+  `sha256(normalized diff ‖ open reified finding IDs ‖ red check names)`. A repeated hash, or a
+  blocking set that has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds (3), escalates to
+  the maintainer naming the exact stuck item and demands an entry in the new
+  `docs/review-stalls.md`.
+- Independent review is untouched and conjunctive. `ci.yml` gains `checks: read` for the head
+  commit's check runs. No server behavior, migration, wire surface or `keeplin-core` pin is
+  affected.
+
 ### Graphify graph moved to a CI artifact (keeplin#148)
 
 - `graphify-out/` is no longer versioned. CI generates it with `graphifyy==0.9.25`,

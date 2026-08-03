@@ -190,6 +190,38 @@ pull request templates.
 6. Resolve findings and conversations, obtain green required checks on the exact commit,
    then mark the PR ready for the maintainer to merge.
 
+### Convergence is mechanical
+
+Step 6 above ends on a computed condition, never on an agent's satisfaction.
+[keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md)
+is the accepted cross-repository decision; `.github/scripts/check-review-loop.js` enforces it
+here on every non-draft pull request, identically to `keeplin`.
+
+- A finding **blocks** only if it is *reified*: expressed as something that fails
+  mechanically — a test, a property, a contract assertion, or a `scripts/check-docs.sh`
+  check. A finding that cannot be reduced to a failing check is **advisory**: recorded in the
+  ledger, not blocking. Advisory is not a verdict on importance; it is a statement about what
+  can be checked, and a real defect filed advisory still earns a follow-up issue.
+- **A pull request has converged when its required checks are green and no reified finding is
+  open.** "The reviewer is satisfied" is not a convergence condition and is not accepted as
+  one anywhere in the pipeline.
+- Every finding is recorded in the pull request's **review ledger** with a stable ID and one
+  state: `open`, `resolved`, `dismissed` or `advisory`. A `dismissed` finding cites its reason
+  — a priority decision or an accepted ADR — and re-raising it does not reopen it and does not
+  start a round unless the code in its area changed.
+- The blocking set `{red required checks} ∪ {open reified findings}` must shrink strictly each
+  round.
+- The brake is state, not a clock. When the loop-state hash repeats, or the blocking set has
+  not shrunk for three rounds, the loop **escalates to the maintainer** naming the exact
+  finding or check that is stuck, and the stall is recorded in
+  [`docs/review-stalls.md`](docs/review-stalls.md) the way review debt is recorded. Continuing
+  to iterate after a stall without that record is prohibited.
+
+This is a floor beneath independent review, never a substitute for it. The two are
+conjunctive: a converged pull request with no independent reviewer is still unmergeable, and
+convergence never ticks the review boxes of `.github/pull_request_template.md`. The ledger is
+part of the diff the independent reviewer examines.
+
 Start shared analysis with `docs/prompts/0.A-prompt-comun.md`. The default role split is
 advisory: Claude documents and prepares issues, Kimi implements with
 `docs/prompts/0.B-prompt-implementacion-issue.md`, and Codex reviews with
@@ -242,7 +274,9 @@ duplicating a decision.
 
 ## Definition of done
 
-A change is done only when its issue criteria are met; applicable code, companions, graph
+A change is done only when its issue criteria are met; its review loop has converged
+mechanically — required checks green and no reified finding open, with any open entry in
+`docs/review-stalls.md` counting as an open condition here; applicable code, companions, graph
 and project docs agree; focused and repository checks pass or explicit blockers are
 recorded; cross-repo surfaces and tests are coordinated; and an independent reviewer has
 examined the objective and diff. A maintainer waiver defers that examination and never

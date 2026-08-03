@@ -13,9 +13,12 @@ for this repo.
 - **pull_request** targeting `main` on `opened`, `synchronize`, `reopened`, `edited`, and
   `ready_for_review`.
 
-The workflow has read-only access to repository contents and pull-request metadata. Body
-edits retrigger it so completing or removing review evidence is reflected in the required
-check without a new commit.
+The workflow has read-only access to repository contents, pull-request metadata and check
+runs. The `checks: read` scope exists for the review-loop convergence step, which reads the
+head commit's check runs to build the set of red required checks; without it that set would
+read as empty and a failing pull request could be declared converged. Body edits retrigger the
+workflow, so completing or removing review evidence — and editing the review ledger — is
+reflected in the required check without a new commit.
 
 ## The `test` job
 
@@ -26,8 +29,9 @@ the steps run.
 
 | Step | What it enforces |
 |------|------------------|
-| `node --test .github/scripts/check-review-governance.test.js` | the reviewed and maintainer-waiver paths, including negative cases |
+| `node --test` over `check-review-governance.test.js` and `check-review-loop.test.js` | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, including negative cases |
 | `actions/github-script@v7` (non-draft pull requests only) | either an independent review with evidence, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md` |
+| `actions/github-script@v7` — `Check review-loop convergence` (non-draft pull requests only) | the loop converges mechanically — required checks green and zero open reified findings — and a stalled loop escalates to `docs/review-stalls.md` instead of iterating silently (keeplin ADR 0004) |
 | `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
 | `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
 | `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | syntax fixtures, drift/error detection, fence-only sync and reproducible context packs |
@@ -59,8 +63,34 @@ focused corpus and reproducibility, and publishes the ignored output.
   rather than compiled from source, which keeps the step fast; a new advisory can turn CI red
   without any code change, which is intended (it surfaces a dependency to bump).
 
+## Review-loop convergence
+
+The `Check review-loop convergence` step implements
+[keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md),
+identically to `keeplin`. It reads the `## Review ledger` section of the pull-request body, the
+changed files, and the head commit's check runs, then decides one of four states:
+
+| State | Meaning | Check |
+|-------|---------|-------|
+| `converged` | Required checks green and no reified finding open | passes |
+| `converging` | The blocking set is non-empty but shrinking | fails |
+| `escalated` | The loop state repeated, or the blocking set has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds | fails, and demands a `docs/review-stalls.md` entry naming this pull request |
+| `malformed` | The ledger or round log contradicts the observed state | fails |
+
+`REVIEW_LOOP_STAGNATION_LIMIT` is set to `3` on the step. The brake measures state, not elapsed
+time: the loop-state hash is `sha256(normalized diff ‖ open reified finding IDs ‖ red check
+names)`, where the normalized diff is the changed paths with their blob SHAs, sorted, so commit
+ordering does not affect it.
+
+This step is a floor beneath `Check pull-request review governance`, never a substitute for it.
+The two are conjunctive: a pull request can converge and still be unmergeable for want of an
+independent reviewer.
+
 ## Related files
 
+- `../scripts/check-review-loop.js` — the convergence and stagnation evaluator.
+- `../scripts/check-review-governance.js` — the independent-review and waiver evaluator.
+- `../../docs/review-stalls.md` — the durable record of escalated loops.
 - `../../crates/keeplin-srv/tests/integration.md` / `collab.md` — the suites this runs.
 - `../../docker-compose.yml.md` — the equivalent Postgres for local runs.
 - `../../.env.example.md` — the `DATABASE_URL` shape mirrored here.
