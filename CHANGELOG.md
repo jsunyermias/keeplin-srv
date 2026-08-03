@@ -18,8 +18,7 @@ shapes independently of the crate version.
   are resolved and conversations are closed`, an assertion by the agents inside the loop. No
   repository state held finding identity, round count or round-to-round comparison, so settled
   findings returned as new and a stalled loop was indistinguishable from a progressing one.
-- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s, run by the dedicated
-  `Review loop converged` job for non-draft pull requests. A finding blocks only when
+- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s, now driven by the default-branch trusted evaluator. A finding blocks only when
   *reified* — named as a test, property, contract assertion or `check-docs` check that fails;
   anything not reducible to a failing check is `advisory`, recorded but not blocking.
   Convergence is required checks green **and** zero open reified findings.
@@ -56,8 +55,16 @@ shapes independently of the crate version.
   delimiter framing, and table parsing follows CommonMark backslash parity. ADR 0005 is
   rejected; ADR 0006 proposes a trusted default-branch writer and stays unimplemented while
   proposed, so F-002/F-008/F-009 remain open and their test stays deliberately red.
-- Independent review is untouched and conjunctive. `ci.yml` gains `checks: read` for the head
-  commit's check runs. No server behavior, migration, wire surface or `keeplin-core` pin is
+- **ADR 0008 implemented.** The head-controlled `converge` job is gone; the authoritative
+  evaluator is the default-branch `review-loop-evaluator.yml`, which never checks out or
+  executes pull-request content. A finding reaches `resolved`/`dismissed` only against a
+  maintainer authorization naming the finding and target state, with resolution evidence
+  bound to the evaluated head, workflow and App. Every pull-request workflow is read-only,
+  proven by a canary that fails the build unless `PATCH /check-runs` returns 403.
+  Terminal journal truncation stays undetected and is stated as such; the three-probe
+  follow-up is tracked in `docs/review-loop-spike.md`.
+- Independent review is untouched and conjunctive. `ci.yml` is read-only; only the trusted
+  default-branch evaluator holds write scopes. No server behavior, migration, wire surface or `keeplin-core` pin is
   affected.
 
 ### Graphify graph moved to a CI artifact (keeplin#148)

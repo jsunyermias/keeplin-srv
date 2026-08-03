@@ -193,13 +193,14 @@ pull request templates.
 ### Convergence is mechanical
 
 Step 6 above ends on a computed condition, never on an agent's satisfaction.
-[keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md) is the
+[`docs/adr/0004-review-loop-convergence.md`](docs/adr/0004-review-loop-convergence.md) is the
 accepted decision; `.github/scripts/check-review-loop.js` enforces it on every non-draft pull
 request.
 
-[keeplin ADR 0006](https://github.com/jsunyermias/keeplin/blob/main/https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0006-trusted-review-loop-history.md)
-proposes superseding 0004 with a default-branch trusted writer and authenticated history. It is
-not active while proposed: body history remains authoritative and F-002/F-008/F-009 stay open.
+[keeplin ADR 0008](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md)
+supersedes 0004/0006. A default-branch `workflow_run` evaluator is authoritative, and disposal
+requires independently authored, machine-readable authorization plus commit/workflow/App-bound
+success evidence when resolved. Fork pull requests deliberately fail closed.
 
 - A finding **blocks** only if it is *reified*: expressed as something that fails
   mechanically — a test, a property, a contract assertion, or a `scripts/check-docs.sh`
@@ -222,6 +223,10 @@ not active while proposed: body history remains authoritative and F-002/F-008/F-
   finding or check that is stuck, and the stall is recorded in
   [`docs/review-stalls.md`](docs/review-stalls.md) the way review debt is recorded. Continuing
   to iterate after a stall without that record is prohibited.
+- The App-authored digest chain detects editing of every record. It detects deletion only when
+  a surviving descendant commits to the deleted record. An actor with repository write access
+  can truncate the newest record and the evaluator will read the shorter prefix as though those
+  rounds never happened; terminal truncation is not detected.
 
 This is a floor beneath independent review, never a substitute for it. The two are
 conjunctive: a converged pull request with no independent reviewer is still unmergeable, and
