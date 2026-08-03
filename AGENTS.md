@@ -193,12 +193,12 @@ pull request templates.
 ### Convergence is mechanical
 
 Step 6 above ends on a computed condition, never on an agent's satisfaction.
-[`docs/adr/0004-review-loop-convergence.md`](docs/adr/0004-review-loop-convergence.md) is the
-accepted decision; `.github/scripts/check-review-loop.js` enforces it on every non-draft pull
-request.
-
 [keeplin ADR 0008](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md)
-supersedes 0004/0006. A default-branch `workflow_run` evaluator is authoritative, and disposal
+is the standing decision, superseding 0004 through 0006; `.github/scripts/check-review-loop.js`
+enforces it on every non-draft pull request. The ADRs themselves live in `keeplin`, so they are
+linked there rather than by a path this repository does not carry.
+
+A default-branch `workflow_run` evaluator is authoritative, and disposal
 requires independently authored, machine-readable authorization plus commit/workflow/App-bound
 success evidence when resolved. Fork pull requests deliberately fail closed.
 
@@ -216,6 +216,10 @@ success evidence when resolved. Fork pull requests deliberately fail closed.
   state: `open`, `resolved`, `dismissed` or `advisory`. A `dismissed` finding cites its reason
   — a priority decision or an accepted ADR — and re-raising it does not reopen it and does not
   start a round unless the code in its area changed.
+- A finding that names a mechanical check is reified and cannot simultaneously have `advisory`
+  state. Protection against changing a previously reified finding to advisory is bounded to the
+  newest surviving journal record; terminal truncation can erase the record that established
+  reification, after which the shorter authentic prefix may converge with that finding advisory.
 - The blocking set `{red required checks} ∪ {open reified findings}` must shrink strictly each
   round.
 - The brake is state, not a clock. When the loop-state hash repeats, or the blocking set has
