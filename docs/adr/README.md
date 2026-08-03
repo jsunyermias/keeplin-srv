@@ -31,6 +31,8 @@ link the ADR in both directions.
 | [0005 — Loop history lives outside the pull-request body](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0005-loop-history-outside-the-pull-request-body.md) | rejected | did not define a trusted writer; replaced by 0006 |
 | [0006 — Trusted review-loop history](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0006-trusted-review-loop-history.md) | accepted | supersedes 0004; would require the same trusted default-branch writer here |
 
+| [0007 — Trusted evaluator, verified disposal, and dual-store loop history](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0007-trusted-evaluator-and-dual-store-history.md) | rejected | its check-run immutability claim was false; rejected by two reviews before acceptance |
+| [0008 — Trusted evaluator, verified disposal, and a bounded history claim](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) | **accepted** | the standing decision. Requires the same trusted default-branch evaluator, verified disposal and read-only pull-request permissions here |
 ## Server-specific decisions
 
 No server-specific ADR has been accepted yet. The first expected use is
