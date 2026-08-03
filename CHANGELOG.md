@@ -80,10 +80,10 @@ shapes independently of the crate version.
   a one-line glossary passed it with the prose deleted. It is now a verbatim canonical sentence
   in `scripts/check-bounded-history.sh`, with `scripts/tests/test_bounded_history.py` proving the
   check can fail. F-030 bounds the branch-protection claim in `AGENTS.md`.
-- **F-025 is open and blocking, awaiting a maintainer decision.** `check-review-governance.js`
-  runs inside the head-controlled `ci.yml`, so the trusted evaluator has no evidence it ran.
-  keeplin ADR 0009 proposes moving governance into the default-branch evaluator and stays
-  unimplemented while proposed.
+- **F-025 is dismissed against accepted keeplin ADR 0009.** The maintainer accepted the decision
+  to move governance into the default-branch evaluator. The mechanism is unchanged until ADR 0009
+  is implemented in its own dedicated pull request: `check-review-governance.js` still runs inside
+  the head-controlled `ci.yml`, so the documented conjunction remains policy, not mechanism.
 - Independent review is untouched. `ci.yml` is read-only; only the trusted
   default-branch evaluator holds write scopes. No server behavior, migration, wire surface or `keeplin-core` pin is
   affected.

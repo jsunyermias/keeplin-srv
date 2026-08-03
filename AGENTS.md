@@ -244,7 +244,8 @@ the evaluator: `check-review-governance.js` runs inside the head-controlled `ci.
 can weaken the step while the job still reports success, and the evaluator has no evidence the
 gate ran.
 [keeplin ADR 0009](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0009-governance-evaluated-from-the-default-branch.md)
-proposes moving governance into the default-branch evaluator; it is unimplemented while proposed.
+accepts moving governance into the default-branch evaluator; implementation is pending in a
+dedicated pull request.
 
 Start shared analysis with `docs/prompts/0.A-prompt-comun.md`. The default role split is
 advisory: Claude documents and prepares issues, Kimi implements with
