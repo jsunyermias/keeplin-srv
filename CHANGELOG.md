@@ -65,14 +65,14 @@ shapes independently of the crate version.
   Terminal journal truncation stays undetected and is stated as such; the three-probe
   follow-up is tracked in `docs/review-loop-spike.md`.
 - **Round 9 gave this repository its first full independent review (Kimi K3), and Codex's
-  round-9 review of `keeplin` found F-018 in the mirrored evaluator.** An authorized tombstone
+  round-9 review of `keeplin` found F-023 in the mirrored evaluator.** An authorized tombstone
   retired a finding ID without reserving it, so the ID could return as `advisory` against a
   newest record that no longer mentioned it, request no authorization and converge. Reification
   is now remembered across every surviving journal record; the truncation bound is unchanged.
   This repository's own review found only documentation drift, corrected here: the `ci.yml`
   companion described the removed `converge` job and a superseded hash construction, omitted the
   canary step and claimed a deliberately red test that no longer exists.
-- **F-020 is open and blocking, awaiting a maintainer decision.** `check-review-governance.js`
+- **F-025 is open and blocking, awaiting a maintainer decision.** `check-review-governance.js`
   runs inside the head-controlled `ci.yml`, so the trusted evaluator has no evidence it ran.
   keeplin ADR 0009 proposes moving governance into the default-branch evaluator and stays
   unimplemented while proposed.
