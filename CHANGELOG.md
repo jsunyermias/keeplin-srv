@@ -48,6 +48,14 @@ shapes independently of the crate version.
   where an agent cannot rewrite it, which crosses ADR 0004's recorded compatibility note and so
   awaits a maintainer decision. It is reified as a failing test rather than reclassified as
   advisory.
+- **Review round 2 (Codex / GPT-5.5) reopened four round-1 findings and added three.** The
+  convergence check now takes `needs.test.result`/`needs.graph.result` as positive evidence
+  instead of inferring greenness from the check-run API, so skipped, neutral, absent and
+  unknown no longer read as green. Blocker matching requires explicit delimited tokens
+  (`F-0010` is not `F-001`), the loop-state hash is SHA-256 over canonical JSON rather than
+  delimiter framing, and table parsing follows CommonMark backslash parity. ADR 0005 is
+  rejected; ADR 0006 proposes a trusted default-branch writer and stays unimplemented while
+  proposed, so F-002/F-008/F-009 remain open and their test stays deliberately red.
 - Independent review is untouched and conjunctive. `ci.yml` gains `checks: read` for the head
   commit's check runs. No server behavior, migration, wire surface or `keeplin-core` pin is
   affected.

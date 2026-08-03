@@ -193,9 +193,13 @@ pull request templates.
 ### Convergence is mechanical
 
 Step 6 above ends on a computed condition, never on an agent's satisfaction.
-[keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md)
-is the accepted cross-repository decision; `.github/scripts/check-review-loop.js` enforces it
-here on every non-draft pull request, identically to `keeplin`.
+[keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md) is the
+accepted decision; `.github/scripts/check-review-loop.js` enforces it on every non-draft pull
+request.
+
+[keeplin ADR 0006](https://github.com/jsunyermias/keeplin/blob/main/https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0006-trusted-review-loop-history.md)
+proposes superseding 0004 with a default-branch trusted writer and authenticated history. It is
+not active while proposed: body history remains authoritative and F-002/F-008/F-009 stay open.
 
 - A finding **blocks** only if it is *reified*: expressed as something that fails
   mechanically — a test, a property, a contract assertion, or a `scripts/check-docs.sh`
