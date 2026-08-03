@@ -29,7 +29,6 @@ the steps run.
 
 | Step | What it enforces |
 |------|------------------|
-| `node --test` over `check-review-governance.test.js` and `check-review-loop.test.js` | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, including negative cases |
 | `actions/github-script@v7` (non-draft pull requests only) | either an independent review with evidence, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md` |
 | `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
 | `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
@@ -38,6 +37,7 @@ the steps run.
 | `cargo test --workspace` | unit + integration tests pass (against the PG service) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero clippy warnings (`--all-targets` also subsumes `cargo check`, so no separate check step) |
 | `cargo audit` | no known-vulnerable dependencies (the tool is installed as a prebuilt binary via `taiki-e/install-action@v2`, not compiled from source) |
+| `node --test` over both governance suites (**runs last**, so one deliberately-red test for an open finding does not hide the rest) | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, including negative cases |
 
 Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` + `rustfmt`.
 
