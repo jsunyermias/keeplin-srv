@@ -18,8 +18,8 @@ shapes independently of the crate version.
   are resolved and conversations are closed`, an assertion by the agents inside the loop. No
   repository state held finding identity, round count or round-to-round comparison, so settled
   findings returned as new and a stalled loop was indistinguishable from a progressing one.
-- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s and wired into
-  CI as `Check review-loop convergence` for non-draft pull requests. A finding blocks only when
+- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s, run by the dedicated
+  `Review loop converged` job for non-draft pull requests. A finding blocks only when
   *reified* — named as a test, property, contract assertion or `check-docs` check that fails;
   anything not reducible to a failing check is `advisory`, recorded but not blocking.
   Convergence is required checks green **and** zero open reified findings.
@@ -32,6 +32,22 @@ shapes independently of the crate version.
   blocking set that has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds (3), escalates to
   the maintainer naming the exact stuck item and demands an entry in the new
   `docs/review-stalls.md`.
+- **Round 1 of independent review (Codex / GPT-5.5) found six reifiable defects; five are
+  fixed here and one is open.** Convergence now runs in its own `converge` job gated on
+  `needs: [test, graph]`, because a step inside `Check, Test & Lint` asserted "required checks
+  are green" before `cargo test`, Clippy, audit and the graph job had run; an unfinished check
+  is now reported as `awaiting-checks` and blocks, rather than being read as green. A body with
+  no ledger section is round zero per the ADR's migration contract, not malformed. A stall
+  record must now name every blocker in the `## Open` table, not merely mention the pull
+  request somewhere in the file. The loop-state hash joins with `\x1f` instead of a comma,
+  which had made `{"a,b","c"}` and `{"a","b,c"}` collide — check-run names contain commas, and
+  this repository's own is `Check, Test & Lint`. Escaped pipes in ledger cells no longer shift
+  the state column.
+- **Open, blocking: the stagnation brake reads its own history from the editable pull-request
+  body**, so deleting `Round log` rows resets the streak. Closing it needs loop state persisted
+  where an agent cannot rewrite it, which crosses ADR 0004's recorded compatibility note and so
+  awaits a maintainer decision. It is reified as a failing test rather than reclassified as
+  advisory.
 - Independent review is untouched and conjunctive. `ci.yml` gains `checks: read` for the head
   commit's check runs. No server behavior, migration, wire surface or `keeplin-core` pin is
   affected.

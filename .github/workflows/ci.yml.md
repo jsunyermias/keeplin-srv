@@ -31,7 +31,6 @@ the steps run.
 |------|------------------|
 | `node --test` over `check-review-governance.test.js` and `check-review-loop.test.js` | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, including negative cases |
 | `actions/github-script@v7` (non-draft pull requests only) | either an independent review with evidence, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md` |
-| `actions/github-script@v7` — `Check review-loop convergence` (non-draft pull requests only) | the loop converges mechanically — required checks green and zero open reified findings — and a stalled loop escalates to `docs/review-stalls.md` instead of iterating silently (keeplin ADR 0004) |
 | `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
 | `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
 | `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | syntax fixtures, drift/error detection, fence-only sync and reproducible context packs |
@@ -63,28 +62,36 @@ focused corpus and reproducibility, and publishes the ignored output.
   rather than compiled from source, which keeps the step fast; a new advisory can turn CI red
   without any code change, which is intended (it surfaces a dependency to bump).
 
-## Review-loop convergence
+### `converge` — Review loop converged
 
-The `Check review-loop convergence` step implements
+Runs on `ubuntu-latest`, `needs: [test, graph]`, non-draft pull requests only. Implements
 [keeplin ADR 0004](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0004-review-loop-convergence.md),
-identically to `keeplin`. It reads the `## Review ledger` section of the pull-request body, the
-changed files, and the head commit's check runs, then decides one of four states:
+identically to `keeplin`.
+
+**Why this is a job and not a step.** Convergence asserts "the required checks are green". A
+step inside `test` cannot make that claim: it ran before `cargo test --workspace` against the
+PostgreSQL service, Clippy and audit, and while `graph` was still going. `needs: [test, graph]`
+makes the claim checkable; `always()` keeps the job reporting when a dependency fails, so
+branch protection sees a red check rather than a skipped one.
+
+The job name is a branch-protection required-check identifier, exactly like `graph`'s: adding
+it to the workflow does not enforce it until it is added to the required-check list in
+Settings -> Branches.
 
 | State | Meaning | Check |
 |-------|---------|-------|
 | `converged` | Required checks green and no reified finding open | passes |
+| `awaiting-checks` | Nothing blocks, but a required check has not finished | fails |
 | `converging` | The blocking set is non-empty but shrinking | fails |
-| `escalated` | The loop state repeated, or the blocking set has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds | fails, and demands a `docs/review-stalls.md` entry naming this pull request |
+| `escalated` | The loop state repeated, or the blocking set has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds | fails, and demands a `docs/review-stalls.md` `## Open` row naming this pull request and every current blocker |
 | `malformed` | The ledger or round log contradicts the observed state | fails |
 
-`REVIEW_LOOP_STAGNATION_LIMIT` is set to `3` on the step. The brake measures state, not elapsed
-time: the loop-state hash is `sha256(normalized diff ‖ open reified finding IDs ‖ red check
-names)`, where the normalized diff is the changed paths with their blob SHAs, sorted, so commit
-ordering does not affect it.
+A body with no `## Review ledger` section is round zero, not malformed — ADR 0004's migration
+contract. The loop-state hash is `sha256(normalized diff : open reified finding IDs : red check
+names)`, joined with `\x1e`/`\x1f` rather than commas because check-run names contain commas.
 
-This step is a floor beneath `Check pull-request review governance`, never a substitute for it.
-The two are conjunctive: a pull request can converge and still be unmergeable for want of an
-independent reviewer.
+This job is a floor beneath `Check pull-request review governance`, never a substitute for it.
+The two are conjunctive.
 
 ## Related files
 
