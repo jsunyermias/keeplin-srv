@@ -74,12 +74,18 @@ shapes independently of the crate version.
   canary step and claimed a deliberately red test that no longer exists.
 - **Round 10 (GPT-5.6 Sol and Kimi K3) rejected the round-9 fix round; the corrections are
   mirrored here.** F-027: the evaluator skipped a journal record whose findings payload was
-  authentic but not an array, silently discarding the reification history the F-023 fix depended
-  on; an authentic-but-unreadable record now fails closed. F-028 and F-029: the bounded-history
+  digest-consistent but not an array, silently discarding the reification history the F-023 fix depended
+  on; an unreadable digest-consistent record now fails closed. F-028 and F-029: the bounded-history
   check required three substrings anywhere in each file and skipped a missing file entirely, so
   a one-line glossary passed it with the prose deleted. It is now a verbatim canonical sentence
   in `scripts/check-bounded-history.sh`, with `scripts/tests/test_bounded_history.py` proving the
   check can fail. F-030 bounds the branch-protection claim in `AGENTS.md`.
+- **Round 13 corrected two changelog claims from reproduced behavior, without relying on a pending
+  ADR.** The journal does not detect edits unconditionally: corrupting one of two records made it
+  disappear from parsing, and the evaluator observed one record and returned `converged`. Its
+  unkeyed digest links also do not authenticate history: a repository workflow declared
+  `issues: write`, received a token for the same `github-actions` App identity, and could
+  recompute records, successors and their digests.
 - **F-025 is dismissed against accepted keeplin ADR 0009.** The maintainer accepted the decision
   to move governance into the default-branch evaluator. The mechanism is unchanged until ADR 0009
   is implemented in its own dedicated pull request: `check-review-governance.js` still runs inside
