@@ -72,6 +72,14 @@ shapes independently of the crate version.
   This repository's own review found only documentation drift, corrected here: the `ci.yml`
   companion described the removed `converge` job and a superseded hash construction, omitted the
   canary step and claimed a deliberately red test that no longer exists.
+- **Round 10 (GPT-5.6 Sol and Kimi K3) rejected the round-9 fix round; the corrections are
+  mirrored here.** F-027: the evaluator skipped a journal record whose findings payload was
+  authentic but not an array, silently discarding the reification history the F-023 fix depended
+  on; an authentic-but-unreadable record now fails closed. F-028 and F-029: the bounded-history
+  check required three substrings anywhere in each file and skipped a missing file entirely, so
+  a one-line glossary passed it with the prose deleted. It is now a verbatim canonical sentence
+  in `scripts/check-bounded-history.sh`, with `scripts/tests/test_bounded_history.py` proving the
+  check can fail. F-030 bounds the branch-protection claim in `AGENTS.md`.
 - **F-025 is open and blocking, awaiting a maintainer decision.** `check-review-governance.js`
   runs inside the head-controlled `ci.yml`, so the trusted evaluator has no evidence it ran.
   keeplin ADR 0009 proposes moving governance into the default-branch evaluator and stays
