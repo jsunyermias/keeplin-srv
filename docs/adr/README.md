@@ -27,6 +27,7 @@ link the ADR in both directions.
 | [0001 — Current synchronization delivery semantics](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0001-current-sync-delivery.md) | accepted (retrospective) | records durable journal/cursor behavior and the unacknowledged end-to-end loss windows |
 | [0002 — Shared domain model and server projections](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0002-shared-domain-model.md) | accepted (retrospective) | imports canonical core types and materializes queryable PostgreSQL projections |
 | [0003 — Versioned persistent formats and forward migrations](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0003-versioned-persistence.md) | accepted (retrospective) | append-only PostgreSQL migrations, backup and recovery boundary |
+| [0010 — E2EE collaborative editing: threat model and v1 ambition](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0010-e2ee-collab-threat-model.md) | proposed | would replace content materialization and server-side search with opaque relay for encrypted notes; [keeplin#143](https://github.com/jsunyermias/keeplin/issues/143) |
 
 ## Server-specific decisions
 
