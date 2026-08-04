@@ -13,9 +13,14 @@ for this repo.
 - **pull_request** targeting `main` on `opened`, `synchronize`, `reopened`, `edited`, and
   `ready_for_review`.
 
-The workflow has read-only access to repository contents and pull-request metadata. Body
-edits retrigger it so completing or removing review evidence is reflected in the required
-check without a new commit.
+The workflow has read-only access to repository contents, pull-request metadata and check
+runs. The `checks: read` scope lets the canary locate its own check run but grants no mutation
+ability. The canary separately requires a successful GET and a non-empty check ID, then attempts
+to patch that run and requires exactly HTTP 403; a failed lookup cannot masquerade as a passing
+denial, and any successful PATCH fails CI. Body edits retrigger the workflow, so completing or
+removing review evidence — and editing the review ledger — is reflected in the required check
+without a new commit. The separate default-branch `review-loop-evaluator.yml` consumes completed
+runs.
 
 ## The `test` job
 
@@ -26,7 +31,7 @@ the steps run.
 
 | Step | What it enforces |
 |------|------------------|
-| `node --test .github/scripts/check-review-governance.test.js` | the reviewed and maintainer-waiver paths, including negative cases |
+| API `GET` plus `PATCH` canary (pull requests only) | the pull-request token cannot rewrite check runs: a successful check-run lookup and HTTP 403 from the mutation attempt; lookup failure, missing ID, or a successful mutation fails CI |
 | `actions/github-script@v7` (non-draft pull requests only) | either an independent review with evidence, or a complete maintainer waiver whose exact PR is recorded in the changed `docs/review-debt.md` |
 | `actions/setup-python@v5` (`3.12`) | the standard-library runtime used by deterministic companion verification |
 | `./scripts/check-docs.sh` | every `.rs` has a structurally valid companion, every Rust fence is exactly faithful to source, and the generated context manifest is current |
@@ -35,6 +40,7 @@ the steps run.
 | `cargo test --workspace` | unit + integration tests pass (against the PG service) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero clippy warnings (`--all-targets` also subsumes `cargo check`, so no separate check step) |
 | `cargo audit` | no known-vulnerable dependencies (the tool is installed as a prebuilt binary via `taiki-e/install-action@v2`, not compiled from source) |
+| `node --test` over both governance suites (**runs last**, so a governance regression does not abort the job before docs, cargo and audit have reported) | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, trusted-evaluator isolation, verified disposal and the bounded-journal limitation, including negative cases |
 
 Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` + `rustfmt`.
 
@@ -59,8 +65,54 @@ focused corpus and reproducibility, and publishes the ignored output.
   rather than compiled from source, which keeps the step fast; a new advisory can turn CI red
   without any code change, which is intended (it surfaces a dependency to bump).
 
+### Trusted convergence
+
+The former head-controlled `converge` job is removed. Implements
+[keeplin ADR 0008](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md),
+identically to `keeplin`. The default-branch
+[`review-loop-evaluator.yml`](review-loop-evaluator.yml) workflow is the authoritative
+evaluator after this unprivileged workflow completes. Only `Check, Test & Lint` and
+`Knowledge graph up to date` count, and each must positively report `success`.
+
+**Why the evaluator is a separate default-branch workflow.** Convergence asserts "the required
+checks are green", and a step inside `test` cannot make that claim: it runs before
+`cargo test --workspace` against the PostgreSQL service, Clippy and audit, and while `graph` is
+still going. It also cannot make the claim *trustworthily*, because everything in this workflow
+is head-controlled. The evaluator's definition comes from the default branch and it never checks
+out, executes or interpolates head content.
+
+The evaluator publishes a check run named `Review loop converged`. That name is a
+branch-protection required-check identifier, exactly like `graph`'s: it does not enforce
+anything until it is added to the required-check list in Settings -> Branches, and it must not
+be added there until the evaluator has reported at least once, or every pull request blocks on
+a check nobody reports.
+
+| State | Meaning | Check |
+|-------|---------|-------|
+| `converged` | Required checks green and no reified finding open | passes |
+| `awaiting-checks` | Nothing blocks, but a required check has not finished | fails |
+| `converging` | The blocking set is non-empty but shrinking | fails |
+| `escalated` | The loop state repeated, or the blocking set has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds | fails, and demands a `docs/review-stalls.md` `## Open` row naming this pull request and every current blocker |
+| `malformed` | The ledger or round log contradicts the observed state | fails |
+| `history-unverifiable` | The journal, ledger or a disposal authorization failed verification | fails |
+| `fork-refused` | The pull request comes from a fork, so evidence is partial | fails |
+
+A body with no `## Review ledger` section is round zero, not malformed — ADR 0004's migration
+contract, carried forward by 0008. The loop-state hash is SHA-256 over canonical JSON containing
+the normalized changed-file tuples, the sorted open reified finding IDs and the sorted red check
+names, so a delimiter byte inside a filename or a check-run name cannot make two different
+states collide.
+
+The evaluator is a floor beneath `Check pull-request review governance`, never a substitute for
+an independent reviewer. Fork pull requests deliberately fail closed rather than evaluate partial
+journal evidence.
+
 ## Related files
 
+- `../scripts/check-review-loop.js` — the convergence and stagnation evaluator.
+- `../scripts/check-review-governance.js` — the independent-review and waiver evaluator.
+- `review-loop-evaluator.yml` — the default-branch authoritative evaluator.
+- `../../docs/review-stalls.md` — the durable record of escalated loops.
 - `../../crates/keeplin-srv/tests/integration.md` / `collab.md` — the suites this runs.
 - `../../docker-compose.yml.md` — the equivalent Postgres for local runs.
 - `../../.env.example.md` — the `DATABASE_URL` shape mirrored here.
