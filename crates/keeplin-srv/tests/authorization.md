@@ -40,56 +40,111 @@ use uuid::Uuid;
 
 ```rust
 // md:authorization_case_inventory
-const MUTATING_HANDLER_TENANT_CASES: &[&str] = &[
-    "change_password",
-    "create_device",
-    "create_note",
-    "create_notebook_share",
-    "create_share",
-    "delete_account",
-    "delete_all_devices",
-    "delete_device",
-    "delete_note",
-    "delete_notebook_share",
-    "delete_share",
-    "import_note",
-    "put_resource_data",
-    "transfer_notebook",
-    "transfer_ownership",
-    "update_note",
-    "verify_request",
+const MUTATING_HANDLER_TENANT_CASES: &[(&str, &str)] = &[];
+const MUTATING_HANDLER_CAPABILITY_CASES: &[(&str, &str)] = &[];
+const RELAY_CHANGE_TENANT_CASES: &[(&str, &str)] = &[
+    (
+        "NotebookCreate",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "NotebookDelete",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "NotebookUpdate",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "ResourceCreate",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "ResourceDelete",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "TagCreate",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "TagDelete",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "TagUpdate",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+];
+const RELAY_CHANGE_CAPABILITY_CASES: &[(&str, &str)] = &[];
+
+const MUTATING_HANDLER_UNCOVERED: &[(&str, &str)] = &[
+    ("change_password", "no HTTP authorization case exists"),
+    ("create_device", "no HTTP authorization case exists"),
+    ("create_note", "no HTTP authorization case exists"),
+    ("create_notebook_share", "no HTTP authorization case exists"),
+    ("create_share", "no HTTP authorization case exists"),
+    ("delete_account", "no HTTP authorization case exists"),
+    ("delete_all_devices", "no HTTP authorization case exists"),
+    ("delete_device", "no HTTP authorization case exists"),
+    ("delete_note", "no HTTP authorization case exists"),
+    ("delete_notebook_share", "no HTTP authorization case exists"),
+    ("delete_share", "no HTTP authorization case exists"),
+    ("import_note", "no HTTP authorization case exists"),
+    (
+        "login",
+        "public authentication endpoint; tenant and capability dimensions do not apply",
+    ),
+    ("put_resource_data", "no HTTP authorization case exists"),
+    (
+        "register",
+        "public authentication endpoint; tenant and capability dimensions do not apply",
+    ),
+    (
+        "reset_confirm",
+        "public authentication endpoint; tenant and capability dimensions do not apply",
+    ),
+    (
+        "reset_request",
+        "public authentication endpoint; tenant and capability dimensions do not apply",
+    ),
+    ("transfer_notebook", "no HTTP authorization case exists"),
+    ("transfer_ownership", "no HTTP authorization case exists"),
+    ("update_note", "no HTTP authorization case exists"),
+    (
+        "verify_confirm",
+        "public authentication endpoint; tenant and capability dimensions do not apply",
+    ),
+    ("verify_request", "no HTTP authorization case exists"),
 ];
 
-const MUTATING_HANDLER_CAPABILITY_CASES: &[&str] = MUTATING_HANDLER_TENANT_CASES;
-
-const RELAY_CHANGE_TENANT_CASES: &[&str] = &[
-    "NotebookCreate",
-    "NotebookDelete",
-    "NotebookUpdate",
-    "NoteCreate",
-    "NoteDelete",
-    "NoteTagAdd",
-    "NoteTagRemove",
-    "NoteUpdate",
-    "ResourceCreate",
-    "ResourceDelete",
-    "TagCreate",
-    "TagDelete",
-    "TagUpdate",
+const RELAY_CHANGE_UNCOVERED: &[(&str, &str)] = &[
+    (
+        "NoteCreate",
+        "note materialization is outside this relay store harness",
+    ),
+    (
+        "NoteDelete",
+        "note materialization is outside this relay store harness",
+    ),
+    ("NoteTagAdd", "no cross-tenant relay case exists"),
+    ("NoteTagRemove", "no cross-tenant relay case exists"),
+    (
+        "NoteUpdate",
+        "note materialization is outside this relay store harness",
+    ),
 ];
-
-const RELAY_CHANGE_CAPABILITY_CASES: &[&str] = RELAY_CHANGE_TENANT_CASES;
 
 const READ_ISOLATION_CASES: &[&str] = &["users_do_not_see_each_others_changes"];
 ```
 
-**What it does** — Registers the two negative authorization dimensions for every source-discovered mutating handler and relay change, while retaining the existing relay read-isolation test in the inventory.
+**What it does** — Registers only negative cases that actually exist, separately for tenant and capability dimensions. Every source entry without such a case is retained with an explicit coverage-gap or non-applicability reason.
 
 **Dependencies** — `authorization_inventory_is_complete` compares these case names with source-derived inventories; expects equality to fail closed when source expands.
 
 **Used by** — `authorization_inventory_is_complete`.
 
-**Repeated context** — Case registration is deliberately separate from source enumeration so a copied inventory cannot silently bless a new route or variant.
+**Repeated context** — Empty handler arrays are intentional and honest: this file currently contains no HTTP-level authorization cases.
 
 ---
 
@@ -102,20 +157,23 @@ const READ_ISOLATION_CASES: &[&str] = &["users_do_not_see_each_others_changes"];
 ```rust
 // md:fn mutating_handlers
 fn mutating_handlers(source: &str) -> BTreeSet<String> {
-    let protected = source
-        .split("let resource_data =")
+    let router = source
+        .split("// md:fn router")
         .nth(1)
         .unwrap()
-        .split("let limited =")
+        .split(concat!("// md:", "PROTOCOL_VERSION"))
         .next()
         .unwrap();
     ["post(", "put(", "patch(", "delete("]
         .into_iter()
         .flat_map(|method| {
-            protected
+            router
                 .match_indices(method)
+                .filter(move |(offset, _)| {
+                    *offset == 0 || !router.as_bytes()[offset - 1].is_ascii_alphanumeric()
+                })
                 .filter_map(move |(offset, _)| {
-                    let tail = &protected[offset + method.len()..];
+                    let tail = &router[offset + method.len()..];
                     let handler = tail
                         .trim_start()
                         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -127,9 +185,9 @@ fn mutating_handlers(source: &str) -> BTreeSet<String> {
 }
 ```
 
-**What it does** — Extracts authenticated mutating handler identifiers from supplied router source.
+**What it does** — Extracts mutating handler identifiers from the complete `router` function, including raised-limit, authenticated, and public subrouters.
 
-**Dependencies** — router binding delimiters and Axum method constructors; expects additions inside the authenticated router to use those constructors.
+**Dependencies** — companion markers and Axum method constructors; expects routes inside `router` to use exact `post(`, `put(`, `patch(`, or `delete(` calls.
 
 **Used by** — `source_handlers` and `source_inventory_detects_an_uncovered_route`.
 
@@ -150,13 +208,13 @@ fn source_handlers() -> BTreeSet<String> {
 }
 ```
 
-**What it does** — Extracts mutating handler identifiers from the authenticated router construction in `http.rs`.
+**What it does** — Extracts every mutating handler identifier from the complete router construction in `http.rs`.
 
-**Dependencies** — `include_str!(../src/http.rs)` supplies the canonical route source; expects protected routes to remain between the named router bindings.
+**Dependencies** — `include_str!(../src/http.rs)` supplies the canonical route source; expects the `router` and `PROTOCOL_VERSION` markers to delimit construction.
 
 **Used by** — `authorization_inventory_is_complete`.
 
-**Repeated context** — Public account bootstrap endpoints and read-only handlers are outside this authenticated mutation inventory.
+**Repeated context** — Public account bootstrap endpoints are inventoried with a reason explaining why tenant and capability dimensions do not apply.
 
 ---
 
@@ -210,27 +268,21 @@ fn source_relay_changes() -> BTreeSet<String> {
 // md:fn authorization_inventory_is_complete
 #[test]
 fn authorization_inventory_is_complete() {
-    let handler_tenant_cases = MUTATING_HANDLER_TENANT_CASES
+    let handler_inventory = MUTATING_HANDLER_TENANT_CASES
         .iter()
-        .map(|case| (*case).to_string())
+        .chain(MUTATING_HANDLER_CAPABILITY_CASES)
+        .chain(MUTATING_HANDLER_UNCOVERED)
+        .map(|(entry, _)| (*entry).to_string())
         .collect();
-    let handler_capability_cases = MUTATING_HANDLER_CAPABILITY_CASES
-        .iter()
-        .map(|case| (*case).to_string())
-        .collect();
-    assert_eq!(source_handlers(), handler_tenant_cases);
-    assert_eq!(source_handlers(), handler_capability_cases);
+    assert_eq!(source_handlers(), handler_inventory);
 
-    let relay_tenant_cases = RELAY_CHANGE_TENANT_CASES
+    let relay_inventory = RELAY_CHANGE_TENANT_CASES
         .iter()
-        .map(|case| (*case).to_string())
+        .chain(RELAY_CHANGE_CAPABILITY_CASES)
+        .chain(RELAY_CHANGE_UNCOVERED)
+        .map(|(entry, _)| (*entry).to_string())
         .collect();
-    let relay_capability_cases = RELAY_CHANGE_CAPABILITY_CASES
-        .iter()
-        .map(|case| (*case).to_string())
-        .collect();
-    assert_eq!(source_relay_changes(), relay_tenant_cases);
-    assert_eq!(source_relay_changes(), relay_capability_cases);
+    assert_eq!(source_relay_changes(), relay_inventory);
     assert_eq!(
         READ_ISOLATION_CASES,
         &["users_do_not_see_each_others_changes"]
@@ -238,13 +290,56 @@ fn authorization_inventory_is_complete() {
 }
 ```
 
-**What it does** — Requires exact equality between source-discovered mutations and registered negative cases, and retains the pre-existing read-isolation case by name.
+**What it does** — Requires exact equality between source-discovered mutations and the union of real cases plus explicitly documented gaps, and retains the read-isolation case by name.
 
 **Dependencies** — `source_handlers` and `source_relay_changes` enumerate source; expects any unregistered addition to make this test fail.
 
 **Used by** — `cargo test` and CI.
 
-**Repeated context** — Completeness is mechanical rather than reviewer-maintained route enumeration.
+**Repeated context** — Completeness here means every source item is accounted for; case existence is verified separately and gaps are not represented as coverage.
+
+---
+
+## fn each_inventory_entry_has_both_cases
+
+**Identification** — registered-case existence test; marker `// md:fn each_inventory_entry_has_both_cases`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn each_inventory_entry_has_both_cases
+#[test]
+fn each_inventory_entry_has_both_cases() {
+    let tests = include_str!("authorization.rs");
+    for (entry, case) in MUTATING_HANDLER_TENANT_CASES
+        .iter()
+        .chain(MUTATING_HANDLER_CAPABILITY_CASES)
+        .chain(RELAY_CHANGE_TENANT_CASES)
+        .chain(RELAY_CHANGE_CAPABILITY_CASES)
+    {
+        assert!(!entry.is_empty());
+        assert!(
+            tests.contains(&format!("fn {case}(")),
+            "missing case {case}"
+        );
+    }
+    for (entry, reason) in MUTATING_HANDLER_UNCOVERED
+        .iter()
+        .chain(RELAY_CHANGE_UNCOVERED)
+    {
+        assert!(!entry.is_empty());
+        assert!(!reason.is_empty());
+    }
+}
+```
+
+**What it does** — Proves every claimed case names a test function that exists and every unclaimed source entry carries an explicit non-empty coverage-gap or non-applicability reason.
+
+**Dependencies** — `include_str!(authorization.rs)` supplies this test module; expects registered function names to use ordinary `fn name(` syntax.
+
+**Used by** — `cargo test` and CI.
+
+**Repeated context** — Registration is not treated as proof of execution.
 
 ---
 
@@ -259,17 +354,21 @@ fn authorization_inventory_is_complete() {
 #[test]
 fn source_inventory_detects_an_uncovered_route() {
     let source = include_str!("../src/http.rs").replace(
-        "let limited =",
-        ".route(\"/api/test-only\", post(test_only_mutation));\n    let limited =",
+        concat!("// md:", "PROTOCOL_VERSION"),
+        concat!(
+            ".route(\"/api/test-only\", post(test_only_mutation));\n",
+            "// md:",
+            "PROTOCOL_VERSION"
+        ),
     );
     let mut expected = source_handlers();
     expected.insert("test_only_mutation".into());
     assert_eq!(mutating_handlers(&source), expected);
     assert_ne!(
         mutating_handlers(&source),
-        MUTATING_HANDLER_TENANT_CASES
+        MUTATING_HANDLER_UNCOVERED
             .iter()
-            .map(|case| (*case).to_string())
+            .map(|(entry, _)| (*entry).to_string())
             .collect()
     );
 }
@@ -282,6 +381,40 @@ fn source_inventory_detects_an_uncovered_route() {
 **Used by** — `cargo test` and CI.
 
 **Repeated context** — This reifies the fail-closed property of the completeness gate itself.
+
+---
+
+## fn put_resource_data_checks_blob_write_result
+
+**Identification** — handler-source regression; marker `// md:fn put_resource_data_checks_blob_write_result`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn put_resource_data_checks_blob_write_result
+#[test]
+fn put_resource_data_checks_blob_write_result() {
+    let source = include_str!("../src/http.rs");
+    let handler = source
+        .split("// md:fn put_resource_data")
+        .nth(1)
+        .unwrap()
+        .split("// md:fn materialize_body")
+        .next()
+        .unwrap();
+    assert!(handler.contains("let written = state"));
+    assert!(handler.contains("if !written"));
+    assert!(handler.contains("return Err(AppError::NotFound)"));
+}
+```
+
+**What it does** — Requires the resource upload handler to inspect the owner-scoped blob update result and translate a lost-ownership race into `NotFound`.
+
+**Dependencies** — `include_str!(../src/http.rs)` supplies the handler source; expects companion markers to delimit `put_resource_data`.
+
+**Used by** — `cargo test` and CI; regression verifier for F3.
+
+**Repeated context** — A successful upload response must imply that the blob update affected its owned metadata row.
 
 ---
 
@@ -368,7 +501,7 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     hostile_notebook.vv = VersionVector::from([("attacker".to_string(), 99)]);
     hostile_notebook.updated_at = Utc::now() + Duration::days(1);
     hostile_notebook.last_writer = "attacker".into();
-    assert!(!store
+    assert!(store
         .upsert_notebook(attacker.id, &hostile_notebook)
         .await
         .unwrap());
@@ -387,7 +520,7 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     hostile_tag.vv = VersionVector::from([("attacker".to_string(), 99)]);
     hostile_tag.updated_at = Utc::now() + Duration::days(1);
     hostile_tag.last_writer = "attacker".into();
-    assert!(!store.upsert_tag(attacker.id, &hostile_tag).await.unwrap());
+    assert!(store.upsert_tag(attacker.id, &hostile_tag).await.unwrap());
     assert!(store
         .delete_tag(
             attacker.id,
@@ -403,7 +536,7 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     hostile_resource.vv = VersionVector::from([("attacker".to_string(), 99)]);
     hostile_resource.created_at = Utc::now() + Duration::days(1);
     hostile_resource.last_writer = "attacker".into();
-    assert!(!store
+    assert!(store
         .upsert_resource_meta(attacker.id, &hostile_resource)
         .await
         .unwrap());
@@ -448,6 +581,96 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
 
 ---
 
+## fn foreign_and_missing_upserts_are_indistinguishable
+
+**Identification** — PostgreSQL upsert anti-oracle regression; marker `// md:fn foreign_and_missing_upserts_are_indistinguishable`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn foreign_and_missing_upserts_are_indistinguishable
+#[sqlx::test(migrations = "../../migrations")]
+async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
+    let store = Store::new(pool);
+    let attacker = store
+        .create_user("attacker@example.com", "hash", "attacker")
+        .await
+        .unwrap();
+    let victim = store
+        .create_user("victim@example.com", "hash", "victim")
+        .await
+        .unwrap();
+    let vv = VersionVector::from([("attacker".to_string(), 99)]);
+
+    let mut foreign_notebook = Notebook::new("victim notebook");
+    assert!(store
+        .upsert_notebook(victim.id, &foreign_notebook)
+        .await
+        .unwrap());
+    foreign_notebook.vv = vv.clone();
+    foreign_notebook.last_writer = "attacker".into();
+    let mut missing_notebook = foreign_notebook.clone();
+    missing_notebook.id = Uuid::new_v4();
+    assert_eq!(
+        store
+            .upsert_notebook(attacker.id, &foreign_notebook)
+            .await
+            .unwrap(),
+        store
+            .upsert_notebook(attacker.id, &missing_notebook)
+            .await
+            .unwrap()
+    );
+
+    let mut foreign_tag = Tag::new("victim tag");
+    assert!(store.upsert_tag(victim.id, &foreign_tag).await.unwrap());
+    foreign_tag.vv = vv.clone();
+    foreign_tag.last_writer = "attacker".into();
+    let mut missing_tag = foreign_tag.clone();
+    missing_tag.id = Uuid::new_v4();
+    assert_eq!(
+        store.upsert_tag(attacker.id, &foreign_tag).await.unwrap(),
+        store.upsert_tag(attacker.id, &missing_tag).await.unwrap()
+    );
+
+    let mut foreign_resource = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "victim resource",
+        "application/octet-stream",
+        "victim.bin",
+        1,
+    );
+    assert!(store
+        .upsert_resource_meta(victim.id, &foreign_resource)
+        .await
+        .unwrap());
+    foreign_resource.vv = vv;
+    foreign_resource.last_writer = "attacker".into();
+    let mut missing_resource = foreign_resource.clone();
+    missing_resource.id = Uuid::new_v4();
+    assert_eq!(
+        store
+            .upsert_resource_meta(attacker.id, &foreign_resource)
+            .await
+            .unwrap(),
+        store
+            .upsert_resource_meta(attacker.id, &missing_resource)
+            .await
+            .unwrap()
+    );
+}
+```
+
+**What it does** — Compares winning notebook, tag, and resource-metadata upserts against a foreign UUID and a fresh UUID, requiring identical results.
+
+**Dependencies** — `Store::{upsert_notebook, upsert_tag, upsert_resource_meta}`; expects tenant conflicts and absent IDs to be observationally indistinguishable while preserving tenant-owned rows.
+
+**Used by** — `cargo test` and CI; anti-enumeration verifier for F1.
+
+**Repeated context** — Fresh-ID writes create attacker fixtures; foreign-ID attempts report the same outcome without changing victim state.
+
+---
+
 ## fn foreign_and_missing_mutations_are_indistinguishable
 
 **Identification** — PostgreSQL anti-oracle regression; marker `// md:fn foreign_and_missing_mutations_are_indistinguishable`.
@@ -480,6 +703,30 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         .await
         .unwrap());
     let vv = VersionVector::from([("attacker".to_string(), 2)]);
+    let mut notebook = Notebook::new("victim notebook");
+    notebook.vv = VersionVector::from([("victim".to_string(), 1)]);
+    assert!(store.upsert_notebook(victim.id, &notebook).await.unwrap());
+    let foreign_notebook = store
+        .delete_notebook(attacker.id, notebook.id, Utc::now(), &vv, "attacker")
+        .await
+        .unwrap();
+    let missing_notebook = store
+        .delete_notebook(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .await
+        .unwrap();
+    assert_eq!(foreign_notebook, missing_notebook);
+    let mut tag = Tag::new("victim tag");
+    tag.vv = VersionVector::from([("victim".to_string(), 1)]);
+    assert!(store.upsert_tag(victim.id, &tag).await.unwrap());
+    let foreign_tag = store
+        .delete_tag(attacker.id, tag.id, Utc::now(), &vv, "attacker")
+        .await
+        .unwrap();
+    let missing_tag = store
+        .delete_tag(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .await
+        .unwrap();
+    assert_eq!(foreign_tag, missing_tag);
     let foreign = store
         .delete_resource(attacker.id, resource.id, Utc::now(), &vv, "attacker")
         .await
@@ -501,9 +748,9 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
 }
 ```
 
-**What it does** — Compares store outcomes for an existing foreign resource and a missing UUID for deletion and blob replacement.
+**What it does** — Compares store outcomes for foreign and missing notebook/tag deletions, resource deletion, and blob replacement.
 
-**Dependencies** — `Store::delete_resource` and `Store::put_resource_blob`; expects both to return the same non-mutating outcome across foreign and absent IDs.
+**Dependencies** — `Store::{delete_notebook, delete_tag, delete_resource, put_resource_blob}`; expects each to return the same non-mutating outcome across foreign and absent IDs.
 
 **Used by** — `cargo test` and CI; anti-enumeration verifier for #109 inside the #111 harness.
 
@@ -532,7 +779,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 
 **Invariants**
 
-- Every authenticated mutating route and materialized relay variant has both negative-case dimensions registered.
+- Every mutating route and materialized relay variant is either tied to an existing negative test or carries an explicit gap/non-applicability reason.
 - A cross-tenant attempt leaves every byte represented by the victim row and resource blob unchanged.
 - Existing foreign and absent IDs produce indistinguishable mutation outcomes.
 
@@ -548,7 +795,10 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 4 | `fn source_handlers` | `// md:fn source_handlers` |
 | 5 | `fn source_relay_changes` | `// md:fn source_relay_changes` |
 | 6 | `fn authorization_inventory_is_complete` | `// md:fn authorization_inventory_is_complete` |
-| 7 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
-| 8 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
-| 9 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
-| 10 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |
+| 7 | `fn each_inventory_entry_has_both_cases` | `// md:fn each_inventory_entry_has_both_cases` |
+| 8 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
+| 9 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
+| 10 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
+| 11 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
+| 12 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
+| 13 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |

@@ -3322,7 +3322,7 @@ the server-side hook where the note delete is applied.
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO notebooks
                    (id, user_id, title, alias, created_at, updated_at, deleted_at, vv, last_writer)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -3343,13 +3343,12 @@ the server-side hook where the note delete is applied.
         .bind(&nb.last_writer)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 ```
 
-**What it does** — Creates or updates a notebook only inside `user_id`. Conflict-state reads and conflict writes both carry the tenant predicate; a colliding ID owned by another tenant is a non-write (`false`) without evaluating its version vector.
+**What it does** — Creates or updates a notebook only inside `user_id`. Conflict-state reads and writes both carry the tenant predicate. A colliding foreign ID is a no-op reported as `true`, matching a fresh insert and preventing an existence oracle; a losing same-tenant version still returns `false` before the insert.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3458,7 +3457,7 @@ the server-side hook where the note delete is applied.
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer, system)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
@@ -3478,16 +3477,16 @@ the server-side hook where the note delete is applied.
         .bind(tag.system)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 ```
 
 **What it does** — Applies the tenant-scoped conflict pattern for tags. `system` (issue #128) is persisted as `$9` and
 refreshed on conflict (`system = EXCLUDED.system`), so a `TagUpdate` that flips the flag
 converges like any other field. The whole core `Tag` reaches here via `materialize`, so the
-flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
+flag rides the existing `TagCreate`/`TagUpdate` changes with no new op. A foreign-ID conflict
+is a no-op reported like a fresh insert, while a losing same-tenant version remains `false`.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3669,7 +3668,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO resources
                    (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -3697,13 +3696,12 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         .bind(r.note_id)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 ```
 
-**What it does** — Creates or updates metadata only inside `user_id`; foreign-ID collisions neither expose their vector state nor update them. Resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately. `note_id` (issue #125) is written **only in the `INSERT`** and deliberately left out of the `ON CONFLICT DO UPDATE` set, so an attachment's owning note is **immutable** after creation.
+**What it does** — Creates or updates metadata only inside `user_id`; foreign-ID collisions neither expose their vector state nor update them and are reported like a fresh insert to prevent an existence oracle. A losing same-tenant version still returns `false` before the insert. Resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately. `note_id` (issue #125) is written **only in the `INSERT`** and deliberately left out of the `ON CONFLICT DO UPDATE` set, so an attachment's owning note is **immutable** after creation.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 

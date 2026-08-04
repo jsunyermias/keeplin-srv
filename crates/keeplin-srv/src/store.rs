@@ -1632,7 +1632,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO notebooks
                    (id, user_id, title, alias, created_at, updated_at, deleted_at, vv, last_writer)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1653,9 +1653,8 @@ impl Store {
         .bind(&nb.last_writer)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 
     // md:impl Store > fn delete_notebook
@@ -1736,7 +1735,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer, system)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
@@ -1756,9 +1755,8 @@ impl Store {
         .bind(tag.system)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 
     // md:impl Store > fn delete_tag
@@ -1896,7 +1894,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        let result = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO resources
                    (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -1924,9 +1922,8 @@ impl Store {
         .bind(r.note_id)
         .execute(&mut *tx)
         .await?;
-        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(written)
+        Ok(true)
     }
 
     // md:impl Store > fn delete_resource

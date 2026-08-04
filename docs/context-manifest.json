@@ -1790,7 +1790,7 @@
           {
             "basis": "authored-invariant",
             "origin": "INFERRED",
-            "value": "Every authenticated mutating route and materialized relay variant has both negative-case dimensions registered."
+            "value": "Every mutating route and materialized relay variant is either tied to an existing negative test or carries an explicit gap/non-applicability reason."
           },
           {
             "basis": "authored-invariant",
@@ -1813,9 +1813,12 @@
           "fn source_handlers",
           "fn source_relay_changes",
           "fn authorization_inventory_is_complete",
+          "fn each_inventory_entry_has_both_cases",
           "fn source_inventory_detects_an_uncovered_route",
+          "fn put_resource_data_checks_blob_write_result",
           "fn entity_snapshot",
           "fn cross_tenant_store_mutations_leave_victim_unchanged",
+          "fn foreign_and_missing_upserts_are_indistinguishable",
           "fn foreign_and_missing_mutations_are_indistinguishable"
         ]
       },
