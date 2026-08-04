@@ -390,6 +390,51 @@ fn source_handlers() -> BTreeSet<String> {
 
 ---
 
+## fn route_registration_is_confined_to_router
+
+**Identification** — crate-wide route-registration placement regression; marker `// md:fn route_registration_is_confined_to_router`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn route_registration_is_confined_to_router
+#[test]
+fn route_registration_is_confined_to_router() {
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in std::fs::read_dir(crate_root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let outside_router = if path.file_name().and_then(|name| name.to_str()) == Some("http.rs") {
+            let (before, tail) = source.split_once("pub fn router(").unwrap();
+            let (_, after) = tail.split_once("pub const PROTOCOL_VERSION").unwrap();
+            format!("{before}{after}")
+        } else {
+            source
+        };
+        for registration in [".route(", ".merge(", ".nest("] {
+            assert!(
+                !outside_router.contains(registration),
+                "{} registers {registration} outside http::router",
+                path.display()
+            );
+        }
+    }
+}
+```
+
+**What it does** — Scans every Rust module in the server crate and rejects `.route`, `.merge`, or `.nest` registrations outside the delimited `http::router` body, keeping the handler inventory complete when routing code evolves.
+
+**Dependencies** — `CARGO_MANIFEST_DIR`, `std::fs::read_dir`, and the `router`/`PROTOCOL_VERSION` declarations locate and delimit source; expects all route composition to remain literal inside `http::router`.
+
+**Used by** — `cargo test` and CI; mechanical guard for F11.
+
+**Repeated context** — The handler parser deliberately consumes one monolithic router body, and this test enforces that structural invariant.
+
+---
+
 ## fn source_relay_changes
 
 **Identification** — source inventory helper; marker `// md:fn source_relay_changes`.
@@ -623,6 +668,39 @@ fn put_resource_data_checks_blob_write_result() {
 **Used by** — `cargo test` and CI; regression verifier for F3.
 
 **Repeated context** — A successful upload response must imply that the blob update affected its owned metadata row.
+
+---
+
+## fn relay_materialization_uses_authenticated_session_identity
+
+**Identification** — relay identity-flow source regression; marker `// md:fn relay_materialization_uses_authenticated_session_identity`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn relay_materialization_uses_authenticated_session_identity
+#[test]
+fn relay_materialization_uses_authenticated_session_identity() {
+    let source = include_str!("../src/sync.rs");
+    let handler = source
+        .split("async fn handle_incoming(")
+        .nth(1)
+        .unwrap()
+        .split("async fn materialize(")
+        .next()
+        .unwrap();
+    assert!(handler.contains("user_id: Uuid,"));
+    assert!(handler.contains("materialize(state, user_id, &changes).await;"));
+}
+```
+
+**What it does** — Requires `handle_incoming` to accept the authenticated session `user_id` and pass that exact local variable to `materialize`, preventing payload-derived identity from selecting the mutation tenant.
+
+**Dependencies** — `include_str!(../src/sync.rs)` and the `handle_incoming`/`materialize` declarations delimit the handler; expects the authenticated identity parameter and materialization call to retain their explicit source forms.
+
+**Used by** — `cargo test` and CI; regression verifier for F12.
+
+**Repeated context** — WebSocket authentication happens before frame handling; frame contents are changes, never an authority for tenant identity.
 
 ---
 
@@ -1564,38 +1642,47 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
         .create_user("victim@example.com", "hash", "victim")
         .await
         .unwrap();
-    let vv = VersionVector::from([("attacker".to_string(), 99)]);
+    let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
+    let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
+    let victim_time = Utc::now();
+    let losing_time = victim_time - Duration::days(1);
 
     let mut foreign_notebook = Notebook::new("victim notebook");
+    foreign_notebook.vv = stored_vv.clone();
+    foreign_notebook.updated_at = victim_time;
     assert!(store
         .upsert_notebook(victim.id, &foreign_notebook)
         .await
         .unwrap());
-    foreign_notebook.vv = vv.clone();
+    foreign_notebook.vv = losing_vv.clone();
+    foreign_notebook.updated_at = losing_time;
     foreign_notebook.last_writer = "attacker".into();
     let mut missing_notebook = foreign_notebook.clone();
     missing_notebook.id = Uuid::new_v4();
-    assert_eq!(
-        store
-            .upsert_notebook(attacker.id, &foreign_notebook)
-            .await
-            .unwrap(),
-        store
-            .upsert_notebook(attacker.id, &missing_notebook)
-            .await
-            .unwrap()
-    );
+    let foreign = store
+        .upsert_notebook(attacker.id, &foreign_notebook)
+        .await
+        .unwrap();
+    let missing = store
+        .upsert_notebook(attacker.id, &missing_notebook)
+        .await
+        .unwrap();
+    assert!(foreign);
+    assert!(missing);
 
     let mut foreign_tag = Tag::new("victim tag");
+    foreign_tag.vv = stored_vv.clone();
+    foreign_tag.updated_at = victim_time;
     assert!(store.upsert_tag(victim.id, &foreign_tag).await.unwrap());
-    foreign_tag.vv = vv.clone();
+    foreign_tag.vv = losing_vv.clone();
+    foreign_tag.updated_at = losing_time;
     foreign_tag.last_writer = "attacker".into();
     let mut missing_tag = foreign_tag.clone();
     missing_tag.id = Uuid::new_v4();
-    assert_eq!(
-        store.upsert_tag(attacker.id, &foreign_tag).await.unwrap(),
-        store.upsert_tag(attacker.id, &missing_tag).await.unwrap()
-    );
+    let foreign = store.upsert_tag(attacker.id, &foreign_tag).await.unwrap();
+    let missing = store.upsert_tag(attacker.id, &missing_tag).await.unwrap();
+    assert!(foreign);
+    assert!(missing);
 
     let mut foreign_resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
@@ -1604,34 +1691,37 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
         "victim.bin",
         1,
     );
+    foreign_resource.vv = stored_vv;
+    foreign_resource.created_at = victim_time;
     assert!(store
         .upsert_resource_meta(victim.id, &foreign_resource)
         .await
         .unwrap());
-    foreign_resource.vv = vv;
+    foreign_resource.vv = losing_vv;
+    foreign_resource.created_at = losing_time;
     foreign_resource.last_writer = "attacker".into();
     let mut missing_resource = foreign_resource.clone();
     missing_resource.id = Uuid::new_v4();
-    assert_eq!(
-        store
-            .upsert_resource_meta(attacker.id, &foreign_resource)
-            .await
-            .unwrap(),
-        store
-            .upsert_resource_meta(attacker.id, &missing_resource)
-            .await
-            .unwrap()
-    );
+    let foreign = store
+        .upsert_resource_meta(attacker.id, &foreign_resource)
+        .await
+        .unwrap();
+    let missing = store
+        .upsert_resource_meta(attacker.id, &missing_resource)
+        .await
+        .unwrap();
+    assert!(foreign);
+    assert!(missing);
 }
 ```
 
-**What it does** — Compares winning notebook, tag, and resource-metadata upserts against a foreign UUID and a fresh UUID, requiring identical results.
+**What it does** — Stores notebook, tag, and resource metadata at vector `{victim: 2}`, then submits an older `{victim: 1}` object as the attacker against both the foreign UUID and a fresh UUID, requiring both outcomes to be `true`.
 
 **Dependencies** — `Store::{upsert_notebook, upsert_tag, upsert_resource_meta}`; expects tenant conflicts and absent IDs to be observationally indistinguishable while preserving tenant-owned rows.
 
 **Used by** — `cargo test` and CI; anti-enumeration verifier for F1.
 
-**Repeated context** — Fresh-ID writes create attacker fixtures; foreign-ID attempts report the same outcome without changing victim state.
+**Repeated context** — Strict vector domination, reinforced by an older incoming timestamp, guarantees the conflict loser branch is exercised if a foreign row leaks through the ownership-scoped read; no timestamp tie-break decides the result.
 
 ---
 
@@ -1654,6 +1744,10 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         .create_user("victim@example.com", "hash", "victim")
         .await
         .unwrap();
+    let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
+    let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
+    let victim_time = Utc::now();
+    let losing_time = victim_time - Duration::days(1);
     let mut resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
         "victim resource",
@@ -1661,45 +1755,80 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         "victim.bin",
         1,
     );
-    resource.vv = VersionVector::from([("victim".to_string(), 1)]);
+    resource.vv = stored_vv.clone();
+    resource.created_at = victim_time;
     assert!(store
         .upsert_resource_meta(victim.id, &resource)
         .await
         .unwrap());
-    let vv = VersionVector::from([("attacker".to_string(), 2)]);
     let mut notebook = Notebook::new("victim notebook");
-    notebook.vv = VersionVector::from([("victim".to_string(), 1)]);
+    notebook.vv = stored_vv.clone();
+    notebook.updated_at = victim_time;
     assert!(store.upsert_notebook(victim.id, &notebook).await.unwrap());
     let foreign_notebook = store
-        .delete_notebook(attacker.id, notebook.id, Utc::now(), &vv, "attacker")
+        .delete_notebook(
+            attacker.id,
+            notebook.id,
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     let missing_notebook = store
-        .delete_notebook(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_notebook(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign_notebook, missing_notebook);
+    assert!(foreign_notebook);
     let mut tag = Tag::new("victim tag");
-    tag.vv = VersionVector::from([("victim".to_string(), 1)]);
+    tag.vv = stored_vv;
+    tag.updated_at = victim_time;
     assert!(store.upsert_tag(victim.id, &tag).await.unwrap());
     let foreign_tag = store
-        .delete_tag(attacker.id, tag.id, Utc::now(), &vv, "attacker")
+        .delete_tag(attacker.id, tag.id, losing_time, &losing_vv, "attacker")
         .await
         .unwrap();
     let missing_tag = store
-        .delete_tag(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_tag(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign_tag, missing_tag);
+    assert!(foreign_tag);
     let foreign = store
-        .delete_resource(attacker.id, resource.id, Utc::now(), &vv, "attacker")
+        .delete_resource(
+            attacker.id,
+            resource.id,
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     let missing = store
-        .delete_resource(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_resource(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign, missing);
+    assert!(!foreign);
     let foreign_blob = store
         .put_resource_blob(attacker.id, resource.id, b"x")
         .await
@@ -1712,13 +1841,13 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
 }
 ```
 
-**What it does** — Compares store outcomes for foreign and missing notebook/tag deletions, resource deletion, and blob replacement.
+**What it does** — Submits a strictly dominated `{victim: 1}` delete against entities stored at `{victim: 2}`. Notebook and tag foreign/missing outcomes must both be `true`; resource-delete foreign/missing outcomes must both remain `false`, and blob-write outcomes remain indistinguishable.
 
 **Dependencies** — `Store::{delete_notebook, delete_tag, delete_resource, put_resource_blob}`; expects each to return the same non-mutating outcome across foreign and absent IDs.
 
 **Used by** — `cargo test` and CI; anti-enumeration verifier for #109 inside the #111 harness.
 
-**Repeated context** — No result may reveal whether another tenant owns the supplied UUID.
+**Repeated context** — No result may reveal whether another tenant owns the supplied UUID. `delete_resource` has no current loser-vector gap because its missing path returns `false`; its case guards that behavior against later refactoring.
 
 ---
 
@@ -1757,20 +1886,22 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 2 | authorization case inventory | `// md:authorization_case_inventory` |
 | 3 | `fn mutating_handlers` | `// md:fn mutating_handlers` |
 | 4 | `fn source_handlers` | `// md:fn source_handlers` |
-| 5 | `fn source_relay_changes` | `// md:fn source_relay_changes` |
-| 6 | `fn authorization_inventory_is_complete` | `// md:fn authorization_inventory_is_complete` |
-| 7 | `fn inventory_classifications_are_disjoint_and_cases_are_tests` | `// md:fn inventory_classifications_are_disjoint_and_cases_are_tests` |
-| 8 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
-| 9 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
-| 10 | `fn note_changes_are_explicitly_non_materializing` | `// md:fn note_changes_are_explicitly_non_materializing` |
-| 11 | `fn authorization_test_config` | `// md:fn authorization_test_config` |
-| 12 | `fn spawn_authorization_server` | `// md:fn spawn_authorization_server` |
-| 13 | `fn register_and_login` | `// md:fn register_and_login` |
-| 14 | `fn authed_json` | `// md:fn authed_json` |
-| 15 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
-| 16 | `fn relation_snapshot` | `// md:fn relation_snapshot` |
-| 17 | `fn cross_tenant_http_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_http_mutations_leave_victim_unchanged` |
-| 18 | `fn denied_http_capabilities_leave_entities_unchanged` | `// md:fn denied_http_capabilities_leave_entities_unchanged` |
-| 19 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
-| 20 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
-| 21 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |
+| 5 | `fn route_registration_is_confined_to_router` | `// md:fn route_registration_is_confined_to_router` |
+| 6 | `fn source_relay_changes` | `// md:fn source_relay_changes` |
+| 7 | `fn authorization_inventory_is_complete` | `// md:fn authorization_inventory_is_complete` |
+| 8 | `fn inventory_classifications_are_disjoint_and_cases_are_tests` | `// md:fn inventory_classifications_are_disjoint_and_cases_are_tests` |
+| 9 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
+| 10 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
+| 11 | `fn relay_materialization_uses_authenticated_session_identity` | `// md:fn relay_materialization_uses_authenticated_session_identity` |
+| 12 | `fn note_changes_are_explicitly_non_materializing` | `// md:fn note_changes_are_explicitly_non_materializing` |
+| 13 | `fn authorization_test_config` | `// md:fn authorization_test_config` |
+| 14 | `fn spawn_authorization_server` | `// md:fn spawn_authorization_server` |
+| 15 | `fn register_and_login` | `// md:fn register_and_login` |
+| 16 | `fn authed_json` | `// md:fn authed_json` |
+| 17 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
+| 18 | `fn relation_snapshot` | `// md:fn relation_snapshot` |
+| 19 | `fn cross_tenant_http_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_http_mutations_leave_victim_unchanged` |
+| 20 | `fn denied_http_capabilities_leave_entities_unchanged` | `// md:fn denied_http_capabilities_leave_entities_unchanged` |
+| 21 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
+| 22 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
+| 23 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |

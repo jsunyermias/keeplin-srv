@@ -314,6 +314,33 @@ fn source_handlers() -> BTreeSet<String> {
     mutating_handlers(include_str!("../src/http.rs"))
 }
 
+// md:fn route_registration_is_confined_to_router
+#[test]
+fn route_registration_is_confined_to_router() {
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in std::fs::read_dir(crate_root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let outside_router = if path.file_name().and_then(|name| name.to_str()) == Some("http.rs") {
+            let (before, tail) = source.split_once("pub fn router(").unwrap();
+            let (_, after) = tail.split_once("pub const PROTOCOL_VERSION").unwrap();
+            format!("{before}{after}")
+        } else {
+            source
+        };
+        for registration in [".route(", ".merge(", ".nest("] {
+            assert!(
+                !outside_router.contains(registration),
+                "{} registers {registration} outside http::router",
+                path.display()
+            );
+        }
+    }
+}
+
 // md:fn source_relay_changes
 fn source_relay_changes() -> BTreeSet<String> {
     let source = include_str!("../src/sync.rs");
@@ -458,6 +485,21 @@ fn put_resource_data_checks_blob_write_result() {
     assert!(handler.contains("let written = state"));
     assert!(handler.contains("if !written"));
     assert!(handler.contains("return Err(AppError::NotFound)"));
+}
+
+// md:fn relay_materialization_uses_authenticated_session_identity
+#[test]
+fn relay_materialization_uses_authenticated_session_identity() {
+    let source = include_str!("../src/sync.rs");
+    let handler = source
+        .split("async fn handle_incoming(")
+        .nth(1)
+        .unwrap()
+        .split("async fn materialize(")
+        .next()
+        .unwrap();
+    assert!(handler.contains("user_id: Uuid,"));
+    assert!(handler.contains("materialize(state, user_id, &changes).await;"));
 }
 
 // md:fn note_changes_are_explicitly_non_materializing
@@ -1211,38 +1253,47 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
         .create_user("victim@example.com", "hash", "victim")
         .await
         .unwrap();
-    let vv = VersionVector::from([("attacker".to_string(), 99)]);
+    let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
+    let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
+    let victim_time = Utc::now();
+    let losing_time = victim_time - Duration::days(1);
 
     let mut foreign_notebook = Notebook::new("victim notebook");
+    foreign_notebook.vv = stored_vv.clone();
+    foreign_notebook.updated_at = victim_time;
     assert!(store
         .upsert_notebook(victim.id, &foreign_notebook)
         .await
         .unwrap());
-    foreign_notebook.vv = vv.clone();
+    foreign_notebook.vv = losing_vv.clone();
+    foreign_notebook.updated_at = losing_time;
     foreign_notebook.last_writer = "attacker".into();
     let mut missing_notebook = foreign_notebook.clone();
     missing_notebook.id = Uuid::new_v4();
-    assert_eq!(
-        store
-            .upsert_notebook(attacker.id, &foreign_notebook)
-            .await
-            .unwrap(),
-        store
-            .upsert_notebook(attacker.id, &missing_notebook)
-            .await
-            .unwrap()
-    );
+    let foreign = store
+        .upsert_notebook(attacker.id, &foreign_notebook)
+        .await
+        .unwrap();
+    let missing = store
+        .upsert_notebook(attacker.id, &missing_notebook)
+        .await
+        .unwrap();
+    assert!(foreign);
+    assert!(missing);
 
     let mut foreign_tag = Tag::new("victim tag");
+    foreign_tag.vv = stored_vv.clone();
+    foreign_tag.updated_at = victim_time;
     assert!(store.upsert_tag(victim.id, &foreign_tag).await.unwrap());
-    foreign_tag.vv = vv.clone();
+    foreign_tag.vv = losing_vv.clone();
+    foreign_tag.updated_at = losing_time;
     foreign_tag.last_writer = "attacker".into();
     let mut missing_tag = foreign_tag.clone();
     missing_tag.id = Uuid::new_v4();
-    assert_eq!(
-        store.upsert_tag(attacker.id, &foreign_tag).await.unwrap(),
-        store.upsert_tag(attacker.id, &missing_tag).await.unwrap()
-    );
+    let foreign = store.upsert_tag(attacker.id, &foreign_tag).await.unwrap();
+    let missing = store.upsert_tag(attacker.id, &missing_tag).await.unwrap();
+    assert!(foreign);
+    assert!(missing);
 
     let mut foreign_resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
@@ -1251,24 +1302,27 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
         "victim.bin",
         1,
     );
+    foreign_resource.vv = stored_vv;
+    foreign_resource.created_at = victim_time;
     assert!(store
         .upsert_resource_meta(victim.id, &foreign_resource)
         .await
         .unwrap());
-    foreign_resource.vv = vv;
+    foreign_resource.vv = losing_vv;
+    foreign_resource.created_at = losing_time;
     foreign_resource.last_writer = "attacker".into();
     let mut missing_resource = foreign_resource.clone();
     missing_resource.id = Uuid::new_v4();
-    assert_eq!(
-        store
-            .upsert_resource_meta(attacker.id, &foreign_resource)
-            .await
-            .unwrap(),
-        store
-            .upsert_resource_meta(attacker.id, &missing_resource)
-            .await
-            .unwrap()
-    );
+    let foreign = store
+        .upsert_resource_meta(attacker.id, &foreign_resource)
+        .await
+        .unwrap();
+    let missing = store
+        .upsert_resource_meta(attacker.id, &missing_resource)
+        .await
+        .unwrap();
+    assert!(foreign);
+    assert!(missing);
 }
 
 // md:fn foreign_and_missing_mutations_are_indistinguishable
@@ -1283,6 +1337,10 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         .create_user("victim@example.com", "hash", "victim")
         .await
         .unwrap();
+    let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
+    let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
+    let victim_time = Utc::now();
+    let losing_time = victim_time - Duration::days(1);
     let mut resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
         "victim resource",
@@ -1290,45 +1348,80 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         "victim.bin",
         1,
     );
-    resource.vv = VersionVector::from([("victim".to_string(), 1)]);
+    resource.vv = stored_vv.clone();
+    resource.created_at = victim_time;
     assert!(store
         .upsert_resource_meta(victim.id, &resource)
         .await
         .unwrap());
-    let vv = VersionVector::from([("attacker".to_string(), 2)]);
     let mut notebook = Notebook::new("victim notebook");
-    notebook.vv = VersionVector::from([("victim".to_string(), 1)]);
+    notebook.vv = stored_vv.clone();
+    notebook.updated_at = victim_time;
     assert!(store.upsert_notebook(victim.id, &notebook).await.unwrap());
     let foreign_notebook = store
-        .delete_notebook(attacker.id, notebook.id, Utc::now(), &vv, "attacker")
+        .delete_notebook(
+            attacker.id,
+            notebook.id,
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     let missing_notebook = store
-        .delete_notebook(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_notebook(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign_notebook, missing_notebook);
+    assert!(foreign_notebook);
     let mut tag = Tag::new("victim tag");
-    tag.vv = VersionVector::from([("victim".to_string(), 1)]);
+    tag.vv = stored_vv;
+    tag.updated_at = victim_time;
     assert!(store.upsert_tag(victim.id, &tag).await.unwrap());
     let foreign_tag = store
-        .delete_tag(attacker.id, tag.id, Utc::now(), &vv, "attacker")
+        .delete_tag(attacker.id, tag.id, losing_time, &losing_vv, "attacker")
         .await
         .unwrap();
     let missing_tag = store
-        .delete_tag(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_tag(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign_tag, missing_tag);
+    assert!(foreign_tag);
     let foreign = store
-        .delete_resource(attacker.id, resource.id, Utc::now(), &vv, "attacker")
+        .delete_resource(
+            attacker.id,
+            resource.id,
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     let missing = store
-        .delete_resource(attacker.id, Uuid::new_v4(), Utc::now(), &vv, "attacker")
+        .delete_resource(
+            attacker.id,
+            Uuid::new_v4(),
+            losing_time,
+            &losing_vv,
+            "attacker",
+        )
         .await
         .unwrap();
     assert_eq!(foreign, missing);
+    assert!(!foreign);
     let foreign_blob = store
         .put_resource_blob(attacker.id, resource.id, b"x")
         .await
