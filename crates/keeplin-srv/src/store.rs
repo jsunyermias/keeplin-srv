@@ -1613,9 +1613,10 @@ impl Store {
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         if let Some(row) = sqlx::query(
-            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(nb.id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -1631,14 +1632,15 @@ impl Store {
                 return Ok(false);
             }
         }
-        sqlx::query(
+        let result = sqlx::query(
             r#"INSERT INTO notebooks
                    (id, user_id, title, alias, created_at, updated_at, deleted_at, vv, last_writer)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, alias = EXCLUDED.alias,
                    updated_at = EXCLUDED.updated_at, deleted_at = EXCLUDED.deleted_at,
-                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer"#,
+                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer
+               WHERE notebooks.user_id = EXCLUDED.user_id"#,
         )
         .bind(nb.id)
         .bind(user_id)
@@ -1651,8 +1653,9 @@ impl Store {
         .bind(&nb.last_writer)
         .execute(&mut *tx)
         .await?;
+        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(true)
+        Ok(written)
     }
 
     // md:impl Store > fn delete_notebook
@@ -1666,9 +1669,10 @@ impl Store {
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         let existed = if let Some(row) = sqlx::query(
-            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -1689,9 +1693,9 @@ impl Store {
         };
         if existed {
             sqlx::query(
-                "UPDATE notebooks SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+                "UPDATE notebooks SET deleted_at = $3, updated_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
             )
-            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
             .execute(&mut *tx).await?;
         } else {
             sqlx::query(
@@ -1714,8 +1718,9 @@ impl Store {
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         if let Some(row) =
-            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
+                .bind(user_id)
                 .fetch_optional(&mut *tx)
                 .await?
         {
@@ -1731,13 +1736,14 @@ impl Store {
                 return Ok(false);
             }
         }
-        sqlx::query(
+        let result = sqlx::query(
             r#"INSERT INTO tags (id, user_id, title, created_at, updated_at, deleted_at, vv, last_writer, system)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, updated_at = EXCLUDED.updated_at,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
-                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system"#,
+                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system
+               WHERE tags.user_id = EXCLUDED.user_id"#,
         )
         .bind(tag.id)
         .bind(user_id)
@@ -1750,8 +1756,9 @@ impl Store {
         .bind(tag.system)
         .execute(&mut *tx)
         .await?;
+        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(true)
+        Ok(written)
     }
 
     // md:impl Store > fn delete_tag
@@ -1765,8 +1772,9 @@ impl Store {
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         let existed = if let Some(row) =
-            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(id)
+                .bind(user_id)
                 .fetch_optional(&mut *tx)
                 .await?
         {
@@ -1787,9 +1795,9 @@ impl Store {
         };
         if existed {
             sqlx::query(
-                "UPDATE tags SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+                "UPDATE tags SET deleted_at = $3, updated_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
             )
-            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
             .execute(&mut *tx).await?;
         } else {
             sqlx::query(
@@ -1869,9 +1877,10 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
-             FROM resources WHERE id = $1 FOR UPDATE",
+             FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(r.id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -1887,7 +1896,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        sqlx::query(
+        let result = sqlx::query(
             r#"INSERT INTO resources
                    (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -1896,7 +1905,8 @@ impl Store {
                    file_name = EXCLUDED.file_name, size = EXCLUDED.size,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
                    last_writer = EXCLUDED.last_writer, duration_ms = EXCLUDED.duration_ms,
-                   width = EXCLUDED.width, height = EXCLUDED.height"#,
+                   width = EXCLUDED.width, height = EXCLUDED.height
+               WHERE resources.user_id = EXCLUDED.user_id"#,
         )
         .bind(r.id)
         .bind(user_id)
@@ -1914,13 +1924,15 @@ impl Store {
         .bind(r.note_id)
         .execute(&mut *tx)
         .await?;
+        let written = result.rows_affected() > 0;
         tx.commit().await?;
-        Ok(true)
+        Ok(written)
     }
 
     // md:impl Store > fn delete_resource
     pub async fn delete_resource(
         &self,
+        user_id: Uuid,
         id: Uuid,
         deleted_at: DateTime<Utc>,
         vv: &VersionVector,
@@ -1929,9 +1941,10 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
-             FROM resources WHERE id = $1 FOR UPDATE",
+             FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         else {
@@ -1949,9 +1962,10 @@ impl Store {
             return Ok(false);
         }
         sqlx::query(
-            "UPDATE resources SET deleted_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+            "UPDATE resources SET deleted_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
         )
         .bind(id)
+        .bind(user_id)
         .bind(deleted_at)
         .bind(Json(vv))
         .bind(last_writer)
@@ -1962,16 +1976,23 @@ impl Store {
     }
 
     // md:impl Store > fn put_resource_blob
-    pub async fn put_resource_blob(&self, resource_id: Uuid, data: &[u8]) -> Result<(), AppError> {
-        sqlx::query(
-            r#"INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2)
+    pub async fn put_resource_blob(
+        &self,
+        user_id: Uuid,
+        resource_id: Uuid,
+        data: &[u8],
+    ) -> Result<bool, AppError> {
+        let result = sqlx::query(
+            r#"INSERT INTO resource_blobs (resource_id, data)
+               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
                ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
         )
         .bind(resource_id)
+        .bind(user_id)
         .bind(data)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     // md:impl Store > fn get_resource_blob

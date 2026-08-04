@@ -740,7 +740,10 @@ async fn put_resource_data(
             )));
         }
     }
-    state.store.put_resource_blob(id, &body).await?;
+    state
+        .store
+        .put_resource_blob(user.user_id, id, &body)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
 

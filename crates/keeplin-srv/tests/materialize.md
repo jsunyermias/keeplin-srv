@@ -933,7 +933,10 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
     r.vv = VersionVector::from([("dev".to_string(), 1)]);
     r.last_writer = "dev".into();
     assert!(store.upsert_resource_meta(u.id, &r).await.unwrap());
-    store.put_resource_blob(r.id, &[1, 2, 3]).await.unwrap();
+    store
+        .put_resource_blob(u.id, r.id, &[1, 2, 3])
+        .await
+        .unwrap();
 
     assert_eq!(
         store
@@ -945,7 +948,7 @@ async fn deleted_resource_frees_quota_and_blob_is_purgeable(pool: PgPool) {
 
     let del_vv = VersionVector::from([("dev".to_string(), 2)]);
     assert!(store
-        .delete_resource(r.id, Utc::now(), &del_vv, "dev")
+        .delete_resource(u.id, r.id, Utc::now(), &del_vv, "dev")
         .await
         .unwrap());
 
@@ -1022,7 +1025,7 @@ async fn store_note_delete_cascades_to_attachments_and_restore_recovers_dragged(
     let mut r3_vv = r3.vv.clone();
     keeplin_core::storage::note_log::increment(&mut r3_vv, "test-device");
     let r3_deleted = store
-        .delete_resource(r3.id, r3_ts, &r3_vv, "test-device")
+        .delete_resource(user.id, r3.id, r3_ts, &r3_vv, "test-device")
         .await
         .unwrap();
     assert!(r3_deleted, "r3 direct delete must win");

@@ -1775,6 +1775,75 @@
     {
       "companion": {
         "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/tests/authorization.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": [
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "Every authenticated mutating route and materialized relay variant has both negative-case dimensions registered."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A cross-tenant attempt leaves every byte represented by the victim row and resource blob unchanged."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "Existing foreign and absent IDs produce indistinguishable mutation outcomes."
+          }
+        ]
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "Overview",
+          "authorization_case_inventory",
+          "fn mutating_handlers",
+          "fn source_handlers",
+          "fn source_relay_changes",
+          "fn authorization_inventory_is_complete",
+          "fn source_inventory_detects_an_uncovered_route",
+          "fn entity_snapshot",
+          "fn cross_tenant_store_mutations_leave_victim_unchanged",
+          "fn foreign_and_missing_mutations_are_indistinguishable"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`tests/authorization.rs` — negative authorization completeness and tenant-isolation regressions"
+      },
+      "risk": {
+        "basis": [
+          "auth"
+        ],
+        "origin": "INFERRED",
+        "value": "security"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/tests/authorization.rs"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test -p keeplin-srv"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
         "value": "crates/keeplin-srv/tests/collab.md"
       },
       "cross_repo_contracts": {

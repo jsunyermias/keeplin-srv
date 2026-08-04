@@ -1702,7 +1702,10 @@ async fn put_resource_data(
             )));
         }
     }
-    state.store.put_resource_blob(id, &body).await?;
+    state
+        .store
+        .put_resource_blob(user.user_id, id, &body)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
 ```
@@ -1713,7 +1716,8 @@ over `/api/sync`; `404` otherwise). The raw body is capped by `MAX_UPLOAD_BYTES`
 (axum layer → `413`). Storage quota (`MAX_USER_STORAGE_BYTES > 0`): sum every
 *other* live blob of the user plus the incoming size — a replacement is measured by
 its new size, not double-counted — and refuse with `507 QuotaExceeded` over the
-limit. Then store the blob.
+limit. Then store the blob through a second owner-scoped statement, preserving the ownership
+invariant even if metadata changes between the preliminary check and the write.
 
 **Dependencies** — `Store::{resource_owned_by, user_blob_bytes_excluding,
 put_resource_blob}`. **Used by** — routed in `router` (raised-limit sub-router).
