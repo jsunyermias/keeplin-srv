@@ -10,6 +10,90 @@ shapes independently of the crate version.
 
 ## [Unreleased]
 
+### Deterministic convergence for the review loop (keeplin ADR 0004)
+
+- **The implementation↔review loop now terminates on a computed condition.** Previously the
+  only mechanical gate was `.github/scripts/check-review-governance.js`, which never inspected
+  findings: what stood for "the loop finished" was the pull-request checkbox `Blocking findings
+  are resolved and conversations are closed`, an assertion by the agents inside the loop. No
+  repository state held finding identity, round count or round-to-round comparison, so settled
+  findings returned as new and a stalled loop was indistinguishable from a progressing one.
+- **New `.github/scripts/check-review-loop.js`**, byte-identical to `keeplin`'s, now driven by the default-branch trusted evaluator. A finding blocks only when
+  *reified* — named as a test, property, contract assertion or `check-docs` check that fails;
+  anything not reducible to a failing check is `advisory`, recorded but not blocking.
+  Convergence is required checks green **and** zero open reified findings.
+- **Findings are identified and durable.** The new `## Review ledger` section of
+  `.github/pull_request_template.md` carries a stable ID and one state per finding (`open` /
+  `resolved` / `dismissed` / `advisory`). A `dismissed` finding cites the priority decision or
+  accepted ADR that settles it and does not reopen when re-raised.
+- **The stagnation brake measures state, not a clock.** The loop-state hash is
+  `sha256(normalized diff ‖ open reified finding IDs ‖ red check names)`. A repeated hash, or a
+  blocking set that has not shrunk for `REVIEW_LOOP_STAGNATION_LIMIT` rounds (3), escalates to
+  the maintainer naming the exact stuck item and demands an entry in the new
+  `docs/review-stalls.md`.
+- **Round 1 of independent review (Codex / GPT-5.5) found six reifiable defects; five are
+  fixed here and one is open.** Convergence now runs in its own `converge` job gated on
+  `needs: [test, graph]`, because a step inside `Check, Test & Lint` asserted "required checks
+  are green" before `cargo test`, Clippy, audit and the graph job had run; an unfinished check
+  is now reported as `awaiting-checks` and blocks, rather than being read as green. A body with
+  no ledger section is round zero per the ADR's migration contract, not malformed. A stall
+  record must now name every blocker in the `## Open` table, not merely mention the pull
+  request somewhere in the file. The loop-state hash joins with `\x1f` instead of a comma,
+  which had made `{"a,b","c"}` and `{"a","b,c"}` collide — check-run names contain commas, and
+  this repository's own is `Check, Test & Lint`. Escaped pipes in ledger cells no longer shift
+  the state column.
+- **Round 1 left one finding open and blocking: the stagnation brake read its own history from
+  the editable pull-request body**, so deleting `Round log` rows reset the streak. Closing it
+  needed loop state persisted where an agent cannot rewrite it, which crossed ADR 0004's
+  recorded compatibility note and so awaited a maintainer decision. It was reified as a failing
+  test rather than reclassified as advisory, and is closed by the ADR 0008 entry below.
+- **Review round 2 (Codex / GPT-5.5) reopened four round-1 findings and added three.** The
+  convergence check now takes `needs.test.result`/`needs.graph.result` as positive evidence
+  instead of inferring greenness from the check-run API, so skipped, neutral, absent and
+  unknown no longer read as green. Blocker matching requires explicit delimited tokens
+  (`F-0010` is not `F-001`), the loop-state hash is SHA-256 over canonical JSON rather than
+  delimiter framing, and table parsing follows CommonMark backslash parity. ADR 0005 is
+  rejected; ADR 0006 proposed a trusted default-branch writer and stayed unimplemented while
+  proposed, so F-002/F-008/F-009 stayed open behind a deliberately red test until the accepted
+  ADR 0008 closed them. The suite is green again as of that entry.
+- **ADR 0008 implemented.** The head-controlled `converge` job is gone; the authoritative
+  evaluator is the default-branch `review-loop-evaluator.yml`, which never checks out or
+  executes pull-request content. A finding reaches `resolved`/`dismissed` only against a
+  maintainer authorization naming the finding and target state, with resolution evidence
+  bound to the evaluated head, workflow and App. Every pull-request workflow is read-only,
+  proven by a canary that fails the build unless `PATCH /check-runs` returns 403.
+  Terminal journal truncation stays undetected and is stated as such; the three-probe
+  follow-up is tracked in `docs/review-loop-spike.md`.
+- **Round 9 gave this repository its first full independent review (Kimi K3), and Codex's
+  round-9 review of `keeplin` found F-023 in the mirrored evaluator.** An authorized tombstone
+  retired a finding ID without reserving it, so the ID could return as `advisory` against a
+  newest record that no longer mentioned it, request no authorization and converge. Reification
+  is now remembered across every surviving journal record; the truncation bound is unchanged.
+  This repository's own review found only documentation drift, corrected here: the `ci.yml`
+  companion described the removed `converge` job and a superseded hash construction, omitted the
+  canary step and claimed a deliberately red test that no longer exists.
+- **Round 10 (GPT-5.6 Sol and Kimi K3) rejected the round-9 fix round; the corrections are
+  mirrored here.** F-027: the evaluator skipped a journal record whose findings payload was
+  digest-consistent but not an array, silently discarding the reification history the F-023 fix depended
+  on; an unreadable digest-consistent record now fails closed. F-028 and F-029: the bounded-history
+  check required three substrings anywhere in each file and skipped a missing file entirely, so
+  a one-line glossary passed it with the prose deleted. It now has an exact standalone anchor in
+  `scripts/check-bounded-history.py`, with `scripts/tests/test_bounded_history.py` proving the
+  check can fail. F-030 bounds the branch-protection claim in `AGENTS.md`.
+- **Round 13 corrected two changelog claims from reproduced behavior, without relying on a pending
+  ADR.** The journal does not detect edits unconditionally: corrupting one of two records made it
+  disappear from parsing, and the evaluator observed one record and returned `converged`. Its
+  unkeyed digest links also do not authenticate history: a repository workflow declared
+  `issues: write`, received a token for the same `github-actions` App identity, and could
+  recompute records, successors and their digests.
+- **F-025 is dismissed against accepted keeplin ADR 0009.** The maintainer accepted the decision
+  to move governance into the default-branch evaluator. The mechanism is unchanged until ADR 0009
+  is implemented in its own dedicated pull request: `check-review-governance.js` still runs inside
+  the head-controlled `ci.yml`, so the documented conjunction remains policy, not mechanism.
+- Independent review is untouched. `ci.yml` is read-only; only the trusted
+  default-branch evaluator holds write scopes. No server behavior, migration, wire surface or `keeplin-core` pin is
+  affected.
+
 ### Graphify graph moved to a CI artifact (keeplin#148)
 
 - `graphify-out/` is no longer versioned. CI generates it with `graphifyy==0.9.25`,
