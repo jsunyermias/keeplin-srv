@@ -77,8 +77,8 @@ shapes independently of the crate version.
   digest-consistent but not an array, silently discarding the reification history the F-023 fix depended
   on; an unreadable digest-consistent record now fails closed. F-028 and F-029: the bounded-history
   check required three substrings anywhere in each file and skipped a missing file entirely, so
-  a one-line glossary passed it with the prose deleted. It is now a verbatim canonical sentence
-  in `scripts/check-bounded-history.py`, with `scripts/tests/test_bounded_history.py` proving the
+  a one-line glossary passed it with the prose deleted. It now has an exact standalone anchor in
+  `scripts/check-bounded-history.py`, with `scripts/tests/test_bounded_history.py` proving the
   check can fail. F-030 bounds the branch-protection claim in `AGENTS.md`.
 - **Round 13 corrected two changelog claims from reproduced behavior, without relying on a pending
   ADR.** The journal does not detect edits unconditionally: corrupting one of two records made it
