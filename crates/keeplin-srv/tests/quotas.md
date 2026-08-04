@@ -260,7 +260,7 @@ before `PUT`ting bytes.
 
 ```rust
 // md:fn seed_resource
-async fn seed_resource(dev: &DbBackend) -> Uuid {
+async fn seed_resource(addr: SocketAddr, token: &str, dev: &DbBackend) -> Uuid {
     let resource = dev
         .create_resource(
             Resource::new(
@@ -279,8 +279,27 @@ async fn seed_resource(dev: &DbBackend) -> Uuid {
         .await
         .unwrap();
     dev.send_changes(changes).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    resource.id
+    for _ in 0..50 {
+        let resources: Value = reqwest::Client::new()
+            .get(format!("http://{addr}/api/resources"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if resources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == resource.id.to_string())
+        {
+            return resource.id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("resource did not materialize");
 }
 ```
 
@@ -444,8 +463,8 @@ async fn storage_quota_blocks_upload_over_the_limit(pool: PgPool) {
     let token = login(addr, "a@example.com", "dev-a").await;
     let dev = device(addr, &token).await;
 
-    let a = seed_resource(&dev).await;
-    let b = seed_resource(&dev).await;
+    let a = seed_resource(addr, &token, &dev).await;
+    let b = seed_resource(addr, &token, &dev).await;
 
     assert_eq!(put_blob(addr, &token, a, 50).await, 200);
     assert_eq!(put_blob(addr, &token, a, 50).await, 200);
@@ -483,12 +502,12 @@ async fn storage_quota_isolated_per_user(pool: PgPool) {
     let da = device(addr, &ta).await;
     let db = device(addr, &tb).await;
 
-    let ra = seed_resource(&da).await;
-    let rb = seed_resource(&db).await;
+    let ra = seed_resource(addr, &ta, &da).await;
+    let rb = seed_resource(addr, &tb, &db).await;
 
     assert_eq!(put_blob(addr, &ta, ra, 100).await, 200);
     assert_eq!(put_blob(addr, &tb, rb, 100).await, 200);
-    let ra2 = seed_resource(&da).await;
+    let ra2 = seed_resource(addr, &ta, &da).await;
     assert_eq!(put_blob(addr, &ta, ra2, 1).await, 507);
 }
 ```

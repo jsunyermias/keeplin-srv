@@ -1,18 +1,125 @@
 // md:Overview
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
+use axum::Router;
 use chrono::{Duration, Utc};
 use keeplin_core::{
     models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
 };
-use keeplin_srv::store::Store;
+use keeplin_srv::{
+    config::Config, http::router, permissions::Capabilities, state::AppState, store::Store,
+};
+use serde_json::{json, Value};
 use sqlx::PgPool;
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 // md:authorization_case_inventory
-const MUTATING_HANDLER_TENANT_CASES: &[(&str, &str)] = &[];
-const MUTATING_HANDLER_CAPABILITY_CASES: &[(&str, &str)] = &[];
+const MUTATING_HANDLER_TENANT_CASES: &[(&str, &str)] = &[
+    (
+        "change_password",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "create_device",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "create_note",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "create_notebook_share",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "create_share",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_account",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_all_devices",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_device",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_note",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_notebook_share",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "delete_share",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "import_note",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "put_resource_data",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "transfer_notebook",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "transfer_ownership",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "update_note",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+    (
+        "verify_request",
+        "cross_tenant_http_mutations_leave_victim_unchanged",
+    ),
+];
+const MUTATING_HANDLER_CAPABILITY_CASES: &[(&str, &str)] = &[
+    (
+        "create_notebook_share",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "create_share",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "delete_note",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "delete_notebook_share",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "delete_share",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "transfer_notebook",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "transfer_ownership",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+    (
+        "update_note",
+        "denied_http_capabilities_leave_entities_unchanged",
+    ),
+];
 const RELAY_CHANGE_TENANT_CASES: &[(&str, &str)] = &[
     (
         "NotebookCreate",
@@ -46,27 +153,34 @@ const RELAY_CHANGE_TENANT_CASES: &[(&str, &str)] = &[
         "TagUpdate",
         "cross_tenant_store_mutations_leave_victim_unchanged",
     ),
+    (
+        "NoteTagAdd",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "NoteTagRemove",
+        "cross_tenant_store_mutations_leave_victim_unchanged",
+    ),
+    (
+        "NoteCreate",
+        "note_changes_are_explicitly_non_materializing",
+    ),
+    (
+        "NoteDelete",
+        "note_changes_are_explicitly_non_materializing",
+    ),
+    (
+        "NoteUpdate",
+        "note_changes_are_explicitly_non_materializing",
+    ),
 ];
 const RELAY_CHANGE_CAPABILITY_CASES: &[(&str, &str)] = &[];
 
-const MUTATING_HANDLER_UNCOVERED: &[(&str, &str)] = &[
-    ("change_password", "no HTTP authorization case exists"),
-    ("create_device", "no HTTP authorization case exists"),
-    ("create_note", "no HTTP authorization case exists"),
-    ("create_notebook_share", "no HTTP authorization case exists"),
-    ("create_share", "no HTTP authorization case exists"),
-    ("delete_account", "no HTTP authorization case exists"),
-    ("delete_all_devices", "no HTTP authorization case exists"),
-    ("delete_device", "no HTTP authorization case exists"),
-    ("delete_note", "no HTTP authorization case exists"),
-    ("delete_notebook_share", "no HTTP authorization case exists"),
-    ("delete_share", "no HTTP authorization case exists"),
-    ("import_note", "no HTTP authorization case exists"),
+const MUTATING_HANDLER_TENANT_UNCOVERED: &[(&str, &str)] = &[
     (
         "login",
         "public authentication endpoint; tenant and capability dimensions do not apply",
     ),
-    ("put_resource_data", "no HTTP authorization case exists"),
     (
         "register",
         "public authentication endpoint; tenant and capability dimensions do not apply",
@@ -79,31 +193,87 @@ const MUTATING_HANDLER_UNCOVERED: &[(&str, &str)] = &[
         "reset_request",
         "public authentication endpoint; tenant and capability dimensions do not apply",
     ),
-    ("transfer_notebook", "no HTTP authorization case exists"),
-    ("transfer_ownership", "no HTTP authorization case exists"),
-    ("update_note", "no HTTP authorization case exists"),
     (
         "verify_confirm",
         "public authentication endpoint; tenant and capability dimensions do not apply",
     ),
-    ("verify_request", "no HTTP authorization case exists"),
 ];
 
-const RELAY_CHANGE_UNCOVERED: &[(&str, &str)] = &[
+const MUTATING_HANDLER_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
     (
-        "NoteCreate",
-        "note materialization is outside this relay store harness",
+        "change_password",
+        "account credentials have no delegated-access capability model",
     ),
     (
-        "NoteDelete",
-        "note materialization is outside this relay store harness",
+        "create_device",
+        "devices have no delegated-access capability model",
     ),
-    ("NoteTagAdd", "no cross-tenant relay case exists"),
-    ("NoteTagRemove", "no cross-tenant relay case exists"),
     (
-        "NoteUpdate",
-        "note materialization is outside this relay store harness",
+        "create_note",
+        "creating an own note has no pre-existing shared entity or capability",
     ),
+    (
+        "delete_account",
+        "accounts have no delegated-access capability model",
+    ),
+    (
+        "delete_all_devices",
+        "devices have no delegated-access capability model",
+    ),
+    (
+        "delete_device",
+        "devices have no delegated-access capability model",
+    ),
+    (
+        "import_note",
+        "import creates an own note and has no delegated capability target",
+    ),
+    (
+        "put_resource_data",
+        "resource blobs are owner-scoped and cannot be delegated",
+    ),
+    (
+        "verify_request",
+        "email verification has no delegated-access capability model",
+    ),
+    (
+        "login",
+        "public authentication endpoint; capability authorization does not apply",
+    ),
+    (
+        "register",
+        "public authentication endpoint; capability authorization does not apply",
+    ),
+    (
+        "reset_confirm",
+        "public authentication endpoint; capability authorization does not apply",
+    ),
+    (
+        "reset_request",
+        "public authentication endpoint; capability authorization does not apply",
+    ),
+    (
+        "verify_confirm",
+        "public authentication endpoint; capability authorization does not apply",
+    ),
+];
+
+const RELAY_CHANGE_TENANT_UNCOVERED: &[(&str, &str)] = &[];
+
+const RELAY_CHANGE_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
+    ("NotebookCreate", "relay changes are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NotebookDelete", "relay changes are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NotebookUpdate", "relay changes are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("ResourceCreate", "relay resources are owner-scoped and have no delegated capability model"),
+    ("ResourceDelete", "relay resources are owner-scoped and have no delegated capability model"),
+    ("TagCreate", "relay tags are owner-scoped and have no delegated capability model"),
+    ("TagDelete", "relay tags are owner-scoped and have no delegated capability model"),
+    ("TagUpdate", "relay tags are owner-scoped and have no delegated capability model"),
+    ("NoteCreate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
+    ("NoteDelete", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
+    ("NoteTagAdd", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NoteTagRemove", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NoteUpdate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
 ];
 
 const READ_ISOLATION_CASES: &[&str] = &["users_do_not_see_each_others_changes"];
@@ -123,7 +293,9 @@ fn mutating_handlers(source: &str) -> BTreeSet<String> {
             router
                 .match_indices(method)
                 .filter(move |(offset, _)| {
-                    *offset == 0 || !router.as_bytes()[offset - 1].is_ascii_alphanumeric()
+                    *offset == 0
+                        || !(router.as_bytes()[offset - 1].is_ascii_alphanumeric()
+                            || router.as_bytes()[offset - 1] == b'_')
                 })
                 .filter_map(move |(offset, _)| {
                     let tail = &router[offset + method.len()..];
@@ -146,10 +318,10 @@ fn source_handlers() -> BTreeSet<String> {
 fn source_relay_changes() -> BTreeSet<String> {
     let source = include_str!("../src/sync.rs");
     let materialize = source
-        .split("// md:fn materialize")
+        .split(concat!("// md:", "fn materialize"))
         .nth(1)
         .unwrap()
-        .split("// md:fn changes_frame")
+        .split(concat!("// md:", "fn changes_frame"))
         .next()
         .unwrap();
     materialize
@@ -167,31 +339,62 @@ fn source_relay_changes() -> BTreeSet<String> {
 // md:fn authorization_inventory_is_complete
 #[test]
 fn authorization_inventory_is_complete() {
-    let handler_inventory = MUTATING_HANDLER_TENANT_CASES
+    let handler_tenant_inventory = MUTATING_HANDLER_TENANT_CASES
         .iter()
-        .chain(MUTATING_HANDLER_CAPABILITY_CASES)
-        .chain(MUTATING_HANDLER_UNCOVERED)
+        .chain(MUTATING_HANDLER_TENANT_UNCOVERED)
         .map(|(entry, _)| (*entry).to_string())
         .collect();
-    assert_eq!(source_handlers(), handler_inventory);
+    assert_eq!(source_handlers(), handler_tenant_inventory);
+    let handler_capability_inventory = MUTATING_HANDLER_CAPABILITY_CASES
+        .iter()
+        .chain(MUTATING_HANDLER_CAPABILITY_UNCOVERED)
+        .map(|(entry, _)| (*entry).to_string())
+        .collect();
+    assert_eq!(source_handlers(), handler_capability_inventory);
 
-    let relay_inventory = RELAY_CHANGE_TENANT_CASES
+    let relay_tenant_inventory = RELAY_CHANGE_TENANT_CASES
         .iter()
-        .chain(RELAY_CHANGE_CAPABILITY_CASES)
-        .chain(RELAY_CHANGE_UNCOVERED)
+        .chain(RELAY_CHANGE_TENANT_UNCOVERED)
         .map(|(entry, _)| (*entry).to_string())
         .collect();
-    assert_eq!(source_relay_changes(), relay_inventory);
+    assert_eq!(source_relay_changes(), relay_tenant_inventory);
+    let relay_capability_inventory = RELAY_CHANGE_CAPABILITY_CASES
+        .iter()
+        .chain(RELAY_CHANGE_CAPABILITY_UNCOVERED)
+        .map(|(entry, _)| (*entry).to_string())
+        .collect();
+    assert_eq!(source_relay_changes(), relay_capability_inventory);
     assert_eq!(
         READ_ISOLATION_CASES,
         &["users_do_not_see_each_others_changes"]
     );
 }
 
-// md:fn each_inventory_entry_has_both_cases
+// md:fn inventory_classifications_are_disjoint_and_cases_are_tests
 #[test]
-fn each_inventory_entry_has_both_cases() {
+fn inventory_classifications_are_disjoint_and_cases_are_tests() {
     let tests = include_str!("authorization.rs");
+    for (covered, excepted) in [
+        (
+            MUTATING_HANDLER_TENANT_CASES,
+            MUTATING_HANDLER_TENANT_UNCOVERED,
+        ),
+        (
+            MUTATING_HANDLER_CAPABILITY_CASES,
+            MUTATING_HANDLER_CAPABILITY_UNCOVERED,
+        ),
+        (RELAY_CHANGE_TENANT_CASES, RELAY_CHANGE_TENANT_UNCOVERED),
+        (
+            RELAY_CHANGE_CAPABILITY_CASES,
+            RELAY_CHANGE_CAPABILITY_UNCOVERED,
+        ),
+    ] {
+        let covered_entries: BTreeSet<_> = covered.iter().map(|(entry, _)| entry).collect();
+        let excepted_entries: BTreeSet<_> = excepted.iter().map(|(entry, _)| entry).collect();
+        assert!(covered_entries.is_disjoint(&excepted_entries));
+        assert_eq!(covered_entries.len(), covered.len());
+        assert_eq!(excepted_entries.len(), excepted.len());
+    }
     for (entry, case) in MUTATING_HANDLER_TENANT_CASES
         .iter()
         .chain(MUTATING_HANDLER_CAPABILITY_CASES)
@@ -200,13 +403,18 @@ fn each_inventory_entry_has_both_cases() {
     {
         assert!(!entry.is_empty());
         assert!(
-            tests.contains(&format!("fn {case}(")),
-            "missing case {case}"
+            tests.contains(&format!("#[test]\nfn {case}("))
+                || tests.contains(&format!(
+                    "#[sqlx::test(migrations = \"../../migrations\")]\nasync fn {case}("
+                )),
+            "missing test case {case}"
         );
     }
-    for (entry, reason) in MUTATING_HANDLER_UNCOVERED
+    for (entry, reason) in MUTATING_HANDLER_TENANT_UNCOVERED
         .iter()
-        .chain(RELAY_CHANGE_UNCOVERED)
+        .chain(MUTATING_HANDLER_CAPABILITY_UNCOVERED)
+        .chain(RELAY_CHANGE_TENANT_UNCOVERED)
+        .chain(RELAY_CHANGE_CAPABILITY_UNCOVERED)
     {
         assert!(!entry.is_empty());
         assert!(!reason.is_empty());
@@ -229,7 +437,7 @@ fn source_inventory_detects_an_uncovered_route() {
     assert_eq!(mutating_handlers(&source), expected);
     assert_ne!(
         mutating_handlers(&source),
-        MUTATING_HANDLER_UNCOVERED
+        MUTATING_HANDLER_TENANT_UNCOVERED
             .iter()
             .map(|(entry, _)| (*entry).to_string())
             .collect()
@@ -252,6 +460,117 @@ fn put_resource_data_checks_blob_write_result() {
     assert!(handler.contains("return Err(AppError::NotFound)"));
 }
 
+// md:fn note_changes_are_explicitly_non_materializing
+#[test]
+fn note_changes_are_explicitly_non_materializing() {
+    let source = include_str!("../src/sync.rs");
+    let materialize = source
+        .split("// md:fn materialize")
+        .nth(1)
+        .unwrap()
+        .split("// md:fn changes_frame")
+        .next()
+        .unwrap();
+    assert!(materialize.contains(
+        "Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } =>"
+    ));
+    assert!(materialize.contains("=> {\n                Ok(())\n            }"));
+}
+
+// md:fn authorization_test_config
+fn authorization_test_config() -> Config {
+    Config {
+        port: 0,
+        database_url: String::new(),
+        jwt_secret: "test-secret".into(),
+        token_ttl_days: 1,
+        retention_days: 0,
+        lines_gc_days: 0,
+        resource_purge_days: 0,
+        db_max_connections: 5,
+        db_acquire_timeout_secs: 10,
+        db_idle_timeout_secs: 600,
+        db_max_lifetime_secs: 1800,
+        rate_limit_per_min: 0,
+        shutdown_grace_secs: 5,
+        log_json: false,
+        max_upload_bytes: 100 * 1024 * 1024,
+        max_note_body_bytes: 0,
+        max_user_storage_bytes: 0,
+        max_notes_per_user: 0,
+        registration_enabled: true,
+        at_rest_key: None,
+        mail_webhook_url: None,
+        mail_webhook_token: None,
+        email_token_ttl_secs: 3600,
+        email_verification_required: false,
+        login_max_failures: 0,
+        login_lockout_secs: 300,
+        history_since_access: false,
+    }
+}
+
+// md:fn spawn_authorization_server
+async fn spawn_authorization_server(pool: PgPool) -> SocketAddr {
+    let state = Arc::new(AppState::new(authorization_test_config(), pool));
+    let app: Router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+// md:fn register_and_login
+async fn register_and_login(addr: SocketAddr, email: &str) -> String {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": email, "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = client
+        .post(format!("http://{addr}/api/login"))
+        .json(&json!({
+            "email": email,
+            "password": "password123",
+            "device_name": "authorization-test"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["token"].as_str().unwrap().to_string()
+}
+
+// md:fn authed_json
+async fn authed_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    addr: SocketAddr,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> reqwest::Response {
+    client
+        .request(method, format!("http://{addr}{path}"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
 // md:fn entity_snapshot
 async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
     let query = format!("SELECT to_jsonb(t)::text FROM {table} t WHERE id = $1");
@@ -260,6 +579,462 @@ async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+// md:fn relation_snapshot
+async fn relation_snapshot(pool: &PgPool, table: &str, column: &str, id: Uuid) -> String {
+    let query = format!(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text, '[]') FROM {table} t WHERE {column} = $1"
+    );
+    sqlx::query_scalar(&query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+// md:fn cross_tenant_http_mutations_leave_victim_unchanged
+#[sqlx::test(migrations = "../../migrations")]
+async fn cross_tenant_http_mutations_leave_victim_unchanged(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let attacker_token = register_and_login(addr, "http-attacker@example.com").await;
+    let victim_token = register_and_login(addr, "http-victim@example.com").await;
+    let disposable_token = register_and_login(addr, "http-disposable@example.com").await;
+    let target_token = register_and_login(addr, "http-target@example.com").await;
+    let store = Store::new(pool.clone());
+    let attacker = store
+        .get_user_by_email("http-attacker@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let victim = store
+        .get_user_by_email("http-victim@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("http-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let victim_device = store
+        .list_devices_by_user(victim.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let victim_note = store
+        .create_note(None, "victim note", victim.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(victim_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let notebook = Notebook::new("victim notebook");
+    assert!(store.upsert_notebook(victim.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let resource = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "victim resource",
+        "application/octet-stream",
+        "victim.bin",
+        12,
+    );
+    assert!(store
+        .upsert_resource_meta(victim.id, &resource)
+        .await
+        .unwrap());
+    assert!(store
+        .put_resource_blob(victim.id, resource.id, b"victim bytes")
+        .await
+        .unwrap());
+
+    let victim_user_before = entity_snapshot(&pool, "users", victim.id).await;
+    let victim_device_before = entity_snapshot(&pool, "user_devices", victim_device.id).await;
+    let victim_note_before = entity_snapshot(&pool, "notes", victim_note.id).await;
+    let victim_note_shares_before =
+        relation_snapshot(&pool, "note_shares", "note_id", victim_note.id).await;
+    let victim_notebook_before = entity_snapshot(&pool, "notebooks", notebook.id).await;
+    let victim_notebook_shares_before =
+        relation_snapshot(&pool, "notebook_shares", "notebook_id", notebook.id).await;
+    let victim_resource_before = entity_snapshot(&pool, "resources", resource.id).await;
+    let victim_blob_before = store.get_resource_blob(resource.id).await.unwrap().unwrap();
+    let client = reqwest::Client::new();
+
+    let cases = [
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            "/api/notes",
+            &attacker_token,
+            json!({ "id": victim_note.id, "title": "collision" }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::PATCH,
+            addr,
+            &format!("/api/notes/{}", victim_note.id),
+            &attacker_token,
+            json!({ "title": "stolen" }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}", victim_note.id),
+            &attacker_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", victim_note.id),
+            &attacker_token,
+            json!({ "user_id": attacker.id, "capabilities": Capabilities::READ }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}/share/{}", victim_note.id, target.id),
+            &attacker_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", victim_note.id),
+            &attacker_token,
+            json!({ "user_id": attacker.id }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &attacker_token,
+            json!({ "user_id": attacker.id, "capabilities": Capabilities::READ }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notebooks/{}/share/{}", notebook.id, target.id),
+            &attacker_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &attacker_token,
+            json!({ "user_id": attacker.id }),
+        )
+        .await,
+    ];
+    assert_eq!(cases[0].status(), 409);
+    for response in &cases[1..] {
+        assert_eq!(response.status(), 403);
+    }
+    let response = client
+        .put(format!("http://{addr}/api/resources/{}/data", resource.id))
+        .bearer_auth(&attacker_token)
+        .body("attacker bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    let response = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/devices/{}", victim_device.id),
+        &attacker_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), 404);
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        "/api/devices",
+        &attacker_token,
+        json!({ "device_name": "attacker-extra" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        "/api/import",
+        &attacker_token,
+        json!({ "title": "attacker import", "body": "one\ntwo" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        "/api/account/verify/request",
+        &attacker_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), 501);
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        "/api/account/password",
+        &attacker_token,
+        json!({ "current_password": "password123", "new_password": "changed123" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &disposable_token,
+        json!({ "password": "password123" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        "/api/devices",
+        &attacker_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+
+    assert_eq!(
+        entity_snapshot(&pool, "users", victim.id).await,
+        victim_user_before
+    );
+    assert_eq!(
+        entity_snapshot(&pool, "user_devices", victim_device.id).await,
+        victim_device_before
+    );
+    assert_eq!(
+        entity_snapshot(&pool, "notes", victim_note.id).await,
+        victim_note_before
+    );
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", victim_note.id).await,
+        victim_note_shares_before
+    );
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", notebook.id).await,
+        victim_notebook_before
+    );
+    assert_eq!(
+        relation_snapshot(&pool, "notebook_shares", "notebook_id", notebook.id).await,
+        victim_notebook_shares_before
+    );
+    assert_eq!(
+        entity_snapshot(&pool, "resources", resource.id).await,
+        victim_resource_before
+    );
+    assert_eq!(
+        store.get_resource_blob(resource.id).await.unwrap().unwrap(),
+        victim_blob_before
+    );
+    let victim_response = client
+        .get(format!("http://{addr}/api/notes/{}", victim_note.id))
+        .bearer_auth(victim_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(victim_response.status(), 200);
+    let target_response = client
+        .get(format!("http://{addr}/api/notes/{}", victim_note.id))
+        .bearer_auth(target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(target_response.status(), 200);
+}
+
+// md:fn denied_http_capabilities_leave_entities_unchanged
+#[sqlx::test(migrations = "../../migrations")]
+async fn denied_http_capabilities_leave_entities_unchanged(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "cap-owner@example.com").await;
+    let reader_token = register_and_login(addr, "cap-reader@example.com").await;
+    let target_token = register_and_login(addr, "cap-target@example.com").await;
+    let store = Store::new(pool.clone());
+    let owner = store
+        .get_user_by_email("cap-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let reader = store
+        .get_user_by_email("cap-reader@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("cap-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "owner note", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, reader.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let notebook = Notebook::new("owner notebook");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, reader.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_before = entity_snapshot(&pool, "notes", note.id).await;
+    let note_shares_before = relation_snapshot(&pool, "note_shares", "note_id", note.id).await;
+    let notebook_before = entity_snapshot(&pool, "notebooks", notebook.id).await;
+    let notebook_shares_before =
+        relation_snapshot(&pool, "notebook_shares", "notebook_id", notebook.id).await;
+    let client = reqwest::Client::new();
+    let cases = [
+        authed_json(
+            &client,
+            reqwest::Method::PATCH,
+            addr,
+            &format!("/api/notes/{}", note.id),
+            &reader_token,
+            json!({ "title": "forbidden" }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}", note.id),
+            &reader_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", note.id),
+            &reader_token,
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}/share/{}", note.id, target.id),
+            &reader_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &reader_token,
+            json!({ "user_id": target.id }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &reader_token,
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notebooks/{}/share/{}", notebook.id, target.id),
+            &reader_token,
+            json!({}),
+        )
+        .await,
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &reader_token,
+            json!({ "user_id": target.id }),
+        )
+        .await,
+    ];
+    for response in cases {
+        assert_eq!(response.status(), 403);
+    }
+    assert_eq!(entity_snapshot(&pool, "notes", note.id).await, note_before);
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", note.id).await,
+        note_shares_before
+    );
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", notebook.id).await,
+        notebook_before
+    );
+    assert_eq!(
+        relation_snapshot(&pool, "notebook_shares", "notebook_id", notebook.id).await,
+        notebook_shares_before
+    );
+    let owner_response = client
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), 200);
+    let target_response = client
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(target_response.status(), 200);
 }
 
 // md:fn cross_tenant_store_mutations_leave_victim_unchanged
@@ -282,6 +1057,22 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     tag.vv = VersionVector::from([("victim".to_string(), 1)]);
     tag.last_writer = "victim".into();
     assert!(store.upsert_tag(victim.id, &tag).await.unwrap());
+    let victim_note = store
+        .create_note(None, "victim note", victim.id)
+        .await
+        .unwrap();
+    assert!(store
+        .upsert_note_tag(
+            victim.id,
+            victim_note.id,
+            tag.id,
+            Utc::now(),
+            None,
+            &tag.vv,
+            "victim",
+        )
+        .await
+        .unwrap());
     let bytes = b"victim bytes";
     let mut resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
@@ -303,6 +1094,7 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
 
     let notebook_before = entity_snapshot(&pool, "notebooks", notebook.id).await;
     let tag_before = entity_snapshot(&pool, "tags", tag.id).await;
+    let note_tags_before = relation_snapshot(&pool, "note_tags", "user_id", victim.id).await;
     let resource_before = entity_snapshot(&pool, "resources", resource.id).await;
     let blob_before = store.get_resource_blob(resource.id).await.unwrap().unwrap();
     let mut hostile_notebook = notebook.clone();
@@ -340,6 +1132,30 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
         )
         .await
         .unwrap());
+    let _ = store
+        .upsert_note_tag(
+            attacker.id,
+            victim_note.id,
+            tag.id,
+            Utc::now() + Duration::days(2),
+            None,
+            &hostile_tag.vv,
+            "attacker",
+        )
+        .await
+        .unwrap();
+    let _ = store
+        .upsert_note_tag(
+            attacker.id,
+            victim_note.id,
+            tag.id,
+            Utc::now() + Duration::days(3),
+            Some(Utc::now() + Duration::days(3)),
+            &hostile_tag.vv,
+            "attacker",
+        )
+        .await
+        .unwrap();
     let mut hostile_resource = resource.clone();
     hostile_resource.title = "stolen".into();
     hostile_resource.vv = VersionVector::from([("attacker".to_string(), 99)]);
@@ -369,6 +1185,10 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
         notebook_before
     );
     assert_eq!(entity_snapshot(&pool, "tags", tag.id).await, tag_before);
+    assert_eq!(
+        relation_snapshot(&pool, "note_tags", "user_id", victim.id).await,
+        note_tags_before
+    );
     assert_eq!(
         entity_snapshot(&pool, "resources", resource.id).await,
         resource_before
