@@ -9,9 +9,10 @@ named `evaluator_GITHUB_TOKEN_really_enumerates_the_expected_repository_principa
 `GITHUB_TOKEN`, exercises the worktree copy of the enumerator, compares the result with the
 repository-specific literal `["jsunyermias"]`, and reports failure through the required
 `Check, Test & Lint` job. It skips locally when CI or the token is absent. The test derives
-`owner` and `repo` from `GITHUB_REPOSITORY`, so here it queries `jsunyermias/keeplin-srv`, but its
-literal `["jsunyermias"]` was written for the other repository and matches here only because both
-repositories currently have the same individual owner, not because it is derived.
+`owner` and `repo` from `GITHUB_REPOSITORY`, so here it queries `jsunyermias/keeplin-srv`. Its
+expected set is the literal `["jsunyermias"]`, embedded in a file shared byte-for-byte between
+both repositories; it matches here only because both currently have the same individual owner,
+not because the expected set is derived.
 
 This workflow adds a probe that runs on pushes to `main`, on a daily schedule even when repository
 activity does not start CI (within the roughly 60-day inactivity window before GitHub disables the
