@@ -271,8 +271,8 @@ const RELAY_CHANGE_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
     ("TagUpdate", "relay tags are owner-scoped and have no delegated capability model"),
     ("NoteCreate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
     ("NoteDelete", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
-    ("NoteTagAdd", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
-    ("NoteTagRemove", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NoteTagAdd", "the row is scoped to the authenticated user, but its tag_id reference is not tenant-scoped; known defect keeplin-srv#115"),
+    ("NoteTagRemove", "the row is scoped to the authenticated user, but its tag_id reference is not tenant-scoped; known defect keeplin-srv#115"),
     ("NoteUpdate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
 ];
 
@@ -331,7 +331,14 @@ fn route_registration_is_confined_to_router() {
         } else {
             source
         };
-        for registration in [".route(", ".merge(", ".nest("] {
+        for registration in [
+            ".route(",
+            ".route_service(",
+            ".merge(",
+            ".nest(",
+            ".nest_service(",
+            ".on(",
+        ] {
             assert!(
                 !outside_router.contains(registration),
                 "{} registers {registration} outside http::router",
@@ -1241,6 +1248,48 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     );
 }
 
+// md:fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference
+#[sqlx::test(migrations = "../../migrations")]
+async fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference(pool: PgPool) {
+    let store = Store::new(pool);
+    let attacker = store
+        .create_user("attacker@example.com", "hash", "attacker")
+        .await
+        .unwrap();
+    let victim = store
+        .create_user("victim@example.com", "hash", "victim")
+        .await
+        .unwrap();
+    let attacker_note = store
+        .create_note(None, "attacker note", attacker.id)
+        .await
+        .unwrap();
+    let mut victim_tag = Tag::new("victim tag");
+    victim_tag.vv = VersionVector::from([("victim".to_string(), 1)]);
+    victim_tag.last_writer = "victim".into();
+    assert!(store.upsert_tag(victim.id, &victim_tag).await.unwrap());
+    assert!(store
+        .upsert_note_tag(
+            attacker.id,
+            attacker_note.id,
+            victim_tag.id,
+            Utc::now(),
+            None,
+            &victim_tag.vv,
+            "attacker",
+        )
+        .await
+        .unwrap());
+
+    assert_eq!(
+        store
+            .list_note_tag_ids(attacker.id, attacker_note.id)
+            .await
+            .unwrap(),
+        vec![victim_tag.id]
+    );
+}
+
 // md:fn foreign_and_missing_upserts_are_indistinguishable
 #[sqlx::test(migrations = "../../migrations")]
 async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
@@ -1256,7 +1305,7 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
     let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
     let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
     let victim_time = Utc::now();
-    let losing_time = victim_time - Duration::days(1);
+    let losing_time = victim_time + Duration::days(1);
 
     let mut foreign_notebook = Notebook::new("victim notebook");
     foreign_notebook.vv = stored_vv.clone();
@@ -1340,7 +1389,7 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
     let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
     let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
     let victim_time = Utc::now();
-    let losing_time = victim_time - Duration::days(1);
+    let losing_time = victim_time + Duration::days(1);
     let mut resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
         "victim resource",

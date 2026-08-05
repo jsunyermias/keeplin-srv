@@ -300,8 +300,8 @@ const RELAY_CHANGE_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
     ("TagUpdate", "relay tags are owner-scoped and have no delegated capability model"),
     ("NoteCreate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
     ("NoteDelete", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
-    ("NoteTagAdd", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
-    ("NoteTagRemove", "relay note-tag links are confined to the authenticated user's namespace and carry no delegated principal or capability grant"),
+    ("NoteTagAdd", "the row is scoped to the authenticated user, but its tag_id reference is not tenant-scoped; known defect keeplin-srv#115"),
+    ("NoteTagRemove", "the row is scoped to the authenticated user, but its tag_id reference is not tenant-scoped; known defect keeplin-srv#115"),
     ("NoteUpdate", "note variants are not materialized by the relay and therefore reach no capability-governed mutation"),
 ];
 
@@ -414,7 +414,14 @@ fn route_registration_is_confined_to_router() {
         } else {
             source
         };
-        for registration in [".route(", ".merge(", ".nest("] {
+        for registration in [
+            ".route(",
+            ".route_service(",
+            ".merge(",
+            ".nest(",
+            ".nest_service(",
+            ".on(",
+        ] {
             assert!(
                 !outside_router.contains(registration),
                 "{} registers {registration} outside http::router",
@@ -425,7 +432,7 @@ fn route_registration_is_confined_to_router() {
 }
 ```
 
-**What it does** — Scans every Rust module in the server crate and rejects `.route`, `.merge`, or `.nest` registrations outside the delimited `http::router` body, keeping the handler inventory complete when routing code evolves.
+**What it does** — Scans every Rust module in the server crate and rejects `.route`, `.route_service`, `.merge`, `.nest`, `.nest_service`, or `.on` registrations outside the delimited `http::router` body, keeping the handler inventory complete when routing code evolves. It intentionally omits `.any` because the current `collab.rs` legitimately uses `Iterator::any` outside the router, which would be a false positive for this textual guard.
 
 **Dependencies** — `CARGO_MANIFEST_DIR`, `std::fs::read_dir`, and the `router`/`PROTOCOL_VERSION` declarations locate and delimit source; expects all route composition to remain literal inside `http::router`.
 
@@ -1623,6 +1630,66 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
 
 ---
 
+## fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference
+
+**Identification** — PostgreSQL characterization test for the known cross-tenant note-tag oracle tracked by keeplin-srv#115; marker `// md:fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference
+#[sqlx::test(migrations = "../../migrations")]
+async fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference(pool: PgPool) {
+    let store = Store::new(pool);
+    let attacker = store
+        .create_user("attacker@example.com", "hash", "attacker")
+        .await
+        .unwrap();
+    let victim = store
+        .create_user("victim@example.com", "hash", "victim")
+        .await
+        .unwrap();
+    let attacker_note = store
+        .create_note(None, "attacker note", attacker.id)
+        .await
+        .unwrap();
+    let mut victim_tag = Tag::new("victim tag");
+    victim_tag.vv = VersionVector::from([("victim".to_string(), 1)]);
+    victim_tag.last_writer = "victim".into();
+    assert!(store.upsert_tag(victim.id, &victim_tag).await.unwrap());
+    assert!(store
+        .upsert_note_tag(
+            attacker.id,
+            attacker_note.id,
+            victim_tag.id,
+            Utc::now(),
+            None,
+            &victim_tag.vv,
+            "attacker",
+        )
+        .await
+        .unwrap());
+
+    assert_eq!(
+        store
+            .list_note_tag_ids(attacker.id, attacker_note.id)
+            .await
+            .unwrap(),
+        vec![victim_tag.id]
+    );
+}
+```
+
+**What it does** — Characterizes, but does not bless, known defect keeplin-srv#115: a note-tag row owned by the attacker may reference a live tag owned by the victim, and `list_note_tag_ids` currently exposes that foreign UUID. The exact-vector assertion is deliberately temporary and must fail when #115 correctly filters the referenced tag by tenant, forcing that fixing PR to replace this characterization with the secure empty-result assertion.
+
+**Dependencies** — `Store::{create_user, create_note, upsert_tag, upsert_note_tag, list_note_tag_ids}` constructs the cross-tenant reference and observes it; expects the current defective join to return the victim's live tag UUID until keeplin-srv#115 changes that behavior.
+
+**Used by** — `cargo test` and CI as an explicit known-defect fixture that must be revised by keeplin-srv#115.
+
+**Repeated context** — This is a defect fixation, not a security guarantee. The row's `user_id` is attacker-scoped, but its `tag_id` reference is not tenant-scoped.
+
+---
+
 ## fn foreign_and_missing_upserts_are_indistinguishable
 
 **Identification** — PostgreSQL upsert anti-oracle regression; marker `// md:fn foreign_and_missing_upserts_are_indistinguishable`.
@@ -1645,7 +1712,7 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
     let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
     let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
     let victim_time = Utc::now();
-    let losing_time = victim_time - Duration::days(1);
+    let losing_time = victim_time + Duration::days(1);
 
     let mut foreign_notebook = Notebook::new("victim notebook");
     foreign_notebook.vv = stored_vv.clone();
@@ -1715,13 +1782,13 @@ async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
 }
 ```
 
-**What it does** — Stores notebook, tag, and resource metadata at vector `{victim: 2}`, then submits an older `{victim: 1}` object as the attacker against both the foreign UUID and a fresh UUID, requiring both outcomes to be `true`.
+**What it does** — Stores notebook, tag, and resource metadata at vector `{victim: 2}`, then submits a chronologically newer but vectorially dominated `{victim: 1}` object as the attacker against both the foreign UUID and a fresh UUID, requiring both outcomes to be `true`.
 
 **Dependencies** — `Store::{upsert_notebook, upsert_tag, upsert_resource_meta}`; expects tenant conflicts and absent IDs to be observationally indistinguishable while preserving tenant-owned rows.
 
 **Used by** — `cargo test` and CI; anti-enumeration verifier for F1.
 
-**Repeated context** — Strict vector domination, reinforced by an older incoming timestamp, guarantees the conflict loser branch is exercised if a foreign row leaks through the ownership-scoped read; no timestamp tie-break decides the result.
+**Repeated context** — The newer incoming timestamp points opposite the strict vector domination, so this test fixes vector comparison as the primary resolution rule rather than accidentally allowing timestamp-first resolution.
 
 ---
 
@@ -1747,7 +1814,7 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
     let stored_vv = VersionVector::from([("victim".to_string(), 2)]);
     let losing_vv = VersionVector::from([("victim".to_string(), 1)]);
     let victim_time = Utc::now();
-    let losing_time = victim_time - Duration::days(1);
+    let losing_time = victim_time + Duration::days(1);
     let mut resource = Resource::new(
         SYSTEM_RESOURCE_NOTE_ID,
         "victim resource",
@@ -1841,7 +1908,7 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
 }
 ```
 
-**What it does** — Submits a strictly dominated `{victim: 1}` delete against entities stored at `{victim: 2}`. Notebook and tag foreign/missing outcomes must both be `true`; resource-delete foreign/missing outcomes must both remain `false`, and blob-write outcomes remain indistinguishable.
+**What it does** — Submits a chronologically newer but strictly vectorially dominated `{victim: 1}` delete against entities stored at `{victim: 2}`. Notebook and tag foreign/missing outcomes must both be `true`; resource-delete foreign/missing outcomes must both remain `false`, and blob-write outcomes remain indistinguishable.
 
 **Dependencies** — `Store::{delete_notebook, delete_tag, delete_resource, put_resource_blob}`; expects each to return the same non-mutating outcome across foreign and absent IDs.
 
@@ -1903,5 +1970,6 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 19 | `fn cross_tenant_http_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_http_mutations_leave_victim_unchanged` |
 | 20 | `fn denied_http_capabilities_leave_entities_unchanged` | `// md:fn denied_http_capabilities_leave_entities_unchanged` |
 | 21 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
-| 22 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
-| 23 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |
+| 22 | `fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference` | `// md:fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference` |
+| 23 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
+| 24 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |

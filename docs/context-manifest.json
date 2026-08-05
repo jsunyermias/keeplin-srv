@@ -1828,6 +1828,7 @@
           "fn cross_tenant_http_mutations_leave_victim_unchanged",
           "fn denied_http_capabilities_leave_entities_unchanged",
           "fn cross_tenant_store_mutations_leave_victim_unchanged",
+          "fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference",
           "fn foreign_and_missing_upserts_are_indistinguishable",
           "fn foreign_and_missing_mutations_are_indistinguishable"
         ]
