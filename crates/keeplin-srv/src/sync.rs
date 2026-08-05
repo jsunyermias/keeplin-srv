@@ -364,7 +364,11 @@ async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Val
             Change::ResourceCreate { resource, data } => {
                 match state.store.upsert_resource_meta(user_id, &resource).await {
                     Ok(true) => match data {
-                        Some(bytes) => state.store.put_resource_blob(resource.id, &bytes).await,
+                        Some(bytes) => state
+                            .store
+                            .put_resource_blob(user_id, resource.id, &bytes)
+                            .await
+                            .map(drop),
                         None => Ok(()),
                     },
                     Ok(false) => Ok(()),
@@ -378,10 +382,12 @@ async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Val
                 last_writer,
             } => state
                 .store
-                .delete_resource(id, deleted_at, &vv, &last_writer)
+                .delete_resource(user_id, id, deleted_at, &vv, &last_writer)
                 .await
                 .map(drop),
-            _ => Ok(()),
+            Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {
+                Ok(())
+            }
         };
         if let Err(e) = result {
             tracing::warn!(error = %e, %user_id, "materialize: failed to apply change");

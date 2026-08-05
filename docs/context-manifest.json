@@ -1775,6 +1775,89 @@
     {
       "companion": {
         "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/tests/authorization.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": [
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "Every mutating route and materialized relay variant is either tied to an existing negative test or carries an explicit gap/non-applicability reason."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A cross-tenant attempt leaves every byte represented by the victim row and resource blob unchanged."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "Existing foreign and absent IDs produce indistinguishable mutation outcomes."
+          }
+        ]
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "Overview",
+          "authorization_case_inventory",
+          "fn mutating_handlers",
+          "fn source_handlers",
+          "fn route_registration_is_confined_to_router",
+          "fn source_relay_changes",
+          "fn authorization_inventory_is_complete",
+          "fn inventory_classifications_are_disjoint_and_cases_are_tests",
+          "fn source_inventory_detects_an_uncovered_route",
+          "fn put_resource_data_checks_blob_write_result",
+          "fn relay_materialization_uses_authenticated_session_identity",
+          "fn note_changes_are_explicitly_non_materializing",
+          "fn authorization_test_config",
+          "fn spawn_authorization_server",
+          "fn register_and_login",
+          "fn authed_json",
+          "fn entity_snapshot",
+          "fn relation_snapshot",
+          "fn cross_tenant_http_mutations_leave_victim_unchanged",
+          "fn denied_http_capabilities_leave_entities_unchanged",
+          "fn cross_tenant_store_mutations_leave_victim_unchanged",
+          "fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference",
+          "fn foreign_and_missing_upserts_are_indistinguishable",
+          "fn foreign_and_missing_mutations_are_indistinguishable"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`tests/authorization.rs` — negative authorization completeness and tenant-isolation regressions"
+      },
+      "risk": {
+        "basis": [
+          "auth"
+        ],
+        "origin": "INFERRED",
+        "value": "security"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/tests/authorization.rs"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test -p keeplin-srv"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
         "value": "crates/keeplin-srv/tests/collab.md"
       },
       "cross_repo_contracts": {

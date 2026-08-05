@@ -3303,9 +3303,10 @@ the server-side hook where the note delete is applied.
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         if let Some(row) = sqlx::query(
-            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(nb.id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -3328,7 +3329,8 @@ the server-side hook where the note delete is applied.
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, alias = EXCLUDED.alias,
                    updated_at = EXCLUDED.updated_at, deleted_at = EXCLUDED.deleted_at,
-                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer"#,
+                   vv = EXCLUDED.vv, last_writer = EXCLUDED.last_writer
+               WHERE notebooks.user_id = EXCLUDED.user_id"#,
         )
         .bind(nb.id)
         .bind(user_id)
@@ -3346,7 +3348,7 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — create/update if it wins.
+**What it does** — Creates or updates a notebook only inside `user_id`. Conflict-state reads and writes both carry the tenant predicate. A colliding foreign ID is a no-op reported as `true`, matching a fresh insert and preventing an existence oracle; a losing same-tenant version still returns `false` before the insert.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3372,9 +3374,10 @@ the server-side hook where the note delete is applied.
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         let existed = if let Some(row) = sqlx::query(
-            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 FOR UPDATE",
+            "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -3395,9 +3398,9 @@ the server-side hook where the note delete is applied.
         };
         if existed {
             sqlx::query(
-                "UPDATE notebooks SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+                "UPDATE notebooks SET deleted_at = $3, updated_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
             )
-            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
             .execute(&mut *tx).await?;
         } else {
             sqlx::query(
@@ -3413,7 +3416,7 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — tombstone if it wins; an **unknown** notebook gets a minimal tombstone row so a later stale create/update cannot resurrect it.
+**What it does** — Tombstones a notebook only inside `user_id` if the incoming version wins; an **unknown or foreign** notebook gets the indistinguishable minimal-insert attempt, whose global-ID conflict is a no-op, so a later stale same-tenant create/update cannot resurrect a genuinely unknown ID.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3436,8 +3439,9 @@ the server-side hook where the note delete is applied.
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         if let Some(row) =
-            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
+                .bind(user_id)
                 .fetch_optional(&mut *tx)
                 .await?
         {
@@ -3459,7 +3463,8 @@ the server-side hook where the note delete is applied.
                ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title, updated_at = EXCLUDED.updated_at,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
-                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system"#,
+                   last_writer = EXCLUDED.last_writer, system = EXCLUDED.system
+               WHERE tags.user_id = EXCLUDED.user_id"#,
         )
         .bind(tag.id)
         .bind(user_id)
@@ -3477,10 +3482,11 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — same pattern for tags. `system` (issue #128) is persisted as `$9` and
+**What it does** — Applies the tenant-scoped conflict pattern for tags. `system` (issue #128) is persisted as `$9` and
 refreshed on conflict (`system = EXCLUDED.system`), so a `TagUpdate` that flips the flag
 converges like any other field. The whole core `Tag` reaches here via `materialize`, so the
-flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
+flag rides the existing `TagCreate`/`TagUpdate` changes with no new op. A foreign-ID conflict
+is a no-op reported like a fresh insert, while a losing same-tenant version remains `false`.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3506,8 +3512,9 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
         let existed = if let Some(row) =
-            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 FOR UPDATE")
+            sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(id)
+                .bind(user_id)
                 .fetch_optional(&mut *tx)
                 .await?
         {
@@ -3528,9 +3535,9 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         };
         if existed {
             sqlx::query(
-                "UPDATE tags SET deleted_at = $2, updated_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+                "UPDATE tags SET deleted_at = $3, updated_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
             )
-            .bind(id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
+            .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
             .execute(&mut *tx).await?;
         } else {
             sqlx::query(
@@ -3546,7 +3553,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     }
 ```
 
-**What it does** — same pattern for tags.
+**What it does** — Tombstones a tag only when its ID and authenticated `user_id` both match; foreign and unknown IDs follow the same no-op conflict path.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3642,9 +3649,10 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         let mut tx = self.pool.begin().await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
-             FROM resources WHERE id = $1 FOR UPDATE",
+             FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(r.id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         {
@@ -3669,7 +3677,8 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
                    file_name = EXCLUDED.file_name, size = EXCLUDED.size,
                    deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
                    last_writer = EXCLUDED.last_writer, duration_ms = EXCLUDED.duration_ms,
-                   width = EXCLUDED.width, height = EXCLUDED.height"#,
+                   width = EXCLUDED.width, height = EXCLUDED.height
+               WHERE resources.user_id = EXCLUDED.user_id"#,
         )
         .bind(r.id)
         .bind(user_id)
@@ -3692,7 +3701,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     }
 ```
 
-**What it does** — create if it wins; resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately. `note_id` (issue #125) is written **only in the `INSERT`** and deliberately left out of the `ON CONFLICT DO UPDATE` set, so an attachment's owning note is **immutable** after creation.
+**What it does** — Creates or updates metadata only inside `user_id`; foreign-ID collisions neither expose their vector state nor update them and are reported like a fresh insert to prevent an existence oracle. A losing same-tenant version still returns `false` before the insert. Resolution timestamp is `deleted_at ?? created_at`, matching keeplin-core (resources carry no `updated_at`). The binary is uploaded separately. `note_id` (issue #125) is written **only in the `INSERT`** and deliberately left out of the `ON CONFLICT DO UPDATE` set, so an attachment's owning note is **immutable** after creation.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3710,6 +3719,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     // md:impl Store > fn delete_resource
     pub async fn delete_resource(
         &self,
+        user_id: Uuid,
         id: Uuid,
         deleted_at: DateTime<Utc>,
         vv: &VersionVector,
@@ -3718,9 +3728,10 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
         let mut tx = self.pool.begin().await?;
         let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer
-             FROM resources WHERE id = $1 FOR UPDATE",
+             FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
         .bind(id)
+        .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
         else {
@@ -3738,9 +3749,10 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
             return Ok(false);
         }
         sqlx::query(
-            "UPDATE resources SET deleted_at = $2, vv = $3, last_writer = $4 WHERE id = $1",
+            "UPDATE resources SET deleted_at = $3, vv = $4, last_writer = $5 WHERE id = $1 AND user_id = $2",
         )
         .bind(id)
+        .bind(user_id)
         .bind(deleted_at)
         .bind(Json(vv))
         .bind(last_writer)
@@ -3751,7 +3763,7 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
     }
 ```
 
-**What it does** — tombstone if it wins; an unknown resource is a no-op (`false`) — a later create arrives with its own vv and resolves normally.
+**What it does** — Tombstones only a resource owned by `user_id` if its version wins; an unknown or foreign resource is the same no-op (`false`) without reading its conflict state.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3767,20 +3779,27 @@ flag rides the existing `TagCreate`/`TagUpdate` changes with no new op.
 
 ```rust
     // md:impl Store > fn put_resource_blob
-    pub async fn put_resource_blob(&self, resource_id: Uuid, data: &[u8]) -> Result<(), AppError> {
-        sqlx::query(
-            r#"INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2)
+    pub async fn put_resource_blob(
+        &self,
+        user_id: Uuid,
+        resource_id: Uuid,
+        data: &[u8],
+    ) -> Result<bool, AppError> {
+        let result = sqlx::query(
+            r#"INSERT INTO resource_blobs (resource_id, data)
+               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
                ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
         )
         .bind(resource_id)
+        .bind(user_id)
         .bind(data)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 ```
 
-**What it does** — store/replace the binary (FK requires the metadata).
+**What it does** — Stores or replaces the binary only when the resource metadata belongs to `user_id`. The ownership predicate and upsert are one statement, so foreign and missing IDs both return `false` and cannot race a separate authorization check.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 

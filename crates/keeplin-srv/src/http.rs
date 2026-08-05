@@ -740,7 +740,13 @@ async fn put_resource_data(
             )));
         }
     }
-    state.store.put_resource_blob(id, &body).await?;
+    let written = state
+        .store
+        .put_resource_blob(user.user_id, id, &body)
+        .await?;
+    if !written {
+        return Err(AppError::NotFound);
+    }
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
 

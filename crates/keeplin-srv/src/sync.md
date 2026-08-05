@@ -832,7 +832,11 @@ async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Val
             Change::ResourceCreate { resource, data } => {
                 match state.store.upsert_resource_meta(user_id, &resource).await {
                     Ok(true) => match data {
-                        Some(bytes) => state.store.put_resource_blob(resource.id, &bytes).await,
+                        Some(bytes) => state
+                            .store
+                            .put_resource_blob(user_id, resource.id, &bytes)
+                            .await
+                            .map(drop),
                         None => Ok(()),
                     },
                     Ok(false) => Ok(()),
@@ -846,10 +850,12 @@ async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Val
                 last_writer,
             } => state
                 .store
-                .delete_resource(id, deleted_at, &vv, &last_writer)
+                .delete_resource(user_id, id, deleted_at, &vv, &last_writer)
                 .await
                 .map(drop),
-            _ => Ok(()),
+            Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {
+                Ok(())
+            }
         };
         if let Err(e) = result {
             tracing::warn!(error = %e, %user_id, "materialize: failed to apply change");
@@ -872,14 +878,17 @@ truth (the client DB is a cache; a wiped device rehydrates from REST). Mapping:
   binary inline (`data: Some`), store it to `resource_blobs` — backward
   compatibility with older clients; new clients upload via
   `PUT /api/resources/:id/data` and send `data: None`. The blob is stored only when
-  the meta upsert reports the incoming version won (`Ok(true)`).
+  the tenant-scoped meta upsert reports the incoming version won (`Ok(true)`), and the
+  blob statement independently requires that the same `user_id` owns the metadata.
 - `ResourceDelete` → `store.delete_resource`.
-- **`Note*` changes and anything unparseable → skipped**: notes are materialised by
+- **`Note*` changes → explicitly skipped, and anything unparseable is discarded before the
+  match**: notes are materialised by
   the collaborative channel, and unknown payloads preserve the opaque-relay
-  behaviour. (Silent skipping of *known-but-newer* variants is the drift hazard
-  tracked as issue #28.)
+  behaviour. The match is deliberately exhaustive, so adding a core `Change` variant fails
+  compilation until its relay behavior and authorization cases are registered.
 
-Each store call resolves by version vector against the stored row using
+Each store call first scopes both conflict reads and writes by the authenticated session's
+`user_id`, then resolves by version vector against that tenant's stored row using
 keeplin-core's `note_log::resolve`, so the server converges to the **same winner**
 every client computes. Failures are logged (`warn`) and the loop continues.
 
