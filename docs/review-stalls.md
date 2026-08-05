@@ -199,6 +199,23 @@ entry to Cleared with the exit that was taken and a link to it.
 | Detected | Pull request | Stuck on | Rounds without progress | Exit taken |
 |---|---|---|---|---|
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
+| 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
+
+[keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
+is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
+**implements** the exit. It escalated on the repeated-state brake rather than the non-shrinking one:
+successive evaluations ran against an unchanged tree, so the loop state repeated and the blocking
+set was never going to shrink in between.
+
+The reason it cannot open its own gate is mechanical. The evaluator runs from the **default
+branch**, so the authorization path that would close `GENESIS` is the one on `main` — not the one
+that pull request adds. The exit becomes available to the *next* pull request once the pair merges,
+and to this one never.
+
+Recorded so a reader who finds an implementation blocked by the defect it fixes knows it was
+understood rather than overlooked. It is also why the row above, for keeplin-srv#114, still has no
+exit: that pull request is merged, and re-evaluating a closed pull request is a route this decision
+deliberately left undefined.
 
 ## Cleared
 
