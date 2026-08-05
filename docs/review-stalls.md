@@ -198,7 +198,7 @@ entry to Cleared with the exit that was taken and a link to it.
 
 | Detected | Pull request | Stuck on | Rounds without progress | Exit taken |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | GENESIS | 3 | — |
 
 ## Cleared
 
