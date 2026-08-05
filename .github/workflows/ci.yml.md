@@ -40,7 +40,7 @@ the steps run.
 | `cargo test --workspace` | unit + integration tests pass (against the PG service) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | zero clippy warnings (`--all-targets` also subsumes `cargo check`, so no separate check step) |
 | `cargo audit` | no known-vulnerable dependencies (the tool is installed as a prebuilt binary via `taiki-e/install-action@v2`, not compiled from source) |
-| `node --test` over both governance suites (**runs last**, so a governance regression does not abort the job before docs, cargo and audit have reported) | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, trusted-evaluator isolation, verified disposal and the bounded-journal limitation, including negative cases |
+| `node --test` over both governance suites with the job's read-only `GITHUB_TOKEN` (**runs last**, so a governance regression does not abort the job before docs, cargo and audit have reported) | the reviewed and maintainer-waiver paths, and the convergence, recurrence, advisory and stagnation paths, trusted-evaluator isolation, verified disposal, a real exhaustive collaborator enumeration with the evaluator credential, and the bounded-journal limitation, including negative cases |
 
 Caching is via `Swatinem/rust-cache@v2`; the toolchain is stable with `clippy` + `rustfmt`.
 
