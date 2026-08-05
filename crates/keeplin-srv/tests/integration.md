@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use axum::{Json, Router};
 use keeplin_core::{
-    models::Note,
+    models::{Change, Note},
     storage::{db::DbBackend, NoteRepository, NotebookRepository, SyncBackend},
 };
 use keeplin_srv::{config::Config, http::router, state::AppState};
@@ -248,14 +248,68 @@ Marker `// md:fn epoch`. Unix epoch — the "everything" bound for
 
 ```rust
 // md:fn push
-async fn push(dev: &DbBackend) {
+async fn push(dev: &DbBackend, pool: &PgPool) {
     let changes = dev.get_changes_since(epoch()).await.unwrap();
-    dev.send_changes(changes).await.unwrap();
+    dev.send_changes(changes.clone()).await.unwrap();
+    for _ in 0..500 {
+        let journaled: bool = match changes.last() {
+            Some(change) => {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes WHERE payload = $1)")
+                    .bind(serde_json::to_value(change).unwrap())
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            None => true,
+        };
+        let materialized = match changes.iter().rev().find(|change| {
+            matches!(
+                change,
+                Change::NotebookCreate { .. }
+                    | Change::NotebookUpdate { .. }
+                    | Change::NotebookDelete { .. }
+            )
+        }) {
+            Some(Change::NotebookCreate { notebook })
+            | Some(Change::NotebookUpdate { notebook }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM notebooks WHERE id = $1 AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(notebook.id)
+            .bind(serde_json::to_value(&notebook.vv).unwrap())
+            .bind(&notebook.last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::NotebookDelete { id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM notebooks WHERE id = $1 AND deleted_at IS NOT NULL AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            _ => Ok(true),
+        }
+        .unwrap();
+        if journaled && materialized {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "server did not journal the final change and materialize the final notebook change from {} pushed changes within 10 seconds",
+        changes.len()
+    );
 }
 ```
 
-Marker `// md:fn push`. Sends every local change of a device to the relay (no
-grace sleep — tests that need persistence add their own waits/polls).
+Marker `// md:fn push`. Sends every local change of a device to the relay, then
+polls every 20 ms until the final payload is in the server journal and the final
+notebook change, if any, is represented by the expected vector, writer and live or
+tombstoned state. Since materialisation processes the batch sequentially, that final
+notebook proves all preceding notebook changes were processed; note-only batches use
+the journal condition because the server deliberately does not materialise note
+changes. It returns as soon as those effects are observable, including immediately
+for a deduplicated resend, or panics after 10 seconds with the expected change count.
 
 ### fn sync_until
 
@@ -301,7 +355,7 @@ negatively (isolation tests assert it returns `false`).
 // md:fn note_syncs_live_between_two_devices
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_syncs_live_between_two_devices(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
@@ -309,7 +363,7 @@ async fn note_syncs_live_between_two_devices(pool: PgPool) {
     let note = Note::new("Shared", "over the wire");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     assert!(
         sync_until(&b, id, None).await,
@@ -343,7 +397,7 @@ async fn relay_batch_propagates_across_instances(pool: PgPool) {
     let note = Note::new("Cross", "over two instances");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     assert!(
         sync_until(&b, id, None).await,
@@ -366,7 +420,7 @@ delivered **live** to B on instance B via the `sync_batch` NOTIFY wake (issue #4
 // md:fn update_propagates_and_converges
 #[sqlx::test(migrations = "../../migrations")]
 async fn update_propagates_and_converges(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
@@ -374,14 +428,14 @@ async fn update_propagates_and_converges(pool: PgPool) {
     let mut note = Note::new("v1", "body v1");
     let id = note.id;
     a.create_note(note.clone()).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     assert!(sync_until(&b, id, None).await, "B must receive the create");
 
     note.title = "v2".to_string();
     note.body = "body v2".to_string();
     note.updated_at = chrono::Utc::now();
     a.update_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     assert!(
         sync_until(&b, id, Some("body v2")).await,
@@ -402,14 +456,14 @@ update (new title/body/timestamp) converges on B (`sync_until` with the v2 body)
 // md:fn device_connecting_later_receives_backlog
 #[sqlx::test(migrations = "../../migrations")]
 async fn device_connecting_later_receives_backlog(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
 
     let note = Note::new("Persisted", "written while B did not exist");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
@@ -433,7 +487,7 @@ catch-up), not live fan-out.
 // md:fn users_do_not_see_each_others_changes
 #[sqlx::test(migrations = "../../migrations")]
 async fn users_do_not_see_each_others_changes(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     register(addr, "b@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
@@ -442,7 +496,7 @@ async fn users_do_not_see_each_others_changes(pool: PgPool) {
     let note = Note::new("Private", "user A only");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     assert!(
         !sync_until(&b, id, None).await,
@@ -464,15 +518,15 @@ B never receives A's changes (per-user journal/fan-out isolation) —
 // md:fn duplicate_batches_are_deduplicated
 #[sqlx::test(migrations = "../../migrations")]
 async fn duplicate_batches_are_deduplicated(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
 
     let note = Note::new("Once", "sent twice");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
-    push(&a).await;
+    push(&a, &pool).await;
+    push(&a, &pool).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let b = device(addr, &login(addr, "a@example.com", "phone").await).await;
@@ -495,13 +549,13 @@ dedup by `(user, batch_id, index)` plus the client's idempotent `apply_change`.
 // md:fn sender_never_receives_its_own_changes_back
 #[sqlx::test(migrations = "../../migrations")]
 async fn sender_never_receives_its_own_changes_back(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
 
     let note = Note::new("Echo?", "should not come back");
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let echoed = a.receive_changes().await.unwrap();
@@ -524,14 +578,14 @@ Marker `// md:fn sender_never_receives_its_own_changes_back`. After pushing, A's
 // md:fn invalid_token_gets_no_data
 #[sqlx::test(migrations = "../../migrations")]
 async fn invalid_token_gets_no_data(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "laptop").await).await;
 
     let note = Note::new("Secret", "authenticated only");
     let id = note.id;
     a.create_note(note).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let intruder = device(addr, "not-a-valid-jwt").await;
@@ -623,7 +677,7 @@ listing shows 2; wrong password → 401.
 // md:fn history_endpoints_serve_versions_from_the_server_journal
 #[sqlx::test(migrations = "../../migrations")]
 async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "laptop").await;
     let a = device(addr, &token).await;
@@ -641,7 +695,7 @@ async fn history_endpoints_serve_versions_from_the_server_journal(pool: PgPool) 
     let mut renamed = nb.clone();
     renamed.title = "new".into();
     a.update_notebook(renamed).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let client = reqwest::Client::new();
     let get = |path: String| {
@@ -1537,7 +1591,7 @@ Marker `// md:fn notebook_history`. Helper: authenticated
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     use keeplin_core::storage::NotebookRepository;
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     register(addr, "b@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "dev-a").await).await;
@@ -1550,7 +1604,7 @@ async fn notebook_history_is_visible_to_shared_collaborators(pool: PgPool) {
     let mut renamed = nb.clone();
     renamed.title = "new".into();
     a.update_notebook(renamed).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let client = reqwest::Client::new();
     let mut shared = false;
@@ -1607,7 +1661,7 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     use keeplin_core::storage::NotebookRepository;
     let mut config = test_config();
     config.history_since_access = true;
-    let addr = spawn_server_with_config(pool, config).await;
+    let addr = spawn_server_with_config(pool.clone(), config).await;
     register(addr, "a@example.com").await;
     register(addr, "b@example.com").await;
     let a = device(addr, &login(addr, "a@example.com", "dev-a").await).await;
@@ -1618,7 +1672,7 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
         .create_notebook(keeplin_core::models::Notebook::new("v1"))
         .await
         .unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
     let code = client
@@ -1636,7 +1690,7 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
     renamed.title = "v2".into();
     renamed.updated_at = chrono::Utc::now();
     a.update_notebook(renamed).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let tb = login(addr, "b@example.com", "dev-b").await;
     let mut b_versions = Vec::new();
@@ -1652,7 +1706,7 @@ async fn history_visibility_since_access_windows_a_collaborator(pool: PgPool) {
         "collaborator sees only post-access versions, got {b_versions:?}"
     );
 
-    push(&a).await;
+    push(&a, &pool).await;
     let mut a_versions = Vec::new();
     for _ in 0..50 {
         a_versions = notebook_history(addr, &ta, nb.id).await;

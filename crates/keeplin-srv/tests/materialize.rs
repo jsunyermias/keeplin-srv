@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Router;
 use chrono::{Duration, Utc};
 use keeplin_core::{
-    models::{Note, NoteTag, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
+    models::{Change, Note, NoteTag, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::{
         db::DbBackend, note_log::VersionVector, NoteRepository, NotebookRepository,
         ResourceRepository, SyncBackend, TagRepository,
@@ -108,10 +108,108 @@ fn epoch() -> chrono::DateTime<chrono::Utc> {
 }
 
 // md:fn push
-async fn push(dev: &DbBackend) {
+async fn push(dev: &DbBackend, pool: &PgPool) {
     let changes = dev.get_changes_since(epoch()).await.unwrap();
-    dev.send_changes(changes).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    dev.send_changes(changes.clone()).await.unwrap();
+    for _ in 0..500 {
+        let journaled: bool = match changes.last() {
+            Some(change) => {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes WHERE payload = $1)")
+                    .bind(serde_json::to_value(change).unwrap())
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            None => true,
+        };
+        let materialized = match changes.iter().rev().find(|change| {
+            !matches!(
+                change,
+                Change::NoteCreate { .. }
+                    | Change::NoteUpdate { .. }
+                    | Change::NoteDelete { .. }
+            )
+        }) {
+            Some(Change::NotebookCreate { notebook })
+            | Some(Change::NotebookUpdate { notebook }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM notebooks WHERE id = $1 AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(notebook.id)
+            .bind(serde_json::to_value(&notebook.vv).unwrap())
+            .bind(&notebook.last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::NotebookDelete { id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM notebooks WHERE id = $1 AND deleted_at IS NOT NULL AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::TagCreate { tag }) | Some(Change::TagUpdate { tag }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE id = $1 AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(tag.id)
+            .bind(serde_json::to_value(&tag.vv).unwrap())
+            .bind(&tag.last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::TagDelete { id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE id = $1 AND deleted_at IS NOT NULL AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::NoteTagAdd { note_id, tag_id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM note_tags WHERE note_id = $1 AND tag_id = $2 AND deleted_at IS NULL AND vv = $3 AND last_writer = $4)",
+            )
+            .bind(note_id)
+            .bind(tag_id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::NoteTagRemove { note_id, tag_id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM note_tags WHERE note_id = $1 AND tag_id = $2 AND deleted_at IS NOT NULL AND vv = $3 AND last_writer = $4)",
+            )
+            .bind(note_id)
+            .bind(tag_id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::ResourceCreate { resource, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM resources WHERE id = $1 AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(resource.id)
+            .bind(serde_json::to_value(&resource.vv).unwrap())
+            .bind(&resource.last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::ResourceDelete { id, vv, last_writer, .. }) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NOT NULL AND vv = $2 AND last_writer = $3)",
+            )
+            .bind(id)
+            .bind(serde_json::to_value(vv).unwrap())
+            .bind(last_writer)
+            .fetch_one(pool)
+            .await,
+            Some(Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. })
+            | None => Ok(true),
+        }
+        .unwrap();
+        if journaled && materialized {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "server did not journal the final change and materialize the final server-owned change from {} pushed changes within 10 seconds",
+        changes.len()
+    );
 }
 
 // md:fn get_json
@@ -130,13 +228,13 @@ async fn get_json(addr: SocketAddr, token: &str, path: &str) -> Value {
 // md:fn notebook_materialises_and_is_served
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_materialises_and_is_served(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
 
     let notebook = a.create_notebook(Notebook::new("Work")).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let notebooks = get_json(addr, &token, "/api/notebooks").await;
     let arr = notebooks.as_array().unwrap();
@@ -148,7 +246,7 @@ async fn notebook_materialises_and_is_served(pool: PgPool) {
 // md:fn tag_and_association_materialise
 #[sqlx::test(migrations = "../../migrations")]
 async fn tag_and_association_materialise(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
@@ -161,7 +259,7 @@ async fn tag_and_association_materialise(pool: PgPool) {
     })
     .await
     .unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let tags = get_json(addr, &token, "/api/tags").await;
     assert_eq!(tags.as_array().unwrap().len(), 1);
@@ -176,7 +274,7 @@ async fn tag_and_association_materialise(pool: PgPool) {
 // md:fn removing_a_tag_association_tombstones_it
 #[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_tag_association_tombstones_it(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
@@ -189,9 +287,9 @@ async fn removing_a_tag_association_tombstones_it(pool: PgPool) {
     })
     .await
     .unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     a.remove_note_tag(note.id, tag.id).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let note_tags = get_json(addr, &token, &format!("/api/notes/{}/tags", note.id)).await;
     assert!(
@@ -203,7 +301,7 @@ async fn removing_a_tag_association_tombstones_it(pool: PgPool) {
 // md:fn resource_metadata_and_blob_materialise
 #[sqlx::test(migrations = "../../migrations")]
 async fn resource_metadata_and_blob_materialise(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
@@ -222,7 +320,7 @@ async fn resource_metadata_and_blob_materialise(pool: PgPool) {
         )
         .await
         .unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let resources = get_json(addr, &token, "/api/resources").await;
     let arr = resources.as_array().unwrap();
@@ -253,7 +351,7 @@ async fn resource_metadata_and_blob_materialise(pool: PgPool) {
 // md:fn streaming_blob_upload_then_download
 #[sqlx::test(migrations = "../../migrations")]
 async fn streaming_blob_upload_then_download(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
@@ -265,7 +363,7 @@ async fn streaming_blob_upload_then_download(pool: PgPool) {
         )
         .await
         .unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let new_bytes = vec![9u8; 4096];
     let client = reqwest::Client::new();
@@ -322,15 +420,15 @@ async fn uploading_to_unknown_resource_is_rejected(pool: PgPool) {
 // md:fn deleting_a_notebook_removes_it_from_listings
 #[sqlx::test(migrations = "../../migrations")]
 async fn deleting_a_notebook_removes_it_from_listings(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
 
     let notebook = a.create_notebook(Notebook::new("Temp")).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
     a.delete_notebook(notebook.id).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let notebooks = get_json(addr, &token, "/api/notebooks").await;
     assert!(
@@ -342,14 +440,14 @@ async fn deleting_a_notebook_removes_it_from_listings(pool: PgPool) {
 // md:fn users_do_not_see_each_others_entities
 #[sqlx::test(migrations = "../../migrations")]
 async fn users_do_not_see_each_others_entities(pool: PgPool) {
-    let addr = spawn_server(pool).await;
+    let addr = spawn_server(pool.clone()).await;
     register(addr, "a@example.com").await;
     register(addr, "b@example.com").await;
     let ta = login(addr, "a@example.com", "dev-a").await;
     let tb = login(addr, "b@example.com", "dev-b").await;
     let a = device(addr, &ta).await;
     a.create_notebook(Notebook::new("A-only")).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let b_notebooks = get_json(addr, &tb, "/api/notebooks").await;
     assert!(
@@ -412,7 +510,7 @@ async fn materialised_entities_survive_journal_pruning(pool: PgPool) {
     let token = login(addr, "a@example.com", "dev-a").await;
     let a = device(addr, &token).await;
     a.create_notebook(Notebook::new("Durable")).await.unwrap();
-    push(&a).await;
+    push(&a, &pool).await;
 
     let store = Store::new(pool.clone());
     let device_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM user_devices")
