@@ -1,11 +1,11 @@
 # 0001 — Note moves and the provenance of note shares
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-06
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110)
-- Acceptance PR: none yet
+- Acceptance PR: [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121)
 - Supersedes: none
 - Superseded by: none
 
@@ -239,13 +239,14 @@ party: they are told, and they are protected from silent loss, but they cannot v
 
 ## Decision and justification
 
-> This ADR is `proposed`. What follows is the recommendation put to the maintainer, not an
-> approved decision, and it does not authorize implementation.
+> This ADR is `accepted`. It authorizes implementation of
+> [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110), and its decision body
+> is now immutable historical record.
 
-**Recommended: Option 4, together with the move restriction from Option 2, expressed through a named
+**Decision: Option 4, together with the move restriction from Option 2, expressed through a named
 permission scheme whose default is stated below.**
 
-The invariants it would establish:
+The invariants it establishes:
 
 1. **Only the note's owner may change `notes.notebook_id`.** A grantee, whatever their
    capabilities, cannot move a note they do not own. `MANAGE` is deliberately not sufficient: a
@@ -591,8 +592,8 @@ Criterion 6 of the issue — that `SECURITY.md` stop claiming audit coverage it 
 evidence, not a verifier, and is recorded as such: it cannot fail on revert and does not gate
 convergence.
 
-Not covered, deliberately: performance of the added joins. If the maintainer wants a bound on it,
-that is a separate measurement task and should be said at acceptance.
+Not covered, deliberately: performance of the added joins. Any bound on it is a separate
+measurement task.
 
 ## Equivalent decision in the other repository
 
