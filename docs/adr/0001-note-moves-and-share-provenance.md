@@ -149,8 +149,10 @@ credential, no protocol abuse and no race is required; the attack is a single do
 **Capabilities gained.** `SHARE_READ`, `SHARE_WRITE` and `MANAGE` over the victim's note, plus
 destruction of every grant the owner made.
 
-**Accepted, and out of scope here.** A notebook owner obtaining management over notes that the
-notes' own owners moved in deliberately: that is consented delegation, not escalation. Also out of
+**Accepted, and out of scope here.** A principal obtaining the scheme-bounded access that follows
+from a note owner deliberately placing a note in a notebook: that is consented delegation, not the
+escalation. Under `strict` that inherited access is at most `READ | WRITE`, for the notebook owner
+and its grantees alike; a deployment may deliberately select a different ceiling. Also out of
 scope: the server reading note content, which is `orden-26`, and device revocation latency, which
 is `orden-10`.
 
@@ -202,10 +204,12 @@ deleted rather than repaired. Independently, bind move authority to note ownersh
 
 Benefits: the contradiction disappears because there is exactly one writer per grant kind.
 Revocation becomes correct by construction — removing a notebook share removes inherited access
-because nothing was ever copied. An owner's direct grants cannot be destroyed by anyone, because
-no code path deletes them except the owner's own `DELETE /api/notes/:id/share`. The escalation is
-closed twice over: Bob cannot move the note, and even if he could, moving it would no longer erase
-anything.
+because nothing was ever copied. Direct grants can change only through the note-share endpoints,
+under their explicit capability checks; notebook moves and notebook-share mutations can no longer
+destroy them as a side effect. This distinction matters because the current delete endpoint also
+permits a grantee to revoke their own access and permits a principal with `SHARE_WRITE` to revoke
+other grants. The escalation is closed twice over: Bob cannot move the note, and even if he could,
+moving it would no longer erase anything.
 
 Costs and failure modes: `resolve_note_access` and the note-listing query take an extra join, and a
 migration must decide what today's undifferentiated `note_shares` rows mean. A row that was
@@ -255,9 +259,10 @@ The invariants it would establish:
 5. **`can_delete` and `can_transfer_ownership` remain bound to `notes.owner_id`**, unchanged.
 6. **A move never removes a third party's access silently — where the mover controls that access.**
    A move that would drop the inherited access of another principal is refused **when that access
-   derives from a grant the mover can themselves undo**. The mover resolves it explicitly first and
-   the affected principals are told; only then does the move succeed. Access deriving from a grant
-   the mover does not control does not block: it is notified, not refused. See the ordering rule.
+   derives from a grant the mover can themselves undo**. The mover resolves it explicitly first:
+   preserving the access needs no notice, while revoking it does. Access deriving from a grant the
+   mover does not control does not block: the move succeeds and the affected principal is notified.
+   See the ordering rule.
 7. **A move is refused while another principal holds capabilities equal to the owner's**, under the
    same control bound as invariant 6. A grantee holding `MANAGE` normalizes to every bit in
    `Capabilities::all()` and is therefore the owner's capability equal on that note; relocating the
@@ -288,11 +293,12 @@ for a future route to reach.
 
 ### The permission scheme
 
-Invariants 1, 6 and 7 and the inheritance ceiling are not universal truths; they are the *default*
-policy of a deployment. The maintainer's ruling is that this ADR defines a **named permission
-scheme** rather than hard-coding constants, so that a deployment can select a different policy
-without a code change, and so that the two rulings below are recorded as defaults rather than as
-facts about the domain.
+The policy choices around the single ejection exception to invariant 1, invariants 6 and 7, and the
+inheritance ceiling are not universal truths; they are the *default* policy of a deployment. The
+core of invariant 1 remains structural under every scheme. The maintainer's ruling is that this ADR
+defines a **named permission scheme** rather than hard-coding the selectable policy points, so that
+a deployment can select a different trade-off without a code change, and so that the two rulings
+below are recorded as defaults rather than as facts about the domain.
 
 A scheme is a named, deployment-selected value carrying exactly four policy points. It does not
 introduce roles, does not make `Capabilities` dynamic, and does not touch the bit lattice in
@@ -432,12 +438,15 @@ The note's owner is always among the notified: having one's note ejected from a 
 the kind of change invariant 6 exists to stop happening silently. Stated because an implementation
 would otherwise have to guess whose guards apply, and every guess is defensible.
 
-Notification is therefore attached to **revocation**, which the owner performs deliberately, and
-never to the move, which by step 4 affects nobody. That keeps a deployment without a configured
-mailer fully functional: it can still revoke and still move, and it simply cannot send the notice.
-A failed or unconfigured notice **must not** roll back a revocation the owner asked for — losing the
-revocation is worse than losing the e-mail — but it must be recorded, which is a new `MailKind` and
-a runtime log line rather than new persistent state.
+For controlled access, notification is therefore attached to **revocation**, which the controlling
+owner performs deliberately, and not to the later move, which no longer removes that access. The
+exception is the explicitly non-blocking loss of uncontrolled inherited access in step 4, where the
+move itself owes the notice because no revocation available to the mover exists. That keeps a
+deployment without a configured mailer fully functional: it can still revoke and still move, and it
+simply cannot send the notice. A failed or unconfigured notice **must not** roll back the operation
+that owed it — losing an authorized revocation or trapping an owner's note is worse than losing the
+e-mail — but it must be recorded, which is a new `MailKind` and a runtime log line rather than new
+persistent state.
 
 This is the point where an implementer would otherwise have invented something: the naive reading of
 "notify the affected" makes mail delivery a precondition of a permission change, which either breaks
@@ -556,7 +565,7 @@ dimension that harness does not yet cover: a caller with *legitimate* access gai
 | 2 | Alice grants Carol, Bob attempts the move, Carol's access is byte-for-byte unchanged | negative, `sqlx::test` |
 | 3 | The capability set resolved after a *legitimate* move is enumerated and compared with the expected set, fixing the ceiling by test rather than by prose | positive |
 | 4 | `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` stays green: it asserts read, patch, listing and a delete refusal, none of which 3b removes | regression |
-| 5 | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green: its grantee holds a **direct** share, which invariant 6 does not touch and the move does not drop | regression |
+| 5 | Moving a note to the Inbox preserves a **direct** share but removes an inherited-only principal's access on the next request. `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green for the direct half; a new `sqlx::test` fixes the orphaned-materialization half | regression + negative, REV-121-01 |
 | 6 | Revoking a notebook share removes inherited access on the next request, with no cascade run | positive |
 | 7 | An owner's direct grant survives every notebook-share mutation on the containing notebook | negative, covers the `cascade_notebook_to_notes_tx` half |
 | 8 | A move that would drop a **controlled** principal's inherited access is refused, the response names them, and the note is unmoved | negative, invariant 6 |
@@ -570,12 +579,12 @@ dimension that harness does not yet cover: a caller with *legitimate* access gai
 | 16 | Under `strict`, a notebook owner resolves exactly `READ \| WRITE` over a foreign contained note, and `POST /api/notes/:id/share` by them returns `403` | positive, ruling 3b |
 | 17 | **Under `strict`, a notebook *grantee* holding `SHARE_WRITE` on the notebook also resolves at most `READ \| WRITE` over a foreign contained note, and their `POST /api/notes/:id/share` returns `403`.** Fails if the ceiling binds only the notebook owner | negative, the transitive hole — REV-121-08 |
 | 18 | Under `strict`, a notebook owner ejecting a foreign note to the Inbox gets `403` | negative, ruling 1a |
-| 19 | Under `foreign_note_ejection = allowed`, an ejection that would drop notebook grantees' inherited access applies the guards with the *ejector* as actor, and the note's owner is among the notified | positive, ejection × guard — REV-121-09 |
+| 19 | Under `foreign_note_ejection = allowed`, an ejection that would drop a controlled notebook grantee's inherited access is first refused with the ejector as actor; after Preserve or Revoke resolves that loss, the ejection succeeds and the note's owner is notified | negative + positive, ejection × guard — REV-121-09 |
 | 20 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
 | 21 | **The migration deletes no row.** A deliberate `create_share` grant that exactly duplicates a `notebook_shares` row survives, and still resolves after the notebook share is later revoked | negative, REV-121-07 |
 | 22 | The migration's report identifies rows at `(note_id, user_id, capabilities)` granularity, not merely a count, on a fixture holding both unattributable kinds | migration, REV-121-10 |
 | 23 | The rollback migration restores access for notebook members after a code revert | recovery |
-| 24 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
+| 24 | `./scripts/check-docs.sh` is green over every companion changed by the implementation, including `http.md`, `permissions.md`, `store.md`, configuration, mail and migration companions | documentation |
 | 25 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
 
 Criterion 6 of the issue — that `SECURITY.md` stop claiming audit coverage it does not have — is
