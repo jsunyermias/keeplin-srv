@@ -253,13 +253,32 @@ The invariants it would establish:
 4. **Revoking a notebook share revokes the inherited access it conferred**, immediately and without
    a cascade, because the access was never copied.
 5. **`can_delete` and `can_transfer_ownership` remain bound to `notes.owner_id`**, unchanged.
-6. **A move never removes a third party's access silently.** A move that would drop the inherited
-   access of any principal other than the mover is refused. The owner revokes explicitly first, and
-   the affected principals are told; only then does the move succeed. See the ordering rule below.
-7. **A move is refused outright while another principal holds capabilities equal to the owner's.**
-   A grantee holding `MANAGE` normalizes to every bit in `Capabilities::all()` and is therefore the
-   owner's capability equal on that note. Relocating the note out from under such a principal is not
-   a decision one of two equals takes alone.
+6. **A move never removes a third party's access silently — where the mover controls that access.**
+   A move that would drop the inherited access of another principal is refused **when that access
+   derives from a grant the mover can themselves undo**. The mover resolves it explicitly first and
+   the affected principals are told; only then does the move succeed. Access deriving from a grant
+   the mover does not control does not block: it is notified, not refused. See the ordering rule.
+7. **A move is refused while another principal holds capabilities equal to the owner's**, under the
+   same control bound as invariant 6. A grantee holding `MANAGE` normalizes to every bit in
+   `Capabilities::all()` and is therefore the owner's capability equal on that note; relocating the
+   note out from under such a principal is not a decision one of two equals takes alone. But that is
+   only true when the owner *made* that principal their equal. A full set inherited from a notebook
+   the mover does not own is someone else's grant and does not bind them.
+
+   Invariant 7 also applies only where the full set **depends on containment**. A principal holding
+   `MANAGE` through a direct grant on the note loses nothing when the note moves — invariants 2 and 3
+   make direct grants independent of where the note sits — so refusing the move protects no asset of
+   theirs and merely forces the owner to demote them, with a notice, to relocate their own note. The
+   risk invariant 7 exists to address is an equal whose standing the move would remove.
+
+   The control bound in 6 and 7 is not a softening. Without it the guard is a hostage mechanism:
+   Alice moves her note into Mallory's notebook, Mallory has shared that notebook with Bob at the
+   full set, and Alice can then neither preserve (a direct grant matching Bob's inherited set keeps
+   him her equal, so invariant 7 still refuses) nor revoke (the grant is Mallory's and Alice cannot
+   touch another user's `notebook_shares`). Her own note would be trapped until Mallory chose to
+   cooperate, and any notebook grantee could hold it there without lifting a finger. The rule
+   protects a principal from losing access **you** gave them; it was never meant to let a stranger's
+   grant overrule your ownership.
 
 Why this over the alternatives: Option 2 alone leaves a live grant-destruction path; Option 3 is
 unsound without provenance; Option 5 buys, at the cost of new persistent state, a consent that
@@ -281,22 +300,40 @@ introduce roles, does not make `Capabilities` dynamic, and does not touch the bi
 
 | Policy point | What it fixes | `strict` (default) |
 |---|---|---|
-| `notebook_inheritance` | Capabilities a notebook owner inherits over a contained note they do not own | `READ \| WRITE` |
+| `notebook_inheritance` | Ceiling on **every** capability inherited by containment over a note the inheritor does not own — the notebook's owner and its grantees alike | `READ \| WRITE` |
 | `foreign_note_ejection` | Whether the containing notebook's owner may move a foreign note out to the Inbox | denied |
-| `move_out_guard` | What happens to a move that would drop a third party's inherited access | refuse until explicitly revoked, then notify |
-| `equal_principal_guard` | Whether a move is refused while another principal holds the owner's full capability set | refuse |
+| `move_out_guard` | What happens to a move that would drop inherited access the mover controls | refuse until explicitly resolved, then notify |
+| `equal_principal_guard` | Whether a move is refused while another principal the mover made holds the owner's full capability set | refuse |
+
+`notebook_inheritance` is a **ceiling applied after** the notebook grant is read, not a substitute
+for it. Inheritance is computed as the notebook-derived capabilities of the principal — the notebook
+owner's full rights, or a grantee's `notebook_shares` bits — intersected with this ceiling. Applying
+it to the owner alone would leave the hole open one hop away: a notebook owner bounded to
+`READ | WRITE` over a foreign note could still share **the notebook** with `SHARE_WRITE`, and that
+grantee would inherit `SHARE_WRITE` over the foreign note and reshare it. The notebook owner would
+thereby confer over someone else's note a power they do not themselves hold, which is the reshare
+half of `keeplin-srv#110` returning by another door. The ceiling binds every principal who gets
+anything by containment.
 
 Selection is a single `Config` field, read from the environment beside the other policy scalars in
 `// md:Config`, defaulting to `strict` when unset. An unrecognized value is a startup error, not a
 silent fallback: a deployment that believes it selected a permissive scheme must not get a strict
 one, and the reverse is worse.
 
-Two properties are **not** scheme-configurable and no scheme may weaken them, because they are the
+Three properties are **not** scheme-configurable and no scheme may weaken them, because they are the
 defect this ADR exists to close:
 
 - Invariants 2, 3 and 4. Materialization does not come back under any scheme; provenance is
   structural, not policy.
 - Invariant 5. `can_delete` and `can_transfer_ownership` stay bound to `notes.owner_id`.
+- **The core of invariant 1.** That only the note's owner may change `notes.notebook_id` is
+  structural, not policy: a scheme that let grantees move notes again would reopen the escalation
+  directly. `foreign_note_ejection` modulates the single 1b exception — a notebook owner removing a
+  foreign note to the Inbox — and nothing else. No policy point grants move authority to a grantee.
+
+The destination check is unchanged and is not scheme-configurable either: an owner moving their own
+note into a notebook must still be able to write that notebook, exactly as
+`// md:fn update_note` requires today via `resolve_notebook_access`.
 
 An explicit grant by the note's owner always overrides the scheme upward. The scheme fixes what a
 principal gets *without* being granted anything — inheritance by containment. It never caps what an
@@ -353,10 +390,16 @@ general notice.
 
 The sequence, under the `strict` scheme:
 
-1. The move is evaluated for principals who would lose inherited access. If any exists, the move is
-   refused with a response naming them, and nothing changes.
-2. If any of those principals holds the owner's full capability set, the refusal is terminal for as
-   long as that holds: invariant 7. The owner revokes or reduces that grant first.
+1. The move is evaluated for principals who would lose inherited access. They split in two by the
+   control bound of invariants 6 and 7:
+   - **Controlled** — their access derives from a grant the mover can undo: a share on a notebook
+     the mover owns, or a direct share on the note the mover owns. These block; the move is refused
+     and nothing changes.
+   - **Uncontrolled** — their access derives from a notebook the mover does not own. These do not
+     block. The move proceeds and they are notified, because the mover has no way to resolve them
+     and an owner's claim on their own note outranks a grant a third party made.
+2. If any *controlled* principal holds the owner's full capability set, the refusal is terminal for
+   as long as that holds: invariant 7. The owner revokes or reduces that grant first.
 3. For each remaining affected principal the owner chooses, deliberately, one of two things:
    - **Preserve.** Grant them a direct share on the note with
      `// md:fn create_share`. Their access then survives the move, because a direct grant does not
@@ -368,7 +411,26 @@ The sequence, under the `strict` scheme:
    access being dropped comes from a *notebook* share, and revoking that would remove the
    principal's access to **every** note in the notebook, not just the one being moved. Requiring
    that in order to relocate a single note would make the guard worse than the problem.
-4. With no principal left to lose access, the move proceeds.
+4. With no controlled principal left to lose access, the move proceeds. Uncontrolled principals from
+   step 1 are notified at this point — that notice is owed by the move, which is the one case where
+   it is, precisely because no revocation the owner could have performed exists to carry it.
+
+The refusal response names the affected principals so the owner can act, but it must not name
+principals the mover could not otherwise enumerate. A mover who does not hold `SHARE_READ` on
+another user's notebook has no right to learn its membership, and a refusal that listed it would
+turn this guard into a disclosure oracle for someone else's sharing. Those are reported as a count
+and the notebook that confers them, without identities. Controlled principals are by definition ones
+the mover granted, so naming them discloses nothing new.
+
+### When ejection is enabled
+
+Under a scheme with `foreign_note_ejection = allowed`, the ejector is the containing notebook's
+owner, not the note's owner, and the guards apply **with the ejector as the actor**. Grants that
+ejector controls — shares on the notebook they own — are controlled and block, resolvable by the
+same Preserve or Revoke choice. Everything else is uncontrolled and is notified rather than refused.
+The note's owner is always among the notified: having one's note ejected from a notebook is exactly
+the kind of change invariant 6 exists to stop happening silently. Stated because an implementation
+would otherwise have to guess whose guards apply, and every guess is defensible.
 
 Notification is therefore attached to **revocation**, which the owner performs deliberately, and
 never to the move, which by step 4 affects nobody. That keeps a deployment without a configured
@@ -435,35 +497,38 @@ fix, not a regression.
 
 **Migration.** One forward-only, idempotent migration with its companion `.md`, under the rules in
 `AGENTS.md`: `IF NOT EXISTS` guards, and a `DEFAULT` on any new `NOT NULL` column. It must state
-its rule for existing `note_shares` rows explicitly. The recommended rule has two clauses:
+its rule for existing `note_shares` rows explicitly.
 
-1. **Delete rows that exactly duplicate a `notebook_shares` row for the note's containing
-   notebook.** Those are almost certainly cascade output, and under invariant 3 the same access is
-   now computed rather than stored.
-2. **Keep every other row** as a direct grant.
+**Ruled: the migration deletes nothing. It keeps every row and reports the ones it cannot
+attribute.**
 
-Clause 1 has a hole that must be closed rather than inherited. A note whose `notebook_id` is now
-`NULL` — moved to the Inbox after a cascade materialized rows for it — has no containing notebook
-to match against, so clause 1 matches nothing and clause 2 silently promotes every orphaned row to
-a permanent direct grant. That is exactly the third symptom recorded above, preserved forever by
-the migration that was meant to clean it up.
+The tempting rule — delete rows that exactly duplicate a `notebook_shares` row of the note's
+containing notebook, on the grounds that they are almost certainly cascade output — must be
+rejected, and the reason is the ADR's own epistemology rather than a preference. The premise for
+keeping orphans is that *an orphan is byte-identical to a deliberate direct grant*. That sentence
+applies verbatim to the duplicates: Alice granting Carol `READ | WRITE` on note *N* while Carol
+already holds `READ | WRITE` on the containing notebook produces a row indistinguishable from
+cascade output. Deleting it would not remove Carol's access today — containment still confers it —
+but it would silently strip the grant's **durability**: a later notebook revocation, or a move, now
+takes away access that Alice deliberately conferred. That is a silent revocation on a delay fuse,
+which is precisely what invariant 6 forbids, performed at migration scale with no owner in the loop.
 
-There is no rule that resolves those rows correctly, because the information needed to classify
-them was never recorded: an orphan is byte-identical to a deliberate direct grant.
+Keeping everything is therefore the only clause consistent with the rest of this decision, and it
+removes the asymmetry a two-clause rule would have introduced between two row kinds that no query
+can tell apart.
 
-**Ruled: keep them, and report them.** This is not a free choice once invariant 6 is accepted. That
-invariant says access is never removed from a third party silently, and that revocation is a
-deliberate act by the owner which is notified. A migration that deleted orphaned rows would do
-exactly the thing invariant 6 forbids, at scale, with no notice and no owner in the loop — it would
-be the largest silent revocation the system ever performed. Keeping them is the only clause
-consistent with the rest of this decision.
+Two kinds of row cannot be attributed to a deliberate `create_share`, and both are **reported, not
+deleted**:
 
-Concretely: every surviving `note_shares` row is a direct grant after the migration, and the
-migration emits the count of rows it could not attribute to a deliberate `create_share` — those whose
-`(note_id, user_id, capabilities)` matches a `notebook_shares` row of the note's containing notebook,
-plus every row on a note whose `notebook_id` is now `NULL`. That count is a number to audit, not a
-list to act on automatically. An owner who reviews it and decides a grant was never intended revokes
-it through the ordinary endpoint, where the notice is owed.
+- rows whose `(note_id, user_id, capabilities)` matches a `notebook_shares` row of the note's
+  containing notebook;
+- every row on a note whose `notebook_id` is now `NULL`, which no containing-notebook comparison can
+  reach at all.
+
+The report is **row-level**, not a count. A bare integer tells an operator that something needs
+auditing while withholding everything needed to audit it; `(note_id, user_id, capabilities)` and
+which of the two kinds it is makes the list actionable. An owner who reviews it and decides a grant
+was never intended revokes it through the ordinary endpoint, where the notice is owed.
 
 Note also that no *new* orphan can be created after this change: invariant 3 stops copying, so there
 is no derived row left to be orphaned. The migration is a one-time reckoning with rows the old design
@@ -494,19 +559,24 @@ dimension that harness does not yet cover: a caller with *legitimate* access gai
 | 5 | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green: its grantee holds a **direct** share, which invariant 6 does not touch and the move does not drop | regression |
 | 6 | Revoking a notebook share removes inherited access on the next request, with no cascade run | positive |
 | 7 | An owner's direct grant survives every notebook-share mutation on the containing notebook | negative, covers the `cascade_notebook_to_notes_tx` half |
-| 8 | A move that would drop a third party's inherited access is refused, the response names them, and the note is unmoved | negative, invariant 6 |
-| 9 | After the owner preserves the affected principal with a direct share, the same move succeeds and that principal still resolves access afterwards | positive, the ordering rule's Preserve branch |
+| 8 | A move that would drop a **controlled** principal's inherited access is refused, the response names them, and the note is unmoved | negative, invariant 6 |
+| 9 | After the owner preserves the affected principal with a direct share, the same move succeeds and that principal still resolves access afterwards | positive, the Preserve branch |
 | 10 | After the owner revokes instead, the move succeeds and the principal no longer resolves access | positive, the Revoke branch |
-| 11 | A move is refused while another principal holds `MANAGE` on the note, and stays refused until that grant is reduced | negative, invariant 7 |
-| 12 | A revocation whose notice fails to send still commits, and the failure is recorded | failure injection, the mailer-less deployment |
-| 13 | An unrecognized scheme name fails startup rather than falling back | negative, configuration |
-| 14 | Under `strict`, a notebook owner resolves exactly `READ \| WRITE` over a foreign contained note, and `POST /api/notes/:id/share` by them returns `403` | positive, ruling 3b |
-| 15 | Under `strict`, a notebook owner ejecting a foreign note to the Inbox gets `403` | negative, ruling 1a |
-| 16 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
-| 17 | The migration keeps every unattributable row and reports a non-zero count on a fixture that has both orphan kinds | migration, the kept-and-reported rule |
-| 18 | The rollback migration restores access for notebook members after a code revert | recovery |
-| 19 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
-| 20 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
+| 11 | A move is refused while a **controlled** principal holds `MANAGE` **by containment**, and stays refused until that grant is reduced; a principal holding `MANAGE` by a direct grant does not block, and still resolves it after the move | negative + positive, invariant 7 and its bound — REV-121-11 |
+| 12 | **The note's owner always retains a unilateral exit.** Alice's note sits in Mallory's notebook, which Mallory shares with Bob at the full set; Alice completes the move using only endpoints she is authorized for, and Bob is notified rather than blocking. Fails against an unbounded invariant 6/7 | negative, the control bound — REV-121-06 |
+| 13 | A refusal does not name principals the mover cannot enumerate: those inherited from a notebook the mover neither owns nor holds `SHARE_READ` on appear as a count plus the conferring notebook | negative, disclosure — REV-121-13 |
+| 14 | A revocation whose notice fails to send still commits, and the failure is recorded | failure injection, the mailer-less deployment |
+| 15 | An unrecognized scheme name fails startup rather than falling back | negative, configuration |
+| 16 | Under `strict`, a notebook owner resolves exactly `READ \| WRITE` over a foreign contained note, and `POST /api/notes/:id/share` by them returns `403` | positive, ruling 3b |
+| 17 | **Under `strict`, a notebook *grantee* holding `SHARE_WRITE` on the notebook also resolves at most `READ \| WRITE` over a foreign contained note, and their `POST /api/notes/:id/share` returns `403`.** Fails if the ceiling binds only the notebook owner | negative, the transitive hole — REV-121-08 |
+| 18 | Under `strict`, a notebook owner ejecting a foreign note to the Inbox gets `403` | negative, ruling 1a |
+| 19 | Under `foreign_note_ejection = allowed`, an ejection that would drop notebook grantees' inherited access applies the guards with the *ejector* as actor, and the note's owner is among the notified | positive, ejection × guard — REV-121-09 |
+| 20 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
+| 21 | **The migration deletes no row.** A deliberate `create_share` grant that exactly duplicates a `notebook_shares` row survives, and still resolves after the notebook share is later revoked | negative, REV-121-07 |
+| 22 | The migration's report identifies rows at `(note_id, user_id, capabilities)` granularity, not merely a count, on a fixture holding both unattributable kinds | migration, REV-121-10 |
+| 23 | The rollback migration restores access for notebook members after a code revert | recovery |
+| 24 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
+| 25 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
 
 Criterion 6 of the issue — that `SECURITY.md` stop claiming audit coverage it does not have — is
 evidence, not a verifier, and is recorded as such: it cannot fail on revert and does not gate
