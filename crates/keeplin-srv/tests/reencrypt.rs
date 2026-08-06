@@ -45,6 +45,7 @@ fn test_config(at_rest_key: Option<String>) -> Config {
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
+        permission_scheme: keeplin_srv::config::PermissionScheme::Strict,
     }
 }
 

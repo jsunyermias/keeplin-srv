@@ -377,6 +377,10 @@
       "markers": {
         "origin": "EXTRACTED",
         "value": [
+          "PermissionScheme",
+          "impl PermissionScheme",
+          "impl PermissionScheme > fn from_name",
+          "impl PermissionScheme > policy accessors",
           "Config",
           "fn env_parse",
           "JWT secret constants",
@@ -388,7 +392,8 @@
           "mod tests",
           "mod tests > imports",
           "mod tests > fn weak_secrets_are_rejected",
-          "mod tests > fn a_strong_secret_is_accepted"
+          "mod tests > fn a_strong_secret_is_accepted",
+          "mod tests > fn an_unknown_permission_scheme_is_rejected"
         ]
       },
       "purpose": {
@@ -785,6 +790,8 @@
           "fn get_note",
           "fn present",
           "UpdateNoteBody",
+          "fn inherited_capabilities",
+          "fn notify_access_revoked",
           "fn update_note",
           "fn delete_note",
           "CreateShareBody",
@@ -925,7 +932,8 @@
           "impl Mailer",
           "impl Mailer > fn new",
           "impl Mailer > fn enabled",
-          "impl Mailer > fn send"
+          "impl Mailer > fn send",
+          "impl Mailer > fn send_notice"
         ]
       },
       "purpose": {
@@ -1618,8 +1626,7 @@
           "impl Store > fn list_notebook_shares",
           "impl Store > fn create_or_update_notebook_share",
           "impl Store > fn delete_notebook_share",
-          "impl Store > fn cascade_notebook_to_notes",
-          "impl Store > fn apply_notebook_shares_to_note",
+          "impl Store > fn inherited_note_principals",
           "impl Store > fn get_line",
           "impl Store > fn get_line_on",
           "impl Store > fn list_lines",
@@ -1665,9 +1672,7 @@
           "impl Store > fn user_blob_bytes_excluding",
           "impl Store > fn count_live_notes_for_user",
           "impl Store > fn count_live_notes_in_notebook",
-          "impl Store > fn count_live_lines_on",
-          "fn replace_note_shares_from_notebook_tx",
-          "fn cascade_notebook_to_notes_tx"
+          "impl Store > fn count_live_lines_on"
         ]
       },
       "purpose": {
@@ -1830,7 +1835,12 @@
           "fn cross_tenant_store_mutations_leave_victim_unchanged",
           "fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference",
           "fn foreign_and_missing_upserts_are_indistinguishable",
-          "fn foreign_and_missing_mutations_are_indistinguishable"
+          "fn foreign_and_missing_mutations_are_indistinguishable",
+          "fn write_grantee_cannot_move_foreign_note_or_change_direct_grants",
+          "fn strict_inheritance_is_computed_bounded_and_revocable",
+          "fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback",
+          "fn controlled_inherited_loss_requires_preserve_or_revoke",
+          "fn direct_duplicate_survives_migration_and_rollback_restores_projection"
         ]
       },
       "purpose": {
@@ -3317,6 +3327,90 @@
       "source": {
         "origin": "EXTRACTED",
         "value": "migrations/0016_resource_note_id.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0017_direct_note_shares.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0017_direct_note_shares.sql` — audit ambiguous materialized note grants"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0017_direct_note_shares.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/rollback/0017_rematerialize_notebook_shares.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0017_rematerialize_notebook_shares.sql` — emergency legacy grant rematerialization"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/rollback/0017_rematerialize_notebook_shares.sql"
       },
       "tests": {
         "origin": "INFERRED",

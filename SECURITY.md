@@ -47,11 +47,10 @@ oversight. Mitigations, in order of strength:
 
 ## Review status & known limits
 
-- The account/permission surface (auth middleware, capability grants, note and
-  notebook sharing, ownership transfer, history visibility, device revocation)
-  and the newer security code (at-rest crypto, lockout, email flows) have been
-  through two internal code audits (2026-07); every finding is fixed or tracked
-  in the issue tracker.
+- Internal reviews have examined portions of the account, permission and newer
+  security surfaces. This is not complete audit coverage: note moves and the
+  interaction between direct and notebook-derived grants require their own
+  threat-model review, and tracked findings remain authoritative.
 - **No external penetration test has been performed.** For a public deployment
   hosting third-party data, commission one — an internal review is not a
   substitute.

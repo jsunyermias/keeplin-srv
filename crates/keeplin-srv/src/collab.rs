@@ -385,7 +385,14 @@ async fn handle_msg(
                     return Ok(());
                 }
             };
-            let access = match resolve_note_access(&state.store, &note, user_id).await {
+            let access = match resolve_note_access(
+                &state.store,
+                &note,
+                user_id,
+                state.config.permission_scheme,
+            )
+            .await
+            {
                 Ok(access) if access.can_read() => access,
                 Ok(_) | Err(AppError::Forbidden) => {
                     send_error(tx, "forbidden", "no access to this note");
@@ -435,7 +442,14 @@ async fn handle_msg(
                     return Ok(());
                 }
             };
-            let access = match resolve_note_access(&state.store, &note, user_id).await {
+            let access = match resolve_note_access(
+                &state.store,
+                &note,
+                user_id,
+                state.config.permission_scheme,
+            )
+            .await
+            {
                 Ok(access) => access,
                 Err(AppError::Forbidden) => {
                     send_error(tx, "forbidden", "access to this note was revoked");

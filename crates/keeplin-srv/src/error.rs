@@ -21,6 +21,9 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
+    #[error("move would drop controlled access for: {0:?}")]
+    MoveBlocked(Vec<uuid::Uuid>),
+
     #[error("conflict")]
     Conflict,
 
@@ -53,7 +56,7 @@ impl AppError {
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::MissingToken | AppError::InvalidToken => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Forbidden | AppError::MoveBlocked(_) => StatusCode::FORBIDDEN,
             AppError::Conflict => StatusCode::CONFLICT,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,

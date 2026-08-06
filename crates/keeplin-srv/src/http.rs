@@ -847,7 +847,13 @@ async fn get_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<NoteResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_read() {
         return Err(AppError::Forbidden);
     }
@@ -877,6 +883,61 @@ struct UpdateNoteBody {
     todo_completed: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
+// md:fn inherited_capabilities
+async fn inherited_capabilities(
+    state: &AppState,
+    notebook_id: Option<Uuid>,
+    principal: Uuid,
+) -> Result<i32, AppError> {
+    let Some(notebook_id) = notebook_id else {
+        return Ok(0);
+    };
+    let bits = if state.store.notebook_owner(notebook_id).await? == Some(principal) {
+        Capabilities::ALL
+    } else {
+        state
+            .store
+            .get_notebook_share(notebook_id, principal)
+            .await?
+            .map(|share| share.capabilities)
+            .unwrap_or(0)
+    };
+    Ok(bits & state.config.permission_scheme.notebook_inheritance())
+}
+
+// md:fn notify_access_revoked
+async fn notify_access_revoked(
+    state: &AppState,
+    principal: Uuid,
+    resource_kind: &str,
+    resource_id: Uuid,
+) {
+    let user = match state.store.get_user_by_id(principal).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            tracing::warn!(%principal, %resource_id, resource_kind, "access revocation notice recipient missing");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %principal, %resource_id, resource_kind, "access revocation notice recipient lookup failed");
+            return;
+        }
+    };
+    if let Err(error) = state
+        .mailer
+        .send_notice(
+            crate::mail::MailKind::AccessRevoked,
+            &user.email,
+            &user.display_name,
+            resource_kind,
+            resource_id,
+        )
+        .await
+    {
+        tracing::warn!(%error, %principal, %resource_id, resource_kind, mail_kind = crate::mail::MailKind::AccessRevoked.as_str(), "access revocation notice failed");
+    }
+}
+
 // md:fn update_note
 async fn update_note(
     State(state): State<Arc<AppState>>,
@@ -885,7 +946,13 @@ async fn update_note(
     Json(body): Json<UpdateNoteBody>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_write() {
         return Err(AppError::Forbidden);
     }
@@ -904,6 +971,63 @@ async fn update_note(
         Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
         _ => None,
     };
+    let moved = patch.notebook_id.is_some() && patch.notebook_id != Some(note.notebook_id);
+    let source_notebook_owner = match note.notebook_id {
+        Some(notebook_id) => state.store.notebook_owner(notebook_id).await?,
+        None => None,
+    };
+    let ejection =
+        moved && patch.notebook_id == Some(None) && source_notebook_owner == Some(user.user_id);
+    if moved
+        && note.owner_id != user.user_id
+        && !(ejection && state.config.permission_scheme.foreign_note_ejection())
+    {
+        return Err(AppError::Forbidden);
+    }
+    let mut notify_after_move = Vec::new();
+    if moved && state.config.permission_scheme.move_out_guard() {
+        if let Some(source_notebook) = note.notebook_id {
+            let controls_source = source_notebook_owner == Some(user.user_id);
+            let destination = patch.notebook_id.flatten();
+            let mut affected = Vec::new();
+            for (principal, inherited_bits) in state
+                .store
+                .inherited_note_principals(source_notebook)
+                .await?
+            {
+                if principal == user.user_id {
+                    continue;
+                }
+                let direct_bits = state
+                    .store
+                    .get_share(note.id, principal)
+                    .await?
+                    .map(|share| share.capabilities)
+                    .unwrap_or(0);
+                let source_bits =
+                    inherited_bits & state.config.permission_scheme.notebook_inheritance();
+                let destination_bits =
+                    inherited_capabilities(&state, destination, principal).await?;
+                let before = Capabilities::from_bits(direct_bits | source_bits);
+                let after = Capabilities::from_bits(direct_bits | destination_bits);
+                if before.bits() != after.bits() && (before.bits() & !after.bits()) != 0 {
+                    if controls_source {
+                        affected.push(principal);
+                    } else {
+                        notify_after_move.push(principal);
+                    }
+                }
+            }
+            if !affected.is_empty()
+                && (state.config.permission_scheme.equal_principal_guard()
+                    || state.config.permission_scheme.move_out_guard())
+            {
+                affected.sort_unstable();
+                affected.dedup();
+                return Err(AppError::MoveBlocked(affected));
+            }
+        }
+    }
     if let Some(nb) = moved_into {
         let nb_access = resolve_notebook_access(&state.store, nb, user.user_id).await?;
         if !nb_access.can_write() {
@@ -922,8 +1046,13 @@ async fn update_note(
         .update_note_meta(id, &patch)
         .await?
         .ok_or(AppError::NotFound)?;
-    if let Some(nb) = moved_into {
-        state.store.apply_notebook_shares_to_note(id, nb).await?;
+    if ejection && note.owner_id != user.user_id {
+        notify_after_move.push(note.owner_id);
+    }
+    notify_after_move.sort_unstable();
+    notify_after_move.dedup();
+    for principal in notify_after_move {
+        notify_access_revoked(&state, principal, "note", note.id).await;
     }
     Ok(Json(note))
 }
@@ -935,7 +1064,13 @@ async fn delete_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_delete() {
         return Err(AppError::Forbidden);
     }
@@ -963,7 +1098,13 @@ async fn create_share(
     Json(body): Json<CreateShareBody>,
 ) -> Result<Json<NoteShare>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_share_write() {
         return Err(AppError::Forbidden);
     }
@@ -1008,7 +1149,13 @@ async fn list_shares(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<NoteShare>>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.caps.can_share_read() {
         return Err(AppError::Forbidden);
     }
@@ -1026,11 +1173,20 @@ async fn delete_share(
         .get_note(note_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
     state.store.delete_share(note_id, target_id).await?;
+    if target_id != user.user_id {
+        notify_access_revoked(&state, target_id, "note", note_id).await;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1049,7 +1205,13 @@ async fn transfer_ownership(
     Json(body): Json<TransferBody>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_transfer_ownership() {
         return Err(AppError::Forbidden);
     }
@@ -1163,6 +1325,9 @@ async fn delete_notebook_share(
         .store
         .delete_notebook_share(notebook_id, target_id)
         .await?;
+    if target_id != user.user_id {
+        notify_access_revoked(&state, target_id, "notebook", notebook_id).await;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1250,7 +1415,13 @@ async fn note_history(
 ) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
     match state.store.get_note(id).await? {
         Some(note) => {
-            let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+            let access = resolve_note_access(
+                &state.store,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
             if !access.can_read() {
                 return Err(AppError::Forbidden);
             }
@@ -1390,7 +1561,13 @@ async fn export_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExportResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_read() {
         return Err(AppError::Forbidden);
     }

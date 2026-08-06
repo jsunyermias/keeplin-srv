@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 pub enum MailKind {
     VerifyEmail,
     PasswordReset,
+    AccessRevoked,
 }
 
 // md:impl MailKind
@@ -15,6 +16,7 @@ impl MailKind {
         match self {
             MailKind::VerifyEmail => "verify_email",
             MailKind::PasswordReset => "password_reset",
+            MailKind::AccessRevoked => "access_revoked",
         }
     }
 }
@@ -61,6 +63,35 @@ impl Mailer {
             "display_name": display_name,
             "token": token,
             "expires_at": expires_at,
+        }));
+        if let Some(bearer) = &self.webhook_token {
+            req = req.bearer_auth(bearer);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) => Err(format!("mail webhook answered {}", resp.status())),
+            Err(e) => Err(format!("mail webhook unreachable: {e}")),
+        }
+    }
+
+    // md:impl Mailer > fn send_notice
+    pub async fn send_notice(
+        &self,
+        kind: MailKind,
+        to: &str,
+        display_name: &str,
+        resource_kind: &str,
+        resource_id: uuid::Uuid,
+    ) -> Result<(), String> {
+        let Some(url) = &self.webhook_url else {
+            return Err("mail webhook not configured".into());
+        };
+        let mut req = self.http.post(url).json(&serde_json::json!({
+            "kind": kind.as_str(),
+            "to": to,
+            "display_name": display_name,
+            "resource_kind": resource_kind,
+            "resource_id": resource_id,
         }));
         if let Some(bearer) = &self.webhook_token {
             req = req.bearer_auth(bearer);

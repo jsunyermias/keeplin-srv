@@ -124,18 +124,35 @@ pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
+    scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
     if note.owner_id == user_id {
         return Ok(Access::owner());
     }
-    if let Some(nb) = note.notebook_id {
-        if store.notebook_owner(nb).await? == Some(user_id) {
-            return Ok(Access::granted(Capabilities::all()));
-        }
-    }
-    match store.get_share(note.id, user_id).await? {
-        Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
-        None => Err(AppError::Forbidden),
+    let direct = store
+        .get_share(note.id, user_id)
+        .await?
+        .map(|share| Capabilities::from_bits(share.capabilities))
+        .unwrap_or_else(Capabilities::empty);
+    let inherited = if let Some(notebook_id) = note.notebook_id {
+        let notebook_bits = if store.notebook_owner(notebook_id).await? == Some(user_id) {
+            Capabilities::ALL
+        } else {
+            store
+                .get_notebook_share(notebook_id, user_id)
+                .await?
+                .map(|share| share.capabilities)
+                .unwrap_or(0)
+        };
+        Capabilities::from_bits(notebook_bits & scheme.notebook_inheritance())
+    } else {
+        Capabilities::empty()
+    };
+    let effective = Capabilities::from_bits(direct.bits() | inherited.bits());
+    if effective.bits() == 0 {
+        Err(AppError::Forbidden)
+    } else {
+        Ok(Access::granted(effective))
     }
 }
 

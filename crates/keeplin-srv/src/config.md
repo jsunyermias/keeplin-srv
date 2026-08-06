@@ -41,6 +41,105 @@ token (all devices must log in again).
 
 ---
 
+## PermissionScheme
+
+**Identification** — public permission-policy enum; marker `// md:PermissionScheme`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:PermissionScheme
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionScheme {
+    Strict,
+    EjectionAllowed,
+}
+```
+
+**What it does** — Selects the accepted ADR 0001 permission semantics at configuration time.
+
+**Dependencies** — `PartialEq::eq` — supports exact scheme comparisons; expects derived equality to distinguish both variants.
+
+**Used by** — `Config`, HTTP authorization helpers, and collaboration sessions.
+
+**Repeated context** — `Strict` is the default; `EjectionAllowed` only changes foreign-note ejection policy.
+
+---
+
+## impl PermissionScheme
+
+**Identification** — inherent implementation container; marker `// md:impl PermissionScheme`.
+
+**Code** — Members documented as sub-blocks below: `from_name` and policy accessors.
+
+**What it does** — Centralizes parsing and policy constants for a selected scheme.
+
+**Dependencies** — —
+
+**Used by** — `Config::from_env` and authorization call sites.
+
+**Repeated context** — Policy accessors prevent handlers from duplicating scheme branching.
+
+### fn from_name
+
+**Identification** — `fn from_name(name: &str) -> Result<Self, String>`; marker `// md:impl PermissionScheme > fn from_name`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl PermissionScheme > fn from_name
+    fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "strict" => Ok(Self::Strict),
+            "ejection_allowed" => Ok(Self::EjectionAllowed),
+            _ => Err(format!("unrecognized PERMISSION_SCHEME: {name}")),
+        }
+    }
+```
+
+**What it does** — Parses the two stable environment spellings and rejects every unknown value.
+
+**Dependencies** — `format!` — reports the rejected value; expects the error to remain actionable without accepting aliases silently.
+
+**Used by** — `Config::from_env` when reading `PERMISSION_SCHEME`.
+
+**Repeated context** — Configuration is fail-closed for misspelled schemes.
+
+### policy accessors
+
+**Identification** — four policy accessors; marker `// md:impl PermissionScheme > policy accessors`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl PermissionScheme > policy accessors
+    pub fn notebook_inheritance(self) -> i32 {
+        crate::permissions::Capabilities::READ | crate::permissions::Capabilities::WRITE
+    }
+
+    pub fn foreign_note_ejection(self) -> bool {
+        matches!(self, Self::EjectionAllowed)
+    }
+
+    pub fn move_out_guard(self) -> bool {
+        true
+    }
+
+    pub fn equal_principal_guard(self) -> bool {
+        true
+    }
+```
+
+**What it does** — Caps notebook inheritance at read/write, exposes the optional ejection behavior, and keeps move-out and equal-principal guards enabled.
+
+**Dependencies** — `Capabilities::{READ, WRITE}` — constructs the inherited capability mask; expects their bits to remain composable by bitwise OR. `matches!` — selects only `EjectionAllowed`; expects new variants to remain non-ejecting until explicitly reviewed.
+
+**Used by** — note authorization and update handlers.
+
+**Repeated context** — Inherited access never conveys sharing authority.
+
+---
+
 ## Config
 
 **Identification** — struct; marker `// md:Config`.
@@ -78,6 +177,7 @@ pub struct Config {
     pub login_max_failures: i32,
     pub login_lockout_secs: u64,
     pub history_since_access: bool,
+    pub permission_scheme: PermissionScheme,
 }
 ```
 
@@ -360,6 +460,10 @@ behaviour.
             history_since_access: std::env::var("HISTORY_VISIBILITY")
                 .map(|v| v.eq_ignore_ascii_case("access"))
                 .unwrap_or(false),
+            permission_scheme: PermissionScheme::from_name(
+                &std::env::var("PERMISSION_SCHEME").unwrap_or_else(|_| "strict".into()),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
         }
     }
 ```
@@ -474,6 +578,33 @@ secret pass the gate.
 
 ---
 
+### fn an_unknown_permission_scheme_is_rejected
+
+**Identification** — unit test for strict scheme-name parsing; marker `// md:mod tests > fn an_unknown_permission_scheme_is_rejected`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:mod tests > fn an_unknown_permission_scheme_is_rejected
+    #[test]
+    fn an_unknown_permission_scheme_is_rejected() {
+        assert_eq!(
+            PermissionScheme::from_name("surprising-default"),
+            Err("unrecognized PERMISSION_SCHEME: surprising-default".into())
+        );
+    }
+```
+
+**What it does** — Proves an unknown configured scheme is rejected instead of selecting a fallback policy.
+
+**Dependencies** — `PermissionScheme::from_name` — parses the startup value; expects unknown names to return their diagnostic unchanged.
+
+**Used by** — `cargo test --workspace`.
+
+**Repeated context** — Configuration must fail closed when a policy name is misspelled.
+
+---
+
 ## Graph context
 
 Repo-tooling metadata, not a code block (no marker in the source). This file is LAYER 2;
@@ -518,8 +649,12 @@ and carrying its marker in the code:
 
 | # | Block (source order) | Marker in code | Documented in section |
 |---|----------------------|----------------|-----------------------|
-| 1 | `struct Config` | `// md:Config` | Config |
-| 2 | `fn env_parse` | `// md:fn env_parse` | fn env_parse |
+| 1 | `enum PermissionScheme` | `// md:PermissionScheme` | PermissionScheme |
+| 2 | `impl PermissionScheme` | `// md:impl PermissionScheme` | impl PermissionScheme |
+| 3 | `fn from_name` | `// md:impl PermissionScheme > fn from_name` | impl PermissionScheme › fn from_name |
+| 4 | policy accessors | `// md:impl PermissionScheme > policy accessors` | impl PermissionScheme › policy accessors |
+| 5 | `struct Config` | `// md:Config` | Config |
+| 6 | `fn env_parse` | `// md:fn env_parse` | fn env_parse |
 | 3 | `DEV_JWT_SECRET` / `MIN_JWT_SECRET_LEN` | `// md:JWT secret constants` | JWT secret constants |
 | 4 | `fn dev_insecure` | `// md:fn dev_insecure` | fn dev_insecure |
 | 5 | `fn is_weak_secret` | `// md:fn is_weak_secret` | fn is_weak_secret |
@@ -530,3 +665,4 @@ and carrying its marker in the code:
 | 10 | `imports` | `// md:mod tests > imports` |
 | 11 | `fn weak_secrets_are_rejected` | `// md:mod tests > fn weak_secrets_are_rejected` | mod tests › fn weak_secrets_are_rejected |
 | 12 | `fn a_strong_secret_is_accepted` | `// md:mod tests > fn a_strong_secret_is_accepted` | mod tests › fn a_strong_secret_is_accepted |
+| 13 | `fn an_unknown_permission_scheme_is_rejected` | `// md:mod tests > fn an_unknown_permission_scheme_is_rejected` | mod tests › fn an_unknown_permission_scheme_is_rejected |

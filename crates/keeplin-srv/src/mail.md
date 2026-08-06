@@ -80,6 +80,7 @@ and the user proves receipt by presenting it back (`/api/verify-email`,
 pub enum MailKind {
     VerifyEmail,
     PasswordReset,
+    AccessRevoked,
 }
 ```
 
@@ -125,6 +126,7 @@ cannot be replayed as a reset token), `Mailer::send` (this file).
         match self {
             MailKind::VerifyEmail => "verify_email",
             MailKind::PasswordReset => "password_reset",
+            MailKind::AccessRevoked => "access_revoked",
         }
     }
 ```
@@ -309,6 +311,53 @@ flows fail the request.
 
 ---
 
+### fn send_notice
+
+**Identification** — `Mailer::send_notice`; marker `// md:impl Mailer > fn send_notice`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Mailer > fn send_notice
+    pub async fn send_notice(
+        &self,
+        kind: MailKind,
+        to: &str,
+        display_name: &str,
+        resource_kind: &str,
+        resource_id: uuid::Uuid,
+    ) -> Result<(), String> {
+        let Some(url) = &self.webhook_url else {
+            return Err("mail webhook not configured".into());
+        };
+        let mut req = self.http.post(url).json(&serde_json::json!({
+            "kind": kind.as_str(),
+            "to": to,
+            "display_name": display_name,
+            "resource_kind": resource_kind,
+            "resource_id": resource_id,
+        }));
+        if let Some(bearer) = &self.webhook_token {
+            req = req.bearer_auth(bearer);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) => Err(format!("mail webhook answered {}", resp.status())),
+            Err(e) => Err(format!("mail webhook unreachable: {e}")),
+        }
+    }
+```
+
+**What it does** — Posts a resource-scoped notification to the configured webhook, optionally authenticates it with a bearer token, and converts transport or non-success responses into descriptive errors.
+
+**Dependencies** — `reqwest::Client::post` — creates the webhook request; expects URL validation and transport errors to surface through `send`. `RequestBuilder::json` — serializes the stable notice fields; expects UUID serialization to be accepted by the webhook. `RequestBuilder::bearer_auth` — adds configured authentication; expects omission when no token exists. `Response::status` — classifies delivery success; expects only HTTP success statuses to count as delivered. `MailKind::as_str` — supplies the event kind; expects stable wire spelling.
+
+**Used by** — HTTP revocation notification paths.
+
+**Repeated context** — Delivery is best-effort at callers; this method still reports every failure explicitly.
+
+---
+
 ## Graph context
 
 Repo-tooling metadata, not a code block (no marker in the source). This file is LAYER 2;
@@ -355,3 +404,4 @@ carrying its marker in the code:
 | 7 | `fn new` | `// md:impl Mailer > fn new` | impl Mailer › fn new |
 | 8 | `fn enabled` | `// md:impl Mailer > fn enabled` | impl Mailer › fn enabled |
 | 9 | `fn send` | `// md:impl Mailer > fn send` | impl Mailer › fn send |
+| 10 | `fn send_notice` | `// md:impl Mailer > fn send_notice` | impl Mailer › fn send_notice |
