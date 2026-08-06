@@ -200,6 +200,7 @@ entry to Cleared with the exit that was taken and a link to it.
 |---|---|---|---|---|
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
+| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | 1 | — |
 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
 is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
@@ -216,6 +217,23 @@ Recorded so a reader who finds an implementation blocked by the defect it fixes 
 understood rather than overlooked. It is also why the row above, for keeplin-srv#114, still has no
 exit: that pull request is merged, and re-evaluating a closed pull request is a route this decision
 deliberately left undefined.
+
+[keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) is stuck on `GENESIS` alone:
+its journal opened with `unauthenticatedAnchor: true`, `findings: []` and `blocking: 1`. It
+escalated on the repeated-state brake at observation 2, not on the non-shrinking one — the second
+evaluation was triggered by an edit to the pull-request body, which changes nothing the loop state
+covers, so the hash repeated byte for byte.
+
+Unlike keeplin-srv#116 above, this pull request **can** reach its own exit. The evaluator runs from
+the default branch, and the ADR 0015 Option C authorization path that closes `GENESIS` is now
+merged there via [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217) and
+[keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116). The exit is therefore
+exit 2 of the three below, taken through the procedure in
+[`docs/review-directives.md`](review-directives.md): a verified genesis directive from a qualifying
+principal. It is recorded as open here because issuing that directive is the maintainer's act, not
+the loop's — and because a reader should be able to see that the very first pull request opened
+after the exit landed still had to escalate to use it, which is the per-pull-request cost that
+[keeplin#220](https://github.com/jsunyermias/keeplin/issues/220) exists to remove.
 
 ## Cleared
 
