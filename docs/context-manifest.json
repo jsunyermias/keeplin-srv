@@ -1840,6 +1840,11 @@
           "fn strict_inheritance_is_computed_bounded_and_revocable",
           "fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback",
           "fn controlled_inherited_loss_requires_preserve_or_revoke",
+          "fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations",
+          "fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance",
+          "fn inherited_manage_blocks_but_direct_manage_survives_move",
+          "fn strict_notebook_owner_cannot_share_or_eject_foreign_note",
+          "fn unknown_permission_scheme_fails_process_startup",
           "fn direct_duplicate_survives_migration_and_rollback_restores_projection"
         ]
       },
