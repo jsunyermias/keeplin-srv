@@ -2049,7 +2049,10 @@ async fn inherited_capabilities(
             .map(|share| share.capabilities)
             .unwrap_or(0)
     };
-    Ok(bits & state.config.permission_scheme.notebook_inheritance())
+    Ok(
+        Capabilities::from_bits(bits).bits()
+            & state.config.permission_scheme.notebook_inheritance(),
+    )
 }
 ```
 
@@ -2187,8 +2190,8 @@ async fn update_note(
                     .await?
                     .map(|share| share.capabilities)
                     .unwrap_or(0);
-                let source_bits =
-                    inherited_bits & state.config.permission_scheme.notebook_inheritance();
+                let source_bits = Capabilities::from_bits(inherited_bits).bits()
+                    & state.config.permission_scheme.notebook_inheritance();
                 let destination_bits =
                     inherited_capabilities(&state, destination, principal).await?;
                 let before = Capabilities::from_bits(direct_bits | source_bits);

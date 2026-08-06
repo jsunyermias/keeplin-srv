@@ -527,7 +527,9 @@ pub async fn resolve_note_access(
                 .map(|share| share.capabilities)
                 .unwrap_or(0)
         };
-        Capabilities::from_bits(notebook_bits & scheme.notebook_inheritance())
+        Capabilities::from_bits(
+            Capabilities::from_bits(notebook_bits).bits() & scheme.notebook_inheritance(),
+        )
     } else {
         Capabilities::empty()
     };
