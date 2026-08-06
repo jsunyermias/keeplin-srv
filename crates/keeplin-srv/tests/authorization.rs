@@ -1,7 +1,7 @@
 // md:Overview
 use std::{collections::BTreeSet, net::SocketAddr, process::Command, sync::Arc};
 
-use axum::Router;
+use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
     models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
@@ -579,6 +579,28 @@ async fn spawn_authorization_server(pool: PgPool) -> SocketAddr {
         .unwrap();
     });
     addr
+}
+
+// md:fn spawn_notice_webhook
+async fn spawn_notice_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+    let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
+    let captured = inbox.clone();
+    let app = Router::new().route(
+        "/mail",
+        axum::routing::post(move |Json(payload): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().await.push(payload);
+                "ok"
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, inbox)
 }
 
 // md:fn register_and_login
@@ -1709,6 +1731,93 @@ async fn deleted_notebook_revokes_inherited_note_access(pool: PgPool) {
         .unwrap()
         .iter()
         .any(|listed| listed.id == note.id));
+}
+
+// md:fn moving_from_deleted_notebook_does_not_notify_stale_principals
+#[sqlx::test(migrations = "../../migrations")]
+async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let owner_token = register_and_login(addr, "deleted-move-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "deleted-move-grantee@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("deleted-move-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("deleted-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut notebook = Notebook::new("deleted move source");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "move from deleted", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    assert!(!inbox.lock().await.iter().any(|payload| {
+        payload["kind"] == "access_revoked"
+            && payload["to"] == grantee.email
+            && payload["resource_id"] == note.id.to_string()
+    }));
 }
 
 // md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
