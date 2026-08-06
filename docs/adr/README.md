@@ -39,7 +39,17 @@ link the ADR in both directions.
 
 ## Server-specific decisions
 
-No server-specific ADR has been accepted yet. The first expected use is
+No server-specific ADR has been accepted yet.
+
+| ADR | Status | Scope | Issue | Acceptance PR |
+|---|---|---|---|---|
+| [0001 — Note moves and the provenance of note shares](0001-note-moves-and-share-provenance.md) | proposed | note/notebook permission surface: who may move a note, and whether a move may alter its grants | [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110) | none yet |
+
+`0001` has no canonical or companion ADR in `keeplin`: the capability model, both share tables and
+every function it names are local to this repository, and it moves no shared wire or format
+surface.
+
+A second local decision is expected for
 [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75): it must decide between
 transactional materialization and a durable projection queue before implementation begins.
 
