@@ -28,10 +28,6 @@ impl PermissionScheme {
     pub fn move_out_guard(self) -> bool {
         true
     }
-
-    pub fn equal_principal_guard(self) -> bool {
-        true
-    }
 }
 
 // md:Config

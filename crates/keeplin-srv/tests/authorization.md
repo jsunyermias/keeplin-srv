@@ -2112,6 +2112,95 @@ async fn strict_inheritance_is_computed_bounded_and_revocable(pool: PgPool) {
 
 ---
 
+## fn deleted_notebook_revokes_inherited_note_access
+
+**Identification** — PostgreSQL integration regression for soft-deleted notebook authorization; marker `// md:fn deleted_notebook_revokes_inherited_note_access`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn deleted_notebook_revokes_inherited_note_access
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleted_notebook_revokes_inherited_note_access(pool: PgPool) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("deleted-notebook-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("deleted-notebook-grantee@example.com", "x", "grantee")
+        .await
+        .unwrap();
+    let mut notebook = Notebook::new("deleted notebook");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert!(store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    assert!(matches!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict).await,
+        Err(keeplin_srv::error::AppError::Forbidden)
+    ));
+    assert!(!store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+}
+```
+
+**What it does** — Creates a foreign note inside a shared notebook, proves the grantee can both resolve and enumerate inherited access, soft-deletes the notebook, then requires the inherited resolver path to return `Forbidden` and the listing path to omit the note.
+
+**Dependencies** — `Store::create_user` — creates distinct owner and grantee principals; expects unique emails to produce isolated users. `Store::{upsert_notebook, create_or_update_notebook_share}` — establishes the inherited-access parent; expects a live shared notebook to grant read access. `VersionVector` and `Notebook::last_writer` — make the deletion causally dominate the inserted notebook revision under conflict resolution. `Store::create_note` — creates the foreign note with an explicit note ID; expects its first argument to be the note ID. `Store::update_note_meta` and `NotePatch::notebook_id` — place the note in the notebook; expects nested `Some` to mean assignment rather than no change or removal. `resolve_note_access` — checks effective strict access; expects deleted notebooks never to supply inheritance. `Store::list_notes_for_user` — checks enumeration; expects deleted notebooks never to expose contained notes through notebook ownership or shares. `Store::delete_notebook` — soft-deletes the parent; expects the dominating vector to win and persist `deleted_at`. `AppError::Forbidden` — distinguishes revoked authorization from an arbitrary failure.
+
+**Used by** — `cargo test --workspace`; mechanical regression for COD-122-01.
+
+**Repeated context** — A soft-deleted authorization parent is absent for both object access and enumeration, even while its historical share row remains stored.
+
+---
+
 ## fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
 
 **Identification** — PostgreSQL-backed HTTP regression; marker `// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback`.
@@ -2880,11 +2969,12 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 24 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |
 | 25 | `fn write_grantee_cannot_move_foreign_note_or_change_direct_grants` | `// md:fn write_grantee_cannot_move_foreign_note_or_change_direct_grants` |
 | 26 | `fn strict_inheritance_is_computed_bounded_and_revocable` | `// md:fn strict_inheritance_is_computed_bounded_and_revocable` |
-| 27 | `fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` | `// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` |
-| 28 | `fn controlled_inherited_loss_requires_preserve_or_revoke` | `// md:fn controlled_inherited_loss_requires_preserve_or_revoke` |
-| 29 | `fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` | `// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` |
-| 30 | `fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` | `// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` |
-| 31 | `fn inherited_manage_blocks_but_direct_manage_survives_move` | `// md:fn inherited_manage_blocks_but_direct_manage_survives_move` |
-| 32 | `fn strict_notebook_owner_cannot_share_or_eject_foreign_note` | `// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note` |
-| 33 | `fn unknown_permission_scheme_fails_process_startup` | `// md:fn unknown_permission_scheme_fails_process_startup` |
-| 34 | `fn direct_duplicate_survives_migration_and_rollback_restores_projection` | `// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection` |
+| 27 | `fn deleted_notebook_revokes_inherited_note_access` | `// md:fn deleted_notebook_revokes_inherited_note_access` |
+| 28 | `fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` | `// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` |
+| 29 | `fn controlled_inherited_loss_requires_preserve_or_revoke` | `// md:fn controlled_inherited_loss_requires_preserve_or_revoke` |
+| 30 | `fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` | `// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` |
+| 31 | `fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` | `// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` |
+| 32 | `fn inherited_manage_blocks_but_direct_manage_survives_move` | `// md:fn inherited_manage_blocks_but_direct_manage_survives_move` |
+| 33 | `fn strict_notebook_owner_cannot_share_or_eject_foreign_note` | `// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note` |
+| 34 | `fn unknown_permission_scheme_fails_process_startup` | `// md:fn unknown_permission_scheme_fails_process_startup` |
+| 35 | `fn direct_duplicate_survives_migration_and_rollback_restores_projection` | `// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection` |

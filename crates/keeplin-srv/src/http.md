@@ -2204,10 +2204,7 @@ async fn update_note(
                     }
                 }
             }
-            if !affected.is_empty()
-                && (state.config.permission_scheme.equal_principal_guard()
-                    || state.config.permission_scheme.move_out_guard())
-            {
+            if !affected.is_empty() {
                 affected.sort_unstable();
                 affected.dedup();
                 return Err(AppError::MoveBlocked(affected));
@@ -2496,8 +2493,8 @@ async fn delete_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    state.store.delete_share(note_id, target_id).await?;
-    if target_id != user.user_id {
+    let deleted = state.store.delete_share(note_id, target_id).await?;
+    if deleted && target_id != user.user_id {
         notify_access_revoked(&state, target_id, "note", note_id).await;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -2508,7 +2505,7 @@ async fn delete_share(
 can revoke anyone; anyone can remove **themselves** (leaving a share); otherwise
 `403`.
 
-**Dependencies** — `resolve_note_access`; `Store::delete_share`. **Used by** —
+**Dependencies** — `resolve_note_access`; `Store::delete_share`, whose boolean result prevents notices for absent rows. **Used by** —
 routed in `router`.
 
 **Repeated context** — Live-session note: revocation takes effect on the
@@ -2754,11 +2751,11 @@ async fn delete_notebook_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    state
+    let deleted = state
         .store
         .delete_notebook_share(notebook_id, target_id)
         .await?;
-    if target_id != user.user_id {
+    if deleted && target_id != user.user_id {
         notify_access_revoked(&state, target_id, "notebook", notebook_id).await;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -2769,7 +2766,7 @@ async fn delete_notebook_share(
 self-removal; the revocation **re-cascades** to the notebook's notes inside the
 store call.
 
-**Dependencies** — `resolve_notebook_access`; `Store::delete_notebook_share`.
+**Dependencies** — `resolve_notebook_access`; `Store::delete_notebook_share`, whose boolean result prevents notices for absent rows.
 **Used by** — routed in `router`; `transfer_notebook` (dropping the new owner's
 share). **Repeated context** — as `create_notebook_share`.
 

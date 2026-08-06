@@ -328,7 +328,7 @@ flows fail the request.
         resource_id: uuid::Uuid,
     ) -> Result<(), String> {
         let Some(url) = &self.webhook_url else {
-            return Err("mail webhook not configured".into());
+            return Ok(());
         };
         let mut req = self.http.post(url).json(&serde_json::json!({
             "kind": kind.as_str(),
@@ -348,13 +348,13 @@ flows fail the request.
     }
 ```
 
-**What it does** — Posts a resource-scoped notification to the configured webhook, optionally authenticates it with a bearer token, and converts transport or non-success responses into descriptive errors.
+**What it does** — Returns success without I/O when no webhook is configured. Otherwise posts a resource-scoped notification, optionally authenticates it with a bearer token, and converts transport or non-success responses into descriptive errors.
 
 **Dependencies** — `reqwest::Client::post` — creates the webhook request; expects URL validation and transport errors to surface through `send`. `RequestBuilder::json` — serializes the stable notice fields; expects UUID serialization to be accepted by the webhook. `RequestBuilder::bearer_auth` — adds configured authentication; expects omission when no token exists. `Response::status` — classifies delivery success; expects only HTTP success statuses to count as delivered. `MailKind::as_str` — supplies the event kind; expects stable wire spelling.
 
 **Used by** — HTTP revocation notification paths.
 
-**Repeated context** — Delivery is best-effort at callers; this method still reports every failure explicitly.
+**Repeated context** — Delivery is best-effort at callers; absence of optional mail configuration is not a failure, while configured delivery failures remain explicit.
 
 ---
 

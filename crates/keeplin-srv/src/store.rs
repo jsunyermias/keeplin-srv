@@ -897,6 +897,11 @@ impl Store {
                       ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
                LEFT JOIN notebook_shares nbs
                       ON nbs.notebook_id = n.notebook_id AND nbs.user_id = $1
+                     AND EXISTS (
+                         SELECT 1 FROM notebooks shared_nb
+                         WHERE shared_nb.id = nbs.notebook_id
+                           AND shared_nb.deleted_at IS NULL
+                     )
                WHERE n.deleted_at IS NULL
                  AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL
                       OR nbs.user_id IS NOT NULL)
@@ -1051,13 +1056,15 @@ impl Store {
     }
 
     // md:impl Store > fn delete_share
-    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
-            .bind(note_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(deleted.is_some())
     }
 
     // md:impl Store > fn notebook_owner
@@ -1094,8 +1101,10 @@ impl Store {
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
-            r#"SELECT notebook_id, user_id, capabilities, created_at
-               FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2"#,
+            r#"SELECT ns.notebook_id, ns.user_id, ns.capabilities, ns.created_at
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1 AND ns.user_id = $2"#,
         )
         .bind(notebook_id)
         .bind(user_id)
@@ -1145,13 +1154,15 @@ impl Store {
         &self,
         notebook_id: Uuid,
         user_id: Uuid,
-    ) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2")
+    ) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
+        )
             .bind(notebook_id)
             .bind(user_id)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
-        Ok(())
+        Ok(deleted.is_some())
     }
 
     // md:impl Store > fn inherited_note_principals
@@ -1160,7 +1171,10 @@ impl Store {
         notebook_id: Uuid,
     ) -> Result<Vec<(Uuid, i32)>, AppError> {
         let rows = sqlx::query_as::<_, (Uuid, i32)>(
-            r#"SELECT user_id, capabilities FROM notebook_shares WHERE notebook_id = $1
+            r#"SELECT ns.user_id, ns.capabilities
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1
                UNION
                SELECT user_id, $2 FROM notebooks WHERE id = $1 AND deleted_at IS NULL"#,
         )

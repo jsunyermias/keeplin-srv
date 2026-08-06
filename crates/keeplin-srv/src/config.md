@@ -124,10 +124,6 @@ pub enum PermissionScheme {
     pub fn move_out_guard(self) -> bool {
         true
     }
-
-    pub fn equal_principal_guard(self) -> bool {
-        true
-    }
 ```
 
 **What it does** — Caps notebook inheritance at read/write, exposes the optional ejection behavior, and keeps move-out and equal-principal guards enabled.

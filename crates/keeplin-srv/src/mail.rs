@@ -84,7 +84,7 @@ impl Mailer {
         resource_id: uuid::Uuid,
     ) -> Result<(), String> {
         let Some(url) = &self.webhook_url else {
-            return Err("mail webhook not configured".into());
+            return Ok(());
         };
         let mut req = self.http.post(url).json(&serde_json::json!({
             "kind": kind.as_str(),

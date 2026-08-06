@@ -1640,6 +1640,77 @@ async fn strict_inheritance_is_computed_bounded_and_revocable(pool: PgPool) {
     );
 }
 
+// md:fn deleted_notebook_revokes_inherited_note_access
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleted_notebook_revokes_inherited_note_access(pool: PgPool) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("deleted-notebook-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("deleted-notebook-grantee@example.com", "x", "grantee")
+        .await
+        .unwrap();
+    let mut notebook = Notebook::new("deleted notebook");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert!(store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    assert!(matches!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict).await,
+        Err(keeplin_srv::error::AppError::Forbidden)
+    ));
+    assert!(!store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+}
+
 // md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback(pool: PgPool) {

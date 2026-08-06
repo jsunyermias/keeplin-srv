@@ -1912,6 +1912,11 @@ pub struct Store {
                       ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
                LEFT JOIN notebook_shares nbs
                       ON nbs.notebook_id = n.notebook_id AND nbs.user_id = $1
+                     AND EXISTS (
+                         SELECT 1 FROM notebooks shared_nb
+                         WHERE shared_nb.id = nbs.notebook_id
+                           AND shared_nb.deleted_at IS NULL
+                     )
                WHERE n.deleted_at IS NULL
                  AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL
                       OR nbs.user_id IS NOT NULL)
@@ -1933,7 +1938,7 @@ pub struct Store {
     }
 ```
 
-**What it does** — notes visible to the user: owned, shared (`note_shares`), or filed in a notebook they own (the folder-owner rule, mirroring `permissions::resolve_note_access`), newest first; keyset-paginated on `(updated_at, id)`; titles decrypted.
+**What it does** — Returns live notes visible through ownership, a direct note share, ownership of a live containing notebook, or a share on a live containing notebook. A soft-deleted notebook contributes neither owner nor grantee inheritance. Results are newest first, keyset-paginated on `(updated_at, id)`, with titles decrypted.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2197,17 +2202,19 @@ the server-side hook where the note delete is applied.
 
 ```rust
     // md:impl Store > fn delete_share
-    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
-            .bind(note_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(deleted.is_some())
     }
 ```
 
-**What it does** — revoke (or self-remove).
+**What it does** — Deletes one direct note share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2288,8 +2295,10 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
-            r#"SELECT notebook_id, user_id, capabilities, created_at
-               FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2"#,
+            r#"SELECT ns.notebook_id, ns.user_id, ns.capabilities, ns.created_at
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1 AND ns.user_id = $2"#,
         )
         .bind(notebook_id)
         .bind(user_id)
@@ -2299,7 +2308,7 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — lookups.
+**What it does** — Returns a direct notebook grant only while its source notebook is live; a soft-deleted notebook confers no inherited access even if its share row remains.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2387,17 +2396,19 @@ the server-side hook where the note delete is applied.
         &self,
         notebook_id: Uuid,
         user_id: Uuid,
-    ) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2")
+    ) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
+        )
             .bind(notebook_id)
             .bind(user_id)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
-        Ok(())
+        Ok(deleted.is_some())
     }
 ```
 
-**What it does** — revoke + re-cascade, one transaction.
+**What it does** — Deletes one notebook share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2470,7 +2481,10 @@ the server-side hook where the note delete is applied.
         notebook_id: Uuid,
     ) -> Result<Vec<(Uuid, i32)>, AppError> {
         let rows = sqlx::query_as::<_, (Uuid, i32)>(
-            r#"SELECT user_id, capabilities FROM notebook_shares WHERE notebook_id = $1
+            r#"SELECT ns.user_id, ns.capabilities
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1
                UNION
                SELECT user_id, $2 FROM notebooks WHERE id = $1 AND deleted_at IS NULL"#,
         )
@@ -2482,9 +2496,9 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — Returns every directly shared notebook principal plus the live notebook owner, with owner capabilities fixed to the full mask.
+**What it does** — Returns every directly shared principal plus the owner only for a live notebook, with owner capabilities fixed to the full mask. A deleted notebook produces no inherited principals.
 
-**Dependencies** — `sqlx::query_as` — decodes `(Uuid, i32)` principals; expects both UNION branches to preserve that exact row shape. `Capabilities::ALL` — represents owner authority; expects ownership to remain full capability access. `Store::pool` — executes the bounded notebook lookup; expects deleted notebooks not to contribute an owner row.
+**Dependencies** — `sqlx::query_as` — decodes `(Uuid, i32)` principals; expects both UNION branches to preserve that exact row shape. `Capabilities::ALL` — represents owner authority; expects ownership to remain full capability access. `Store::pool` — executes the bounded notebook lookup; expects deleted notebooks not to contribute either owner or grantee rows.
 
 **Used by** — collaboration authorization invalidation and revocation notification paths.
 
