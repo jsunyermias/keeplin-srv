@@ -1820,7 +1820,7 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
 
     let _ = register_and_login(addr, "live-move-grantee@example.com").await;
-    let _ = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
     let live_grantee = store
         .get_user_by_email("live-move-grantee@example.com")
         .await
@@ -1831,35 +1831,65 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .await
         .unwrap()
         .unwrap();
-    let mut live_notebook = Notebook::new("live move source");
-    live_notebook.vv = VersionVector::from([("mallory".to_string(), 1)]);
-    live_notebook.last_writer = "mallory".into();
+    let live_notebook = Notebook::new("live move source");
     assert!(store
         .upsert_notebook(mallory.id, &live_notebook)
         .await
         .unwrap());
-    store
-        .create_or_update_notebook_share(live_notebook.id, live_grantee.id, Capabilities::READ)
-        .await
-        .unwrap();
+    let client = reqwest::Client::new();
+    let owner_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": owner.id, "capabilities": Capabilities::WRITE }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let grantee_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": live_grantee.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(grantee_share.status(), 200);
     let live_note = store
         .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
         .await
         .unwrap();
-    let live_note = store
-        .update_note_meta(
-            live_note.id,
-            &NotePatch {
-                notebook_id: Some(Some(live_notebook.id)),
-                ..Default::default()
-            },
-        )
+    let placed = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": live_notebook.id }),
+    )
+    .await;
+    assert_eq!(placed.status(), 200);
+    let owner_revoked = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/notebooks/{}/share/{}", live_notebook.id, owner.id),
+        &mallory_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(owner_revoked.status(), 200);
+    assert!(store
+        .list_notes_for_user(live_grantee.id, None, None)
         .await
         .unwrap()
-        .unwrap();
+        .iter()
+        .any(|listed| listed.id == live_note.id));
 
     let live_moved = authed_json(
-        &reqwest::Client::new(),
+        &client,
         reqwest::Method::PATCH,
         addr,
         &format!("/api/notes/{}", live_note.id),

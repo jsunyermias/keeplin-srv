@@ -2335,7 +2335,7 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
 
     let _ = register_and_login(addr, "live-move-grantee@example.com").await;
-    let _ = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
     let live_grantee = store
         .get_user_by_email("live-move-grantee@example.com")
         .await
@@ -2346,35 +2346,65 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .await
         .unwrap()
         .unwrap();
-    let mut live_notebook = Notebook::new("live move source");
-    live_notebook.vv = VersionVector::from([("mallory".to_string(), 1)]);
-    live_notebook.last_writer = "mallory".into();
+    let live_notebook = Notebook::new("live move source");
     assert!(store
         .upsert_notebook(mallory.id, &live_notebook)
         .await
         .unwrap());
-    store
-        .create_or_update_notebook_share(live_notebook.id, live_grantee.id, Capabilities::READ)
-        .await
-        .unwrap();
+    let client = reqwest::Client::new();
+    let owner_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": owner.id, "capabilities": Capabilities::WRITE }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let grantee_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": live_grantee.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(grantee_share.status(), 200);
     let live_note = store
         .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
         .await
         .unwrap();
-    let live_note = store
-        .update_note_meta(
-            live_note.id,
-            &NotePatch {
-                notebook_id: Some(Some(live_notebook.id)),
-                ..Default::default()
-            },
-        )
+    let placed = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": live_notebook.id }),
+    )
+    .await;
+    assert_eq!(placed.status(), 200);
+    let owner_revoked = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/notebooks/{}/share/{}", live_notebook.id, owner.id),
+        &mallory_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(owner_revoked.status(), 200);
+    assert!(store
+        .list_notes_for_user(live_grantee.id, None, None)
         .await
         .unwrap()
-        .unwrap();
+        .iter()
+        .any(|listed| listed.id == live_note.id));
 
     let live_moved = authed_json(
-        &reqwest::Client::new(),
+        &client,
         reqwest::Method::PATCH,
         addr,
         &format!("/api/notes/{}", live_note.id),
@@ -2410,9 +2440,9 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
 }
 ```
 
-**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then creates Mallory as the owner of a live notebook shared with a distinct grantee, places the original owner's note in that notebook, and has the note owner move it to the inbox. Because the mover does not control Mallory's grant, strict authorization permits the move, the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks the deleted grantee's absence from every revocation notice. The live control proves the non-controlled-principal notification branch and payload shape before the ordered negative assertion, while filtering only by notice kind prevents registration's `VerifyEmail` mail from being mistaken for stale revocation. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
+**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then materializes a live notebook owned by Mallory with `Notebook::new` defaults. Through authenticated handlers, Mallory grants the note owner `WRITE` and a distinct grantee `READ`, the owner moves its note into Mallory's notebook, and Mallory revokes the owner's notebook grant. The test positively establishes that the grantee can list the contained note before the owner moves it back to the inbox. Because the mover no longer controls Mallory's grant, strict authorization permits that exit; the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks the deleted grantee's absence from every revocation notice. The reachable live control proves both pre-existing access and the non-controlled-principal notification branch before the ordered negative assertion, while filtering only by notice kind prevents registration's `VerifyEmail` mail from being mistaken for stale revocation. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
 
-**Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login` and `router` — create the owner, grantees, and Mallory and exercise the authenticated production move handler; expect the owner token to authorize both moves of its notes. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish genuinely contained shared notes, including an owner note inside Mallory's live notebook; expect nested `NotePatch::notebook_id` to establish containment and the notebook owner passed to `upsert_notebook` to determine control of its grants. `VersionVector`, `Notebook::last_writer`, and `Store::delete_notebook` — make the deleted fixture's deletion causally dominate creation and give Mallory's live notebook coherent creation metadata; expect the historical notebook-share row to remain while the deleted notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by each move; expects a deleted source notebook to contribute none and Mallory's live source notebook to contribute its grantee as a principal not controlled by the mover. `Mailer::send_notice` through `notify_access_revoked` — exposes enumeration as webhook payloads; expects an `access_revoked` notice to identify the live grantee and moved note. `tokio::time::sleep` — bounds polling for the positive notice at approximately two seconds; expects webhook delivery to complete within that integration-test allowance. `Store::list_notes_for_user` — observes post-move authorization; expects a grantee ejected from a live notebook not to list the moved note.
+**Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login`, `router`, and `authed_json` — create the owner, grantees, and Mallory and exercise production share, revoke, and move handlers; expect Mallory to control its notebook grants, `WRITE` to authorize the owner's entry move, revocation to leave the contained note in place, and note ownership to authorize the later unilateral exit. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish the deleted fixture and persist both notes plus Mallory's `Notebook::new` live notebook; expect the notebook owner passed to `upsert_notebook` to determine control without forged version metadata. The live fixture deliberately does not use the direct share or metadata-update methods. `VersionVector` and `Store::delete_notebook` — make only the deleted fixture's deletion causally dominate creation; expect its historical notebook-share row to remain while the deleted notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by each move; expects a deleted source notebook to contribute none and Mallory's live source notebook to contribute its grantee as a principal not controlled by the mover. `Mailer::send_notice` through `notify_access_revoked` — exposes enumeration as webhook payloads; expects an `access_revoked` notice to identify the live grantee and moved note. `tokio::time::sleep` — bounds polling for the positive notice at approximately two seconds; expects webhook delivery to complete within that integration-test allowance. `Store::list_notes_for_user` — proves the live grantee has inherited access before the exit and observes its removal afterward; expects containment plus the live notebook grant to make the note listable until the PATCH commits.
 
 **Used by** — `cargo test --workspace`; mutation verifier for the deleted-notebook JOIN in `Store::inherited_note_principals`.
 
