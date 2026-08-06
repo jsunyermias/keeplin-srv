@@ -237,14 +237,17 @@ It is worth recording that the very first pull request opened after the exit lan
 escalate in order to use it, which is the per-pull-request cost that
 [keeplin#220](https://github.com/jsunyermias/keeplin/issues/220) exists to remove.
 
+<a id="keeplin-srv-121-evaluation-gap"></a>
+
 **The exit was taken, but its effect was never observed.** `keeplin-srv#121` merged on 2026-08-06
 at 18:48 UTC without the `Review loop converged` check ever having been evaluated on its merge
-candidate, `3862005`. Two things combined. The evaluator applies to non-draft pull requests, and
-this one stayed a draft until minutes before the merge, so it was skipped for its whole life. And
-in that window GitHub Actions had already stopped dispatching workflows for this repository — no
-run was created after 16:52 UTC, and the merge itself triggered no build of `main` either. The
-earlier `Review loop converged` results on this pull request are the two from `43517cb`, both
-failures, which are what produced this stall in the first place.
+candidate, `3862005`. The only `Review loop converged` results this pull request received are the
+two from `43517cb`, both failures, which are what produced this stall in the first place. Why the
+evaluator did not run again after the push to `3862005` is undetermined. GitHub Actions had stopped
+dispatching workflows for this repository by then: no run was created after 16:52 UTC, and the
+merge itself triggered no build of `main` either. Consequently, the merged `main` tree remains
+unverified by CI, and any other pull request merged during that window likewise lacks checks on
+its merge commit; verification of those merged trees remains pending.
 
 What that leaves unproven is narrow and should not be overstated. The convergence condition was
 never computed on the merged tree: not that it would have failed. Its inputs were green when the
@@ -263,6 +266,6 @@ rather than implied.
 
 | Detected | Pull request | Stuck on | Exit | Resolution |
 |---|---|---|---|---|
-| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | authorized genesis | [Directive](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982); merged before any evaluation ran on the candidate, see above |
+| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | authorized genesis | The verified [genesis directive](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982) closed `GENESIS`; the unresolved candidate-evaluation gap is [recorded here](#keeplin-srv-121-evaluation-gap). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-002 | dismissed | Accepted [ADR 0008](adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) bounds the claim; the three-probe follow-up is [tracked](review-loop-spike.md). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-008<br>F-013 | resolved | Default-branch isolation and verified-disposal tests pass. |
