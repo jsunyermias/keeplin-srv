@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{self, AuthedUser},
-    error::AppError,
+    error::{AppError, MoveBlockedCount},
     permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
     state::AppState,
     store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
@@ -2174,8 +2174,17 @@ async fn update_note(
     if moved && state.config.permission_scheme.move_out_guard() {
         if let Some(source_notebook) = note.notebook_id {
             let controls_source = source_notebook_owner == Some(user.user_id);
+            let can_enumerate_source = if controls_source {
+                true
+            } else {
+                resolve_notebook_access(&state.store, source_notebook, user.user_id)
+                    .await
+                    .map(|access| access.caps.can_share_read())
+                    .unwrap_or(false)
+            };
             let destination = patch.notebook_id.flatten();
-            let mut affected = Vec::new();
+            let mut named_principals = Vec::new();
+            let mut unenumerable_count = 0;
             for (principal, inherited_bits) in state
                 .store
                 .inherited_note_principals(source_notebook)
@@ -2198,16 +2207,30 @@ async fn update_note(
                 let after = Capabilities::from_bits(direct_bits | destination_bits);
                 if before.bits() != after.bits() && (before.bits() & !after.bits()) != 0 {
                     if controls_source {
-                        affected.push(principal);
+                        if can_enumerate_source {
+                            named_principals.push(principal);
+                        } else {
+                            unenumerable_count += 1;
+                        }
                     } else {
                         notify_after_move.push(principal);
                     }
                 }
             }
-            if !affected.is_empty() {
-                affected.sort_unstable();
-                affected.dedup();
-                return Err(AppError::MoveBlocked(affected));
+            if !named_principals.is_empty() {
+                named_principals.sort_unstable();
+                named_principals.dedup();
+                let counted_principals = (unenumerable_count > 0)
+                    .then_some(MoveBlockedCount {
+                        notebook_id: source_notebook,
+                        count: unenumerable_count,
+                    })
+                    .into_iter()
+                    .collect();
+                return Err(AppError::MoveBlocked {
+                    named_principals,
+                    counted_principals,
+                });
             }
         }
     }
@@ -2258,10 +2281,19 @@ server path by which a note enters a notebook — notes are created notebook-les
 so checking here covers the whole surface, mirroring `ordering::place_new_note` on
 the client. Moving out (to the inbox) needs no destination check. Apply the
 metadata patch; then, for a real move-in, `apply_notebook_shares_to_note` performs
-the cascade.
+the cascade. Before a move leaves a notebook, the move-out guard compares each
+inherited principal's effective access before and after the move. A mover who
+controls the source receives named blocking principals; a mover who does not
+control it may proceed and receives no principal disclosure. Source-access
+resolution failure means the source cannot be enumerated, not that the request
+failed; it is therefore classified as `false` for the future counted-principal
+path. Under the current controlled-source branch that value is necessarily
+`true`.
 
 **Dependencies** — `resolve_note_access`/`resolve_notebook_access`
-(`permissions.rs`); `Store::{get_note, update_note_meta,
+(`permissions.rs`), with source-notebook resolution errors expected to degrade
+to non-enumerability while destination resolution errors remain request errors;
+`Store::{get_note, update_note_meta,
 apply_notebook_shares_to_note, count_live_notes_in_notebook}` — the count expects
 to exclude soft-deleted notes, so tombstones never consume capacity; `NotePatch`
 (`store.rs`); `present` (this file);

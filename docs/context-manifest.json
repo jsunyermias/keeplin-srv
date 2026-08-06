@@ -583,6 +583,7 @@
         "origin": "EXTRACTED",
         "value": [
           "Overview",
+          "MoveBlockedCount",
           "AppError",
           "impl AppError",
           "impl AppError > fn status",
