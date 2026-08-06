@@ -2328,21 +2328,95 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    assert!(!inbox.lock().await.iter().any(|payload| {
-        payload["kind"] == "access_revoked"
-            && payload["to"] == grantee.email
-            && payload["resource_id"] == note.id.to_string()
-    }));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+
+    let _ = register_and_login(addr, "live-move-grantee@example.com").await;
+    let _ = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let live_grantee = store
+        .get_user_by_email("live-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("live-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut live_notebook = Notebook::new("live move source");
+    live_notebook.vv = VersionVector::from([("mallory".to_string(), 1)]);
+    live_notebook.last_writer = "mallory".into();
+    assert!(store
+        .upsert_notebook(mallory.id, &live_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(live_notebook.id, live_grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let live_note = store
+        .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
+        .await
+        .unwrap();
+    let live_note = store
+        .update_note_meta(
+            live_note.id,
+            &NotePatch {
+                notebook_id: Some(Some(live_notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let live_moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(live_moved.status(), 200);
+    let mut delivered = false;
+    for _ in 0..100 {
+        delivered = inbox.lock().await.iter().any(|payload| {
+            payload["kind"] == "access_revoked"
+                && payload["to"] == live_grantee.email
+                && payload["resource_id"] == live_note.id.to_string()
+        });
+        if delivered {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(delivered);
+    assert!(!store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
 }
 ```
 
-**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending an `access_revoked` notice to the historical notebook grantee, because deletion already ended that principal's inherited access. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
+**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then creates Mallory as the owner of a live notebook shared with a distinct grantee, places the original owner's note in that notebook, and has the note owner move it to the inbox. Because the mover does not control Mallory's grant, strict authorization permits the move, the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks the deleted grantee's absence from every revocation notice. The live control proves the non-controlled-principal notification branch and payload shape before the ordered negative assertion, while filtering only by notice kind prevents registration's `VerifyEmail` mail from being mistaken for stale revocation. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
 
-**Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login` and `router` — exercise the authenticated production move handler; expect the owner token to authorize its own note move. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish a genuinely contained shared note; expect `create_note`'s explicit ID to be the note ID and nested `NotePatch::notebook_id` to establish containment. `VersionVector`, `Notebook::last_writer`, and `Store::delete_notebook` — make the deletion causally dominate creation; expect the historical notebook-share row to remain while the notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by the move; expects a deleted source notebook to contribute none. `Mailer::send_notice` through `notify_access_revoked` — exposes stale enumeration as an `access_revoked` webhook payload; expects notice delivery to remain post-commit and synchronous.
+**Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login` and `router` — create the owner, grantees, and Mallory and exercise the authenticated production move handler; expect the owner token to authorize both moves of its notes. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish genuinely contained shared notes, including an owner note inside Mallory's live notebook; expect nested `NotePatch::notebook_id` to establish containment and the notebook owner passed to `upsert_notebook` to determine control of its grants. `VersionVector`, `Notebook::last_writer`, and `Store::delete_notebook` — make the deleted fixture's deletion causally dominate creation and give Mallory's live notebook coherent creation metadata; expect the historical notebook-share row to remain while the deleted notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by each move; expects a deleted source notebook to contribute none and Mallory's live source notebook to contribute its grantee as a principal not controlled by the mover. `Mailer::send_notice` through `notify_access_revoked` — exposes enumeration as webhook payloads; expects an `access_revoked` notice to identify the live grantee and moved note. `tokio::time::sleep` — bounds polling for the positive notice at approximately two seconds; expects webhook delivery to complete within that integration-test allowance. `Store::list_notes_for_user` — observes post-move authorization; expects a grantee ejected from a live notebook not to list the moved note.
 
 **Used by** — `cargo test --workspace`; mutation verifier for the deleted-notebook JOIN in `Store::inherited_note_principals`.
 
-**Repeated context** — A principal whose inheritance ended at notebook deletion is not affected by a later note move and must not be notified again.
+**Repeated context** — A principal whose inheritance ended at notebook deletion is not affected by a later note move and must not receive an `access_revoked` notice. Under strict authorization, losing inherited access blocks a move only when the mover controls the grant; Mallory's ownership makes the live grantee non-controlled and therefore exercises the notification path while preserving the note owner's unilateral exit. Registration independently emits `VerifyEmail` whenever the test mailer is enabled, even when verification is not required. The production handler awaits notification dispatch inline, and the live positive control supplies the final happens-after barrier for the repeated revocation-absence check.
 
 ---
 

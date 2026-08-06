@@ -1813,11 +1813,85 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    assert!(!inbox.lock().await.iter().any(|payload| {
-        payload["kind"] == "access_revoked"
-            && payload["to"] == grantee.email
-            && payload["resource_id"] == note.id.to_string()
-    }));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+
+    let _ = register_and_login(addr, "live-move-grantee@example.com").await;
+    let _ = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let live_grantee = store
+        .get_user_by_email("live-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("live-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut live_notebook = Notebook::new("live move source");
+    live_notebook.vv = VersionVector::from([("mallory".to_string(), 1)]);
+    live_notebook.last_writer = "mallory".into();
+    assert!(store
+        .upsert_notebook(mallory.id, &live_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(live_notebook.id, live_grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let live_note = store
+        .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
+        .await
+        .unwrap();
+    let live_note = store
+        .update_note_meta(
+            live_note.id,
+            &NotePatch {
+                notebook_id: Some(Some(live_notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let live_moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(live_moved.status(), 200);
+    let mut delivered = false;
+    for _ in 0..100 {
+        delivered = inbox.lock().await.iter().any(|payload| {
+            payload["kind"] == "access_revoked"
+                && payload["to"] == live_grantee.email
+                && payload["resource_id"] == live_note.id.to_string()
+        });
+        if delivered {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(delivered);
+    assert!(!store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
 }
 
 // md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
