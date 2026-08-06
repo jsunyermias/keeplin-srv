@@ -125,6 +125,14 @@ is neither, so that sentence is false as written.
 - The permission model is server-local. `Capabilities` is defined only in
   `crates/keeplin-srv/src/permissions.rs`, shares appear in no collab protocol variant, and no
   `keeplin-core` type is involved.
+- A third party's access is never removed without the owner deciding it and the affected principal
+  being told. Silent revocation is the mirror image of silent escalation and this decision must not
+  trade one for the other.
+- Notification must not be a precondition of a permission change. `// md:impl Mailer > fn enabled`
+  is false whenever no webhook is configured, so any rule that blocks on delivery either breaks
+  mailer-less deployments or drops notices quietly.
+- The policy points this decision fixes must be selectable per deployment rather than compiled in,
+  so that a deployment can adopt a different trade-off without a fork.
 
 ## Threat model
 
@@ -219,12 +227,19 @@ stale requests, and a UI concept that does not exist. The issue explicitly asks 
 before implementation rather than discovered during it. It also solves a problem Option 4 already
 removes: once only the owner may move a note, the mover *is* the consenting party.
 
+**Partially adopted.** Invariants 6 and 7 take this option's insight — that a move is not purely
+the mover's business — without its cost. The refusal is computed from state that already exists, so
+there is no pending-request record, no expiry and no cleanup; the owner resolves it by granting or
+revoking through endpoints that already exist. What is *not* adopted is consent by the affected
+party: they are told, and they are protected from silent loss, but they cannot veto.
+
 ## Decision and justification
 
 > This ADR is `proposed`. What follows is the recommendation put to the maintainer, not an
 > approved decision, and it does not authorize implementation.
 
-**Recommended: Option 4, together with the move restriction from Option 2.**
+**Recommended: Option 4, together with the move restriction from Option 2, expressed through a named
+permission scheme whose default is stated below.**
 
 The invariants it would establish:
 
@@ -238,6 +253,13 @@ The invariants it would establish:
 4. **Revoking a notebook share revokes the inherited access it conferred**, immediately and without
    a cascade, because the access was never copied.
 5. **`can_delete` and `can_transfer_ownership` remain bound to `notes.owner_id`**, unchanged.
+6. **A move never removes a third party's access silently.** A move that would drop the inherited
+   access of any principal other than the mover is refused. The owner revokes explicitly first, and
+   the affected principals are told; only then does the move succeed. See the ordering rule below.
+7. **A move is refused outright while another principal holds capabilities equal to the owner's.**
+   A grantee holding `MANAGE` normalizes to every bit in `Capabilities::all()` and is therefore the
+   owner's capability equal on that note. Relocating the note out from under such a principal is not
+   a decision one of two equals takes alone.
 
 Why this over the alternatives: Option 2 alone leaves a live grant-destruction path; Option 3 is
 unsound without provenance; Option 5 buys, at the cost of new persistent state, a consent that
@@ -245,43 +267,120 @@ invariant 1 already supplies. Option 4 is the only one that removes the contradi
 choosing a side of it, and it makes the fix structural — there is no `DELETE FROM note_shares` left
 for a future route to reach.
 
-### Sub-decision requiring a separate ruling
+### The permission scheme
 
-Invariant 3 leaves open **what a notebook owner inherits over a note they do not own**. Today it is
-`Capabilities::all()`, which includes `SHARE_WRITE` and `MANAGE`, so a notebook owner may reshare
-another user's note. `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` asserts read,
-patch, listing and a delete refusal; it does not assert the share bits, so either choice below
-keeps that test green.
+Invariants 1, 6 and 7 and the inheritance ceiling are not universal truths; they are the *default*
+policy of a deployment. The maintainer's ruling is that this ADR defines a **named permission
+scheme** rather than hard-coding constants, so that a deployment can select a different policy
+without a code change, and so that the two rulings below are recorded as defaults rather than as
+facts about the domain.
 
-- **3a — keep `Capabilities::all()`.** Preserves current behavior exactly. A notebook owner may
-  reshare notes that others placed in their notebook.
+A scheme is a named, deployment-selected value carrying exactly four policy points. It does not
+introduce roles, does not make `Capabilities` dynamic, and does not touch the bit lattice in
+`// md:impl Capabilities` — the bits and their normalization stay exactly as they are.
+
+| Policy point | What it fixes | `strict` (default) |
+|---|---|---|
+| `notebook_inheritance` | Capabilities a notebook owner inherits over a contained note they do not own | `READ \| WRITE` |
+| `foreign_note_ejection` | Whether the containing notebook's owner may move a foreign note out to the Inbox | denied |
+| `move_out_guard` | What happens to a move that would drop a third party's inherited access | refuse until explicitly revoked, then notify |
+| `equal_principal_guard` | Whether a move is refused while another principal holds the owner's full capability set | refuse |
+
+Selection is a single `Config` field, read from the environment beside the other policy scalars in
+`// md:Config`, defaulting to `strict` when unset. An unrecognized value is a startup error, not a
+silent fallback: a deployment that believes it selected a permissive scheme must not get a strict
+one, and the reverse is worse.
+
+Two properties are **not** scheme-configurable and no scheme may weaken them, because they are the
+defect this ADR exists to close:
+
+- Invariants 2, 3 and 4. Materialization does not come back under any scheme; provenance is
+  structural, not policy.
+- Invariant 5. `can_delete` and `can_transfer_ownership` stay bound to `notes.owner_id`.
+
+An explicit grant by the note's owner always overrides the scheme upward. The scheme fixes what a
+principal gets *without* being granted anything — inheritance by containment. It never caps what an
+owner may deliberately confer with `// md:fn create_share`.
+
+The scheme deliberately stops at these four points. Anything broader — a `FULL_CONTROL` capability
+and its separation from `MANAGE`, or administrable limits and feature flags — belongs to
+[keeplin-srv#80](https://github.com/jsunyermias/keeplin-srv/issues/80) (`orden-18`) and
+[keeplin-srv#81](https://github.com/jsunyermias/keeplin-srv/issues/81) (`orden-19`) and is not
+decided here. Those issues extend this scheme; they do not replace it. Recorded because the
+alternative considered at authoring time was to scope the scheme out of this ADR entirely and leave
+the two rulings as bare constants; the maintainer chose the scheme.
+
+### First ruling: what a notebook owner inherits
+
+Today it is `Capabilities::all()`, which includes `SHARE_WRITE` and `MANAGE`, so a notebook owner may
+reshare another user's note. `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` asserts
+read, patch, listing and a delete refusal; it does not assert the share bits, so either choice keeps
+that test green.
+
+- **3a — keep `Capabilities::all()`.** Preserves current behavior exactly.
 - **3b — bound inheritance to `READ | WRITE`.** A notebook owner manages content but cannot extend
   access to third parties; only the note's owner may.
 
-Recommended: **3b**, because it keeps the reshare right with the principal who owns the asset and
-narrows the blast radius of a compromised notebook owner. It is a behavior change and needs the
-maintainer's explicit ruling, not an implementer's judgement.
+**Ruled: 3b, as the `strict` default.** The reshare right stays with the principal who owns the
+asset, and the blast radius of a compromised notebook owner narrows. A deployment that wants the old
+behavior selects a scheme with `notebook_inheritance = all`, and a note owner who wants a specific
+notebook owner to have more grants it explicitly.
 
-### Second sub-decision: may a notebook owner eject a foreign note?
+### Second ruling: may a notebook owner eject a foreign note?
 
 Invariant 1 has a consequence it does not state. Today a notebook owner inherits
 `Capabilities::all()` over a contained note and can therefore change its `notebook_id` — moving it
 between their own notebooks, or ejecting it to the Inbox. Under invariant 1 read literally that
 becomes `403`, and since `can_delete` is already bound to ownership, a foreign note placed in
-someone's notebook is **trapped there** until its own owner acts. That sits badly with the force
-"a notebook owner legitimately manages the notes their notebook holds".
+someone's notebook is **trapped there** until its own owner acts.
 
-- **1a — invariant 1 literal.** Only the note's owner may ever change `notebook_id`. Simplest rule,
-  no exception to reason about; the trapped-note case is accepted.
-- **1b — owner, plus eject-to-Inbox by the containing notebook's owner.** A notebook owner may
-  remove a foreign note from their notebook but may not place it anywhere else. Ejection cannot
-  grant the ejector anything, since the Inbox confers no inherited access, so it does not reopen
-  the escalation.
+- **1a — invariant 1 literal.** Only the note's owner may ever change `notebook_id`; the
+  trapped-note case is accepted.
+- **1b — owner, plus eject-to-Inbox by the containing notebook's owner.**
 
-Recommended: **1b**, because a notebook owner who cannot remove someone else's note from their own
-notebook has no remedy at all, and the recommended-4 model makes ejection harmless. Like 3a/3b this
-is the maintainer's ruling and is stated here rather than left to be discovered during
-implementation.
+**Ruled: 1a, as the `strict` default.** The note stays where its owner put it, and a notebook owner
+who wants it gone asks its owner. The cost is accepted knowingly: a notebook owner has no unilateral
+remedy against a foreign note in their notebook, which is a nuisance surface rather than a security
+one, since inheritance under 3b confers no power to the note's owner over the notebook. A deployment
+that finds the nuisance unacceptable selects `foreign_note_ejection = allowed`.
+
+### The ordering rule for a move that drops access
+
+Invariants 6 and 7 need a defined sequence, because "notify the affected" cannot be a precondition
+the server is always able to satisfy: `// md:impl Mailer > fn enabled` is false whenever no webhook
+is configured, and `// md:impl Mailer > fn send` is shaped for a token and an expiry, not for a
+general notice.
+
+The sequence, under the `strict` scheme:
+
+1. The move is evaluated for principals who would lose inherited access. If any exists, the move is
+   refused with a response naming them, and nothing changes.
+2. If any of those principals holds the owner's full capability set, the refusal is terminal for as
+   long as that holds: invariant 7. The owner revokes or reduces that grant first.
+3. For each remaining affected principal the owner chooses, deliberately, one of two things:
+   - **Preserve.** Grant them a direct share on the note with
+     `// md:fn create_share`. Their access then survives the move, because a direct grant does not
+     depend on containment. Nothing is revoked and no notice is owed.
+   - **Revoke.** Remove the grant explicitly through the ordinary share endpoints. This is the
+     point at which a notice is owed — the revocation, not the move.
+
+   Preserve exists so that the ordering rule does not force a disproportionate act. The inherited
+   access being dropped comes from a *notebook* share, and revoking that would remove the
+   principal's access to **every** note in the notebook, not just the one being moved. Requiring
+   that in order to relocate a single note would make the guard worse than the problem.
+4. With no principal left to lose access, the move proceeds.
+
+Notification is therefore attached to **revocation**, which the owner performs deliberately, and
+never to the move, which by step 4 affects nobody. That keeps a deployment without a configured
+mailer fully functional: it can still revoke and still move, and it simply cannot send the notice.
+A failed or unconfigured notice **must not** roll back a revocation the owner asked for — losing the
+revocation is worse than losing the e-mail — but it must be recorded, which is a new `MailKind` and
+a runtime log line rather than new persistent state.
+
+This is the point where an implementer would otherwise have invented something: the naive reading of
+"notify the affected" makes mail delivery a precondition of a permission change, which either breaks
+every mailer-less deployment or silently drops notices. Neither is acceptable and neither is what the
+ruling asks for.
 
 ## Consequences and risks
 
@@ -296,17 +395,32 @@ keys — but it is not zero and it is not measured here.
 
 Residual risks:
 
-- The migration's rule for existing rows is a judgement call that cannot be made correct by
-  inspection, because provenance was never recorded. Whatever is chosen, some deployments will see
-  a grant change. This must be stated in the release notes, not only in the migration companion.
+- The migration keeps rows it cannot attribute, so a deployment carries forward some access that
+  was derived rather than intended. That is the accepted cost of never revoking silently, and the
+  reported count is the only thing that makes it auditable. It must be stated in the release notes,
+  not only in the migration companion.
 - Under 3b, any client that relied on a notebook owner resharing a foreign note breaks. No such
   client is known in-repo, and none can be confirmed for external deployments.
+- Under 1a, a foreign note in a notebook cannot be removed by that notebook's owner. This is a
+  usability cost accepted knowingly and it has a support consequence: an operator will eventually be
+  asked to remove such a note and there is no endpoint that does it. The remedy is to ask the note's
+  owner, or to select `foreign_note_ejection = allowed`.
+- Invariants 6 and 7 make a previously unconditional operation conditional. A note owner can now be
+  refused a move of their own note, which is a new class of `403` that clients must render
+  meaningfully rather than as a generic failure — the response has to name the affected principals
+  or the user cannot act on it.
+- The scheme is a new configuration surface, and a misconfigured deployment gets a different
+  permission policy than its operator believes. That is why an unrecognized value is a startup
+  error. It remains true that a *recognized* but unintended value fails silently in the only way
+  that matters: correctly, per its own definition.
 - The decision does not address device-revocation latency on live WebSocket sessions
   (`orden-10`): a session that resolved access before a revocation may continue until that issue
   lands. Convergence of the two is out of scope here and stays with `keeplin-srv#76`.
 
-Observability: none of these paths logs a grant change today. A follow-up issue should record
-grant mutations in the NDJSON runtime log once `orden-24` exists; this ADR does not require it.
+Observability: none of these paths logs a grant change today, and invariant 6 now makes notices a
+first-class outcome that can fail independently of the operation that owed them. A failed notice
+must be recorded from the start — a runtime log line and a new `MailKind`, not new persistent state.
+Richer NDJSON grant-mutation events remain a follow-up once `orden-24` exists.
 
 ## Compatibility, migration, and rollback
 
@@ -335,12 +449,25 @@ a permanent direct grant. That is exactly the third symptom recorded above, pres
 the migration that was meant to clean it up.
 
 There is no rule that resolves those rows correctly, because the information needed to classify
-them was never recorded: an orphan is byte-identical to a deliberate direct grant. The migration
-must therefore **choose visibly rather than silently**. The recommendation is to keep them, on the
-same err-toward-not-removing-access principle, and to emit their count so an operator can audit
-them; removing access from users who legitimately have it is the worse failure. A deployment that
-prefers the opposite trade should be able to make that choice from the migration's companion, which
-is why this is a maintainer decision and not an implementer's.
+them was never recorded: an orphan is byte-identical to a deliberate direct grant.
+
+**Ruled: keep them, and report them.** This is not a free choice once invariant 6 is accepted. That
+invariant says access is never removed from a third party silently, and that revocation is a
+deliberate act by the owner which is notified. A migration that deleted orphaned rows would do
+exactly the thing invariant 6 forbids, at scale, with no notice and no owner in the loop — it would
+be the largest silent revocation the system ever performed. Keeping them is the only clause
+consistent with the rest of this decision.
+
+Concretely: every surviving `note_shares` row is a direct grant after the migration, and the
+migration emits the count of rows it could not attribute to a deliberate `create_share` — those whose
+`(note_id, user_id, capabilities)` matches a `notebook_shares` row of the note's containing notebook,
+plus every row on a note whose `notebook_id` is now `NULL`. That count is a number to audit, not a
+list to act on automatically. An owner who reviews it and decides a grant was never intended revokes
+it through the ordinary endpoint, where the notice is owed.
+
+Note also that no *new* orphan can be created after this change: invariant 3 stops copying, so there
+is no derived row left to be orphaned. The migration is a one-time reckoning with rows the old design
+already wrote, not an ongoing concern.
 
 **Rollout ordering.** Single repository, single deployment; no ordering constraint against
 `keeplin`.
@@ -363,16 +490,23 @@ dimension that harness does not yet cover: a caller with *legitimate* access gai
 | 1 | A `WRITE` grantee moving a foreign note into their own notebook gets `403`, and the note's `notebook_id` is unchanged | negative, `sqlx::test` |
 | 2 | Alice grants Carol, Bob attempts the move, Carol's access is byte-for-byte unchanged | negative, `sqlx::test` |
 | 3 | The capability set resolved after a *legitimate* move is enumerated and compared with the expected set, fixing the ceiling by test rather than by prose | positive |
-| 4 | `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` stays green | regression |
-| 5 | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green | regression |
+| 4 | `// md:fn notebook_owner_can_manage_child_notes_they_do_not_own` stays green: it asserts read, patch, listing and a delete refusal, none of which 3b removes | regression |
+| 5 | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green: its grantee holds a **direct** share, which invariant 6 does not touch and the move does not drop | regression |
 | 6 | Revoking a notebook share removes inherited access on the next request, with no cascade run | positive |
 | 7 | An owner's direct grant survives every notebook-share mutation on the containing notebook | negative, covers the `cascade_notebook_to_notes_tx` half |
-| 8 | Moving a note out to the Inbox revokes notebook-derived access on the next request. Fails today: Carol keeps `200` on the orphaned row | negative, covers the move-out symptom |
-| 9 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
-| 10 | The migration's handling of orphaned rows on `notebook_id IS NULL` notes matches the accepted clause, and its reported count is non-zero on a fixture that has them | migration, the clause-1 hole |
-| 11 | The rollback migration restores access for notebook members after a code revert | recovery |
-| 12 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
-| 13 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
+| 8 | A move that would drop a third party's inherited access is refused, the response names them, and the note is unmoved | negative, invariant 6 |
+| 9 | After the owner preserves the affected principal with a direct share, the same move succeeds and that principal still resolves access afterwards | positive, the ordering rule's Preserve branch |
+| 10 | After the owner revokes instead, the move succeeds and the principal no longer resolves access | positive, the Revoke branch |
+| 11 | A move is refused while another principal holds `MANAGE` on the note, and stays refused until that grant is reduced | negative, invariant 7 |
+| 12 | A revocation whose notice fails to send still commits, and the failure is recorded | failure injection, the mailer-less deployment |
+| 13 | An unrecognized scheme name fails startup rather than falling back | negative, configuration |
+| 14 | Under `strict`, a notebook owner resolves exactly `READ \| WRITE` over a foreign contained note, and `POST /api/notes/:id/share` by them returns `403` | positive, ruling 3b |
+| 15 | Under `strict`, a notebook owner ejecting a foreign note to the Inbox gets `403` | negative, ruling 1a |
+| 16 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
+| 17 | The migration keeps every unattributable row and reports a non-zero count on a fixture that has both orphan kinds | migration, the kept-and-reported rule |
+| 18 | The rollback migration restores access for notebook members after a code revert | recovery |
+| 19 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
+| 20 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
 
 Criterion 6 of the issue — that `SECURITY.md` stop claiming audit coverage it does not have — is
 evidence, not a verifier, and is recorded as such: it cannot fail on revert and does not gate
