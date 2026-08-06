@@ -59,6 +59,13 @@ The ceiling is therefore: **reshare to anyone and revoke everyone, without being
 transfer.** That is what turns a grant of "may edit" into effective control of access, and it is
 what makes this critical rather than merely wrong.
 
+That ceiling is complete only if no handler reads `MANAGE` directly and does something further
+with it. It does not: `Access` deliberately exposes no `can_manage` accessor, and no call to
+`can_manage` exists anywhere outside `crates/keeplin-srv/src/permissions.rs` — the only other
+occurrences of the string are inside the name of
+`// md:fn notebook_owner_can_manage_child_notes_they_do_not_own`. One nit for exactness: "anyone"
+excludes the owner, whom `// md:fn create_share` rejects with `BadRequest`.
+
 ### The root cause is wider than the move
 
 The same `DELETE`-then-repopulate shape appears in `// md:fn cascade_notebook_to_notes_tx`, which
@@ -76,9 +83,22 @@ Two further observations bound the problem:
 - Moving a note *out* to the Inbox is not symmetric with moving it *in*. `moved_into` is `None`
   when `notebook_id` becomes null, so no cascade runs and grants survive — asserted today by
   `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares`.
-- The relay is not a second entry point. `// md:fn note_changes_are_explicitly_non_materializing`
-  records that note variants are not materialized, and `RELAY_CHANGE_CAPABILITY_UNCOVERED` states
-  the same for `NoteUpdate`. `PATCH /api/notes/:id` is the only route that moves a note.
+
+  This is the **third** symptom of the same contradiction, and it is not benign. The grants that
+  survive include the ones the cascade materialized. Alice shares notebook *NB* with Carol, which
+  copies a row into `note_shares` for the contained note *N*; Alice then moves *N* to the Inbox;
+  Carol keeps access to *N* although *N* is no longer in *NB* and Carol was never granted anything
+  on *N* directly. The row is orphaned: nothing distinguishes it from a deliberate direct grant,
+  and no later revocation of the notebook share can find it, because
+  `// md:fn cascade_notebook_to_notes_tx` only touches notes still in the notebook.
+- The relay is not a second entry point, but the evidence for that is weaker than it looks.
+  `// md:fn note_changes_are_explicitly_non_materializing` does not exercise materialization: it
+  `include_str!`s `crates/keeplin-srv/src/sync.rs` and asserts that the `Change::NoteCreate |
+  NoteUpdate | NoteDelete` arm is present and returns `Ok(())`. That is an assertion about the
+  shape of the source, and `RELAY_CHANGE_CAPABILITY_UNCOVERED` is a hand-written attestation
+  beside it. Both fail if the arm is edited away, which is enough to keep this ADR's claim honest,
+  but neither is a behavioral test. `PATCH /api/notes/:id` is the only route that moves a note
+  today; nothing proves at runtime that it stays the only one.
 
 ### The documentation contradiction
 
@@ -242,6 +262,27 @@ Recommended: **3b**, because it keeps the reshare right with the principal who o
 narrows the blast radius of a compromised notebook owner. It is a behavior change and needs the
 maintainer's explicit ruling, not an implementer's judgement.
 
+### Second sub-decision: may a notebook owner eject a foreign note?
+
+Invariant 1 has a consequence it does not state. Today a notebook owner inherits
+`Capabilities::all()` over a contained note and can therefore change its `notebook_id` — moving it
+between their own notebooks, or ejecting it to the Inbox. Under invariant 1 read literally that
+becomes `403`, and since `can_delete` is already bound to ownership, a foreign note placed in
+someone's notebook is **trapped there** until its own owner acts. That sits badly with the force
+"a notebook owner legitimately manages the notes their notebook holds".
+
+- **1a — invariant 1 literal.** Only the note's owner may ever change `notebook_id`. Simplest rule,
+  no exception to reason about; the trapped-note case is accepted.
+- **1b — owner, plus eject-to-Inbox by the containing notebook's owner.** A notebook owner may
+  remove a foreign note from their notebook but may not place it anywhere else. Ejection cannot
+  grant the ejector anything, since the Inbox confers no inherited access, so it does not reopen
+  the escalation.
+
+Recommended: **1b**, because a notebook owner who cannot remove someone else's note from their own
+notebook has no remedy at all, and the recommended-4 model makes ejection harmless. Like 3a/3b this
+is the maintainer's ruling and is stated here rather than left to be discovered during
+implementation.
+
 ## Consequences and risks
 
 Positive: the escalation closes; an owner's grants become durable against every actor but the
@@ -280,12 +321,26 @@ fix, not a regression.
 
 **Migration.** One forward-only, idempotent migration with its companion `.md`, under the rules in
 `AGENTS.md`: `IF NOT EXISTS` guards, and a `DEFAULT` on any new `NOT NULL` column. It must state
-its rule for existing `note_shares` rows explicitly. The recommended rule is to **delete rows that
-exactly duplicate a `notebook_shares` row for the note's containing notebook** — those are almost
-certainly cascade output, and under invariant 3 the same access is now computed — and to **keep
-every other row** as a direct grant. This preserves access in both directions for the common cases
-and errs toward keeping access rather than silently removing it. The rule is a recommendation and
-part of what the maintainer is being asked to accept.
+its rule for existing `note_shares` rows explicitly. The recommended rule has two clauses:
+
+1. **Delete rows that exactly duplicate a `notebook_shares` row for the note's containing
+   notebook.** Those are almost certainly cascade output, and under invariant 3 the same access is
+   now computed rather than stored.
+2. **Keep every other row** as a direct grant.
+
+Clause 1 has a hole that must be closed rather than inherited. A note whose `notebook_id` is now
+`NULL` — moved to the Inbox after a cascade materialized rows for it — has no containing notebook
+to match against, so clause 1 matches nothing and clause 2 silently promotes every orphaned row to
+a permanent direct grant. That is exactly the third symptom recorded above, preserved forever by
+the migration that was meant to clean it up.
+
+There is no rule that resolves those rows correctly, because the information needed to classify
+them was never recorded: an orphan is byte-identical to a deliberate direct grant. The migration
+must therefore **choose visibly rather than silently**. The recommendation is to keep them, on the
+same err-toward-not-removing-access principle, and to emit their count so an operator can audit
+them; removing access from users who legitimately have it is the worse failure. A deployment that
+prefers the opposite trade should be able to make that choice from the migration's companion, which
+is why this is a maintainer decision and not an implementer's.
 
 **Rollout ordering.** Single repository, single deployment; no ordering constraint against
 `keeplin`.
@@ -312,10 +367,12 @@ dimension that harness does not yet cover: a caller with *legitimate* access gai
 | 5 | `// md:fn nil_notebook_id_patch_means_inbox_and_keeps_shares` stays green | regression |
 | 6 | Revoking a notebook share removes inherited access on the next request, with no cascade run | positive |
 | 7 | An owner's direct grant survives every notebook-share mutation on the containing notebook | negative, covers the `cascade_notebook_to_notes_tx` half |
-| 8 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
-| 9 | The rollback migration restores access for notebook members after a code revert | recovery |
-| 10 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
-| 11 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
+| 8 | Moving a note out to the Inbox revokes notebook-derived access on the next request. Fails today: Carol keeps `200` on the orphaned row | negative, covers the move-out symptom |
+| 9 | The migration is applied twice against a populated database with identical end state | migration, idempotence |
+| 10 | The migration's handling of orphaned rows on `notebook_id IS NULL` notes matches the accepted clause, and its reported count is non-zero on a fixture that has them | migration, the clause-1 hole |
+| 11 | The rollback migration restores access for notebook members after a code revert | recovery |
+| 12 | `./scripts/check-docs.sh` green over the corrected `http.md` and `store.md` companions | documentation |
+| 13 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` | repository checks |
 
 Criterion 6 of the issue — that `SECURITY.md` stop claiming audit coverage it does not have — is
 evidence, not a verifier, and is recorded as such: it cannot fail on revert and does not gate
