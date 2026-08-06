@@ -241,8 +241,10 @@ escalate in order to use it, which is the per-pull-request cost that
 
 **The exit was taken, but its effect was never observed.** `keeplin-srv#121` merged on 2026-08-06
 at 18:48 UTC without the `Review loop converged` check ever having been evaluated on its merge
-candidate, `3862005`. The only `Review loop converged` results this pull request received are the
-two from `43517cb`, both failures, which are what produced this stall in the first place. Why the
+candidate, `3862005`. No `Review loop converged` check exists on `3862005` at all: its checks are
+`Check, Test & Lint` and `Knowledge graph up to date`, both successful. The results that opened
+this stall are the two failures on the first commit, `43517cb`. Whether the evaluator ran on any
+commit in between was not established here. Why the
 evaluator did not run again after the push to `3862005` is undetermined. GitHub Actions had stopped
 dispatching workflows for this repository by then: no run was created after 16:52 UTC, and the
 merge itself triggered no build of `main` either. Consequently, the merged `main` tree remains
