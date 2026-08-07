@@ -1,11 +1,11 @@
 # 0002 — Authorization and HTTP operation consistency
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-07
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/issues/123)
-- Acceptance PR: none; link once accepted
+- Acceptance PR: pending; link after the accepting pull request is opened
 - Supersedes: none
 - Superseded by: none
 
