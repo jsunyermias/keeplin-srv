@@ -5,7 +5,7 @@
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/issues/123)
-- Acceptance PR: pending; link after the accepting pull request is opened
+- Acceptance PR: [keeplin-srv#132](https://github.com/jsunyermias/keeplin-srv/pull/132)
 - Supersedes: none
 - Superseded by: none
 
