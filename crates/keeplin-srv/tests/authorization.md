@@ -10,16 +10,20 @@ Self-contained companion for `crates/keeplin-srv/tests/authorization.rs`.
 
 ```rust
 // md:Overview
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, process::Command, sync::Arc};
 
-use axum::Router;
+use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
     models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
 };
 use keeplin_srv::{
-    config::Config, http::router, permissions::Capabilities, state::AppState, store::Store,
+    config::{Config, PermissionScheme},
+    http::router,
+    permissions::{resolve_note_access, Capabilities},
+    state::AppState,
+    store::{NotePatch, Store},
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -783,6 +787,7 @@ fn authorization_test_config() -> Config {
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
+        permission_scheme: keeplin_srv::config::PermissionScheme::Strict,
     }
 }
 ```
@@ -829,6 +834,46 @@ async fn spawn_authorization_server(pool: PgPool) -> SocketAddr {
 **Used by** — HTTP authorization regressions.
 
 **Repeated context** — mirrors `tests/integration.rs::spawn_server`.
+
+---
+
+## fn spawn_notice_webhook
+
+**Identification** — in-process revocation-notice webhook fixture; marker `// md:fn spawn_notice_webhook`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn spawn_notice_webhook
+async fn spawn_notice_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+    let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
+    let captured = inbox.clone();
+    let app = Router::new().route(
+        "/mail",
+        axum::routing::post(move |Json(payload): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().await.push(payload);
+                "ok"
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, inbox)
+}
+```
+
+**What it does** — Starts a loopback webhook that records each JSON mail payload in a shared inbox, allowing authorization tests to distinguish a committed move from an incorrect revocation notification.
+
+**Dependencies** — `Router::new`, `axum::routing::post`, and `Json` — capture production mail webhook requests; expects Axum extraction to preserve the submitted JSON payload. `TcpListener::bind` and `axum::serve` — expose the fixture on an ephemeral loopback port; expects the spawned server to remain available for the test lifetime. `tokio::sync::Mutex` — serializes inbox access; expects the HTTP response to occur only after the payload is stored.
+
+**Used by** — `moving_from_deleted_notebook_does_not_notify_stale_principals`.
+
+**Repeated context** — Notification delivery is synchronous in `update_note`, so the inbox is complete when the PATCH response arrives.
 
 ---
 
@@ -1700,7 +1745,7 @@ async fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference(pool: 
 // md:fn foreign_and_missing_upserts_are_indistinguishable
 #[sqlx::test(migrations = "../../migrations")]
 async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
-    let store = Store::new(pool);
+    let store = Store::new(pool.clone());
     let attacker = store
         .create_user("attacker@example.com", "hash", "attacker")
         .await
@@ -1918,6 +1963,1204 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
 
 ---
 
+## fn write_grantee_cannot_move_foreign_note_or_change_direct_grants
+
+**Identification** — PostgreSQL integration test; marker `// md:fn write_grantee_cannot_move_foreign_note_or_change_direct_grants`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn write_grantee_cannot_move_foreign_note_or_change_direct_grants
+#[sqlx::test(migrations = "../../migrations")]
+async fn write_grantee_cannot_move_foreign_note_or_change_direct_grants(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "move-owner@example.com").await;
+    let attacker_token = register_and_login(addr, "move-attacker@example.com").await;
+    let _carol_token = register_and_login(addr, "move-carol@example.com").await;
+    let store = Store::new(pool.clone());
+    let owner = store
+        .get_user_by_email("move-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let attacker = store
+        .get_user_by_email("move-attacker@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let carol = store
+        .get_user_by_email("move-carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store.create_note(None, "victim", owner.id).await.unwrap();
+    store
+        .create_or_update_share(note.id, attacker.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, carol.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let notebook = Notebook::new("attacker notebook");
+    assert!(store.upsert_notebook(attacker.id, &notebook).await.unwrap());
+    let before = relation_snapshot(&pool, "note_shares", "note_id", note.id).await;
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &attacker_token,
+        json!({ "notebook_id": notebook.id }),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", note.id).await,
+        before
+    );
+    let owner_response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), 200);
+}
+```
+
+**What it does** — Gives an attacker direct write access, attempts to move the owner's note into the attacker's notebook, and proves the request is forbidden while the note location, direct grants, and owner access remain unchanged.
+
+**Dependencies** — `spawn_authorization_server` — runs the real router; expects the supplied pool clone to share the migrated database. `register_and_login` — creates authenticated principals; expects distinct tenant identities. `Store::{create_note, create_or_update_share, upsert_notebook, get_note}` — prepares and verifies persistent state; expects direct grants and note placement to be independently observable. `relation_snapshot` — captures exact `note_shares`; expects stable ordering. `authed_json` — submits the authenticated PATCH; expects bearer authorization to reach the normal handler.
+
+**Used by** — `cargo test --workspace`; regression coverage for the move-out guard.
+
+**Repeated context** — Direct write permission never authorizes reparenting another owner's note or rewriting its direct grants.
+
+---
+
+## fn strict_inheritance_is_computed_bounded_and_revocable
+
+**Identification** — PostgreSQL integration test; marker `// md:fn strict_inheritance_is_computed_bounded_and_revocable`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn strict_inheritance_is_computed_bounded_and_revocable
+#[sqlx::test(migrations = "../../migrations")]
+async fn strict_inheritance_is_computed_bounded_and_revocable(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "scheme-owner@example.com").await;
+    let grantee_token = register_and_login(addr, "scheme-grantee@example.com").await;
+    let target_token = register_and_login(addr, "scheme-target@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("scheme-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("scheme-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("scheme-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("shared");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    assert!(!access.can_share_write());
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &grantee_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    let owner_access = resolve_note_access(&store, &note, owner.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(owner_access.caps.bits(), Capabilities::ALL);
+    let owner_share = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &owner_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let target_read = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(target_read.status(), 200);
+    store
+        .delete_notebook_share(notebook.id, grantee.id)
+        .await
+        .unwrap();
+    assert!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+}
+```
+
+**What it does** — Proves strict notebook inheritance is computed as read/write without share authority and disappears immediately when the notebook grant is deleted.
+
+**Dependencies** — `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta, delete_notebook_share}` — builds a contained note and revokes the parent relationship; expects `NotePatch::notebook_id` to establish containment without note-share materialization. `resolve_note_access` — computes effective access; expects strict inheritance to consult current notebook state. `PermissionScheme::Strict` — selects accepted default semantics; expects inherited sharing to remain disallowed. `Capabilities::{ALL, READ, WRITE}` — establishes and checks masks; expects bit composition to remain stable.
+
+**Used by** — `cargo test --workspace`; regression coverage for computed, bounded, revocable inheritance.
+
+**Repeated context** — Removing a parent grant must revoke child access without a cascade rewrite.
+
+---
+
+## fn deleted_notebook_revokes_inherited_note_access
+
+**Identification** — PostgreSQL integration regression for soft-deleted notebook authorization; marker `// md:fn deleted_notebook_revokes_inherited_note_access`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn deleted_notebook_revokes_inherited_note_access
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleted_notebook_revokes_inherited_note_access(pool: PgPool) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("deleted-notebook-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("deleted-notebook-grantee@example.com", "x", "grantee")
+        .await
+        .unwrap();
+    let mut notebook = Notebook::new("deleted notebook");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert!(store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    assert!(matches!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict).await,
+        Err(keeplin_srv::error::AppError::Forbidden)
+    ));
+    assert!(!store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+}
+```
+
+**What it does** — Creates a foreign note inside a shared notebook, proves the grantee can both resolve and enumerate inherited access, soft-deletes the notebook, then requires the inherited resolver path to return `Forbidden` and the listing path to omit the note.
+
+**Dependencies** — `Store::create_user` — creates distinct owner and grantee principals; expects unique emails to produce isolated users. `Store::{upsert_notebook, create_or_update_notebook_share}` — establishes the inherited-access parent; expects a live shared notebook to grant read access. `VersionVector` and `Notebook::last_writer` — make the deletion causally dominate the inserted notebook revision under conflict resolution. `Store::create_note` — creates the foreign note with an explicit note ID; expects its first argument to be the note ID. `Store::update_note_meta` and `NotePatch::notebook_id` — place the note in the notebook; expects nested `Some` to mean assignment rather than no change or removal. `resolve_note_access` — checks effective strict access; expects deleted notebooks never to supply inheritance. `Store::list_notes_for_user` — checks enumeration; expects deleted notebooks never to expose contained notes through notebook ownership or shares. `Store::delete_notebook` — soft-deletes the parent; expects the dominating vector to win and persist `deleted_at`. `AppError::Forbidden` — distinguishes revoked authorization from an arbitrary failure.
+
+**Used by** — `cargo test --workspace`; mechanical regression for COD-122-01.
+
+**Repeated context** — A soft-deleted authorization parent is absent for both object access and enumeration, even while its historical share row remains stored.
+
+---
+
+## fn moving_from_deleted_notebook_does_not_notify_stale_principals
+
+**Identification** — PostgreSQL-backed HTTP mutation regression for the move guard's inherited-principal enumeration; marker `// md:fn moving_from_deleted_notebook_does_not_notify_stale_principals`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn moving_from_deleted_notebook_does_not_notify_stale_principals
+#[sqlx::test(migrations = "../../migrations")]
+async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let owner_token = register_and_login(addr, "deleted-move-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "deleted-move-grantee@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("deleted-move-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("deleted-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut notebook = Notebook::new("deleted move source");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "move from deleted", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+
+    let _ = register_and_login(addr, "live-move-grantee@example.com").await;
+    let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let live_grantee = store
+        .get_user_by_email("live-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("live-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let live_notebook = Notebook::new("live move source");
+    assert!(store
+        .upsert_notebook(mallory.id, &live_notebook)
+        .await
+        .unwrap());
+    let client = reqwest::Client::new();
+    let owner_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": owner.id, "capabilities": Capabilities::WRITE }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let grantee_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": live_grantee.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(grantee_share.status(), 200);
+    let live_note = store
+        .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
+        .await
+        .unwrap();
+    let placed = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": live_notebook.id }),
+    )
+    .await;
+    assert_eq!(placed.status(), 200);
+    let owner_revoked = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/notebooks/{}/share/{}", live_notebook.id, owner.id),
+        &mallory_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(owner_revoked.status(), 200);
+    assert!(store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+
+    let live_moved = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(live_moved.status(), 200);
+    let mut delivered = false;
+    for _ in 0..100 {
+        delivered = inbox.lock().await.iter().any(|payload| {
+            payload["kind"] == "access_revoked"
+                && payload["to"] == live_grantee.email
+                && payload["resource_id"] == live_note.id.to_string()
+        });
+        if delivered {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(delivered);
+    assert!(!store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+}
+```
+
+**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then materializes a live notebook owned by Mallory with `Notebook::new` defaults. Through authenticated handlers, Mallory grants the note owner `WRITE` and a distinct grantee `READ`, the owner moves its note into Mallory's notebook, and Mallory revokes the owner's notebook grant. The test positively establishes that the grantee can list the contained note before the owner moves it back to the inbox. Because the mover no longer controls Mallory's grant, strict authorization permits that exit; the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks the deleted grantee's absence from every revocation notice. The reachable live control proves both pre-existing access and the non-controlled-principal notification branch before the ordered negative assertion, while filtering only by notice kind prevents registration's `VerifyEmail` mail from being mistaken for stale revocation. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
+
+**Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login`, `router`, and `authed_json` — create the owner, grantees, and Mallory and exercise production share, revoke, and move handlers; expect Mallory to control its notebook grants, `WRITE` to authorize the owner's entry move, revocation to leave the contained note in place, and note ownership to authorize the later unilateral exit. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish the deleted fixture and persist both notes plus Mallory's `Notebook::new` live notebook; expect the notebook owner passed to `upsert_notebook` to determine control without forged version metadata. The live fixture deliberately does not use the direct share or metadata-update methods. `VersionVector` and `Store::delete_notebook` — make only the deleted fixture's deletion causally dominate creation; expect its historical notebook-share row to remain while the deleted notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by each move; expects a deleted source notebook to contribute none and Mallory's live source notebook to contribute its grantee as a principal not controlled by the mover. `Mailer::send_notice` through `notify_access_revoked` — exposes enumeration as webhook payloads; expects an `access_revoked` notice to identify the live grantee and moved note. `tokio::time::sleep` — bounds polling for the positive notice at approximately two seconds; expects webhook delivery to complete within that integration-test allowance. `Store::list_notes_for_user` — proves the live grantee has inherited access before the exit and observes its removal afterward; expects containment plus the live notebook grant to make the note listable until the PATCH commits.
+
+**Used by** — `cargo test --workspace`; mutation verifier for the deleted-notebook JOIN in `Store::inherited_note_principals`.
+
+**Repeated context** — A principal whose inheritance ended at notebook deletion is not affected by a later note move and must not receive an `access_revoked` notice. Under strict authorization, losing inherited access blocks a move only when the mover controls the grant; Mallory's ownership makes the live grantee non-controlled and therefore exercises the notification path while preserving the note owner's unilateral exit. Registration independently emits `VerifyEmail` whenever the test mailer is enabled, even when verification is not required. The production handler awaits notification dispatch inline, and the live positive control supplies the final happens-after barrier for the repeated revocation-absence check.
+
+---
+
+## fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
+
+**Identification** — PostgreSQL-backed HTTP regression; marker `// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback(pool: PgPool) {
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some("http://127.0.0.1:1/unreachable".into());
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let alice_token = register_and_login(addr, "exit-alice@example.com").await;
+    let _mallory_token = register_and_login(addr, "exit-mallory@example.com").await;
+    let bob_token = register_and_login(addr, "exit-bob@example.com").await;
+    let store = Store::new(pool);
+    let alice = store
+        .get_user_by_email("exit-alice@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("exit-mallory@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob = store
+        .get_user_by_email("exit-bob@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("mallory");
+    assert!(store.upsert_notebook(mallory.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, alice.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, bob.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "alice", alice.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    let bob_response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_response.status(), 403);
+}
+```
+
+**What it does** — Proves a note owner can leave another user's notebook despite a fully privileged inherited principal and that an unreachable revocation-notice webhook cannot roll back the committed move.
+
+**Dependencies** — `Store::{create_note, update_note_meta}` and `NotePatch::notebook_id` — establish a note inside the foreign notebook; expects the fixture to distinguish note identity from containment. `update_note` — performs the guarded move; expects ownership to bound the guard. `Mailer::send_notice` — attempts notification after commit; expects delivery failure to remain non-blocking. `resolve_note_access` — reflected by the final HTTP denial; expects inheritance to disappear immediately.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 12 and 14.
+
+**Repeated context** — Notification is owed but never authority to veto an owner's exit.
+
+---
+
+## fn controlled_inherited_loss_requires_preserve_or_revoke
+
+**Identification** — PostgreSQL-backed move-guard regression; marker `// md:fn controlled_inherited_loss_requires_preserve_or_revoke`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn controlled_inherited_loss_requires_preserve_or_revoke
+#[sqlx::test(migrations = "../../migrations")]
+async fn controlled_inherited_loss_requires_preserve_or_revoke(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let alice_token = register_and_login(addr, "guard-alice@example.com").await;
+    let _bob_token = register_and_login(addr, "guard-bob@example.com").await;
+    let store = Store::new(pool);
+    let alice = store
+        .get_user_by_email("guard-alice@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob = store
+        .get_user_by_email("guard-bob@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("source");
+    let destination = Notebook::new("destination");
+    assert!(store.upsert_notebook(alice.id, &source).await.unwrap());
+    assert!(store.upsert_notebook(alice.id, &destination).await.unwrap());
+    store
+        .create_or_update_notebook_share(source.id, bob.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "guarded", alice.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+    let body: Value = blocked.json().await.unwrap();
+    assert!(body.to_string().contains(&bob.id.to_string()));
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        Some(source.id)
+    );
+    store
+        .create_or_update_share(note.id, bob.id, Capabilities::READ | Capabilities::WRITE)
+        .await
+        .unwrap();
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    let access = resolve_note_access(
+        &store,
+        &store.get_note(note.id).await.unwrap().unwrap(),
+        bob.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+}
+```
+
+**What it does** — Proves a controlled inherited loss blocks and names the affected principal without moving the note, then proves a direct preserving grant permits the same move and remains effective.
+
+**Dependencies** — `Store::{create_note, update_note_meta}` and `NotePatch::notebook_id` — establish actual source containment; expects the fixture not to confuse the optional note ID with its notebook ID. `update_note` — evaluates and commits moves; expects the control-bounded loss guard to run before persistence. `Store::create_or_update_share` — installs the Preserve branch; expects direct provenance to survive containment changes. `resolve_note_access` — verifies the resulting capability set.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 8 and 9.
+
+**Repeated context** — Only principals controlled by the mover block; direct grants do not become containment-derived.
+
+---
+
+## fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations
+
+**Identification** — PostgreSQL-backed exact-ceiling and grant-provenance regression; marker `// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations
+#[sqlx::test(migrations = "../../migrations")]
+async fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations(
+    pool: PgPool,
+) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("ceiling-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let member = store
+        .create_user("ceiling-member@example.com", "x", "member")
+        .await
+        .unwrap();
+    let note = store.create_note(None, "ceiling", owner.id).await.unwrap();
+    let notebook = Notebook::new("ceiling");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    let direct = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(direct.caps.bits(), Capabilities::READ);
+}
+```
+
+**What it does** — Moves an owner-controlled note into a shared notebook, fixes the effective strict capability set exactly at `READ | WRITE`, then mutates and removes the notebook share and proves the independent direct `READ` grant survives unchanged.
+
+**Dependencies** — `Store::{create_or_update_notebook_share, delete_notebook_share, create_or_update_share, update_note_meta}` — builds and mutates both grant sources; expects notebook-share mutations never to write `note_shares`. `resolve_note_access` — observes the exact normalized union after the move and after parent revocation.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 3 and 7.
+
+**Repeated context** — Effective capabilities are normalized before comparison; direct grants never depend on containment.
+
+---
+
+## fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance
+
+**Identification** — PostgreSQL-backed Inbox transition regression; marker `// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance
+#[sqlx::test(migrations = "../../migrations")]
+async fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "inbox-owner@example.com").await;
+    let _notebook_owner_token = register_and_login(addr, "inbox-notebook@example.com").await;
+    let _inherited_token = register_and_login(addr, "inbox-inherited@example.com").await;
+    let _direct_token = register_and_login(addr, "inbox-direct@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("inbox-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook_owner = store
+        .get_user_by_email("inbox-notebook@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let inherited = store
+        .get_user_by_email("inbox-inherited@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let direct = store
+        .get_user_by_email("inbox-direct@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("foreign");
+    assert!(store
+        .upsert_notebook(notebook_owner.id, &notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, inherited.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "foreign", owner.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_or_update_share(note.id, direct.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let moved = store.get_note(note.id).await.unwrap().unwrap();
+    assert!(
+        resolve_note_access(&store, &moved, inherited.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+    let direct_access = resolve_note_access(&store, &moved, direct.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(
+        direct_access.caps.bits(),
+        Capabilities::from_bits(Capabilities::WRITE).bits()
+    );
+}
+```
+
+**What it does** — Places an owner's note in a foreign notebook, moves it to the Inbox through HTTP, and proves an inherited-only principal loses access on the next resolution while an exact normalized direct `WRITE` grant remains.
+
+**Dependencies** — `update_note` — performs the authorized move; expects uncontrolled inherited loss not to block the note owner. `resolve_note_access` — checks both post-move principals from current persistence state.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification row 5.
+
+**Repeated context** — `create_note` receives a note ID; containment is established separately with `NotePatch::notebook_id`.
+
+---
+
+## fn inherited_manage_blocks_but_direct_manage_survives_move
+
+**Identification** — PostgreSQL-backed equal-principal provenance regression; marker `// md:fn inherited_manage_blocks_but_direct_manage_survives_move`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn inherited_manage_blocks_but_direct_manage_survives_move
+#[sqlx::test(migrations = "../../migrations")]
+async fn inherited_manage_blocks_but_direct_manage_survives_move(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "manage-owner@example.com").await;
+    let _member_token = register_and_login(addr, "manage-member@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("manage-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let member = store
+        .get_user_by_email("manage-member@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("manage source");
+    let destination = Notebook::new("manage destination");
+    assert!(store.upsert_notebook(owner.id, &source).await.unwrap());
+    assert!(store.upsert_notebook(owner.id, &destination).await.unwrap());
+    store
+        .create_or_update_notebook_share(source.id, member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "manage", owner.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+    store
+        .delete_notebook_share(source.id, member.id)
+        .await
+        .unwrap();
+    let revoked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(revoked.status(), 200);
+    let after_revoke = store.get_note(note.id).await.unwrap().unwrap();
+    assert!(
+        resolve_note_access(&store, &after_revoke, member.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+    let returned = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": source.id }),
+    )
+    .await;
+    assert_eq!(returned.status(), 200);
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    let access = resolve_note_access(
+        &store,
+        &store.get_note(note.id).await.unwrap().unwrap(),
+        member.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::ALL);
+}
+```
+
+**What it does** — Proves containment-derived `MANAGE` blocks a move exactly, then revokes that source, grants direct `MANAGE`, performs the same move, and verifies the normalized full set survives.
+
+**Dependencies** — `update_note` — evaluates the move guard; expects only containment-dependent loss to block. `Capabilities::from_bits` through `resolve_note_access` — normalizes `MANAGE` to the exact full capability set.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 10 and 11.
+
+**Repeated context** — Direct grants remain valid across containment changes and therefore do not participate in the loss guard.
+
+---
+
+## fn strict_notebook_owner_cannot_share_or_eject_foreign_note
+
+**Identification** — PostgreSQL-backed strict-policy regression; marker `// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note
+#[sqlx::test(migrations = "../../migrations")]
+async fn strict_notebook_owner_cannot_share_or_eject_foreign_note(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let _note_owner_token = register_and_login(addr, "strict-note-owner@example.com").await;
+    let notebook_owner_token = register_and_login(addr, "strict-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "strict-target@example.com").await;
+    let store = Store::new(pool);
+    let note_owner = store
+        .get_user_by_email("strict-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook_owner = store
+        .get_user_by_email("strict-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("strict-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("strict foreign");
+    assert!(store
+        .upsert_notebook(notebook_owner.id, &notebook)
+        .await
+        .unwrap());
+    let note = store
+        .create_note(None, "strict foreign", note_owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, notebook_owner.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    let share = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &notebook_owner_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(share.status(), 403);
+    let eject = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &notebook_owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(eject.status(), 403);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        Some(notebook.id)
+    );
+}
+```
+
+**What it does** — Enumerates the notebook owner's exact inherited ceiling over a foreign note, proves that ceiling cannot authorize note sharing, and proves strict policy rejects ejection without changing containment.
+
+**Dependencies** — `resolve_note_access` — fixes the exact `READ | WRITE` ceiling. `create_share` and `update_note` HTTP handlers — expect strict inheritance to exclude share rights and strict ejection policy to require note ownership.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 16 and 18.
+
+**Repeated context** — Notebook ownership is not note ownership; delete and transfer authority remain ownership-bound too.
+
+---
+
+## fn unknown_permission_scheme_fails_process_startup
+
+**Identification** — process-boundary startup regression; marker `// md:fn unknown_permission_scheme_fails_process_startup`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn unknown_permission_scheme_fails_process_startup
+#[test]
+fn unknown_permission_scheme_fails_process_startup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_keeplin-srv"))
+        .env("DATABASE_URL", "postgres://unused:unused@127.0.0.1/unused")
+        .env("JWT_SECRET", "a-valid-test-secret")
+        .env("PERMISSION_SCHEME", "surprising-default")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("unrecognized PERMISSION_SCHEME: surprising-default"));
+}
+```
+
+**What it does** — Launches the real server binary with an unknown permission scheme, proves the process exits unsuccessfully, and fixes the exact startup diagnostic rather than testing only the enum parser.
+
+**Dependencies** — `CARGO_BIN_EXE_keeplin-srv` — selects Cargo's built server executable; expects integration tests to exercise the production startup path. `Config::from_env` — validates `PERMISSION_SCHEME` before any database connection is attempted.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification row 15.
+
+**Repeated context** — Unknown policy names fail closed; there is no fallback to `strict` for an explicitly invalid value.
+
+---
+
+## fn direct_duplicate_survives_migration_and_rollback_restores_projection
+
+**Identification** — PostgreSQL migration and recovery regression; marker `// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection
+#[sqlx::test(migrations = "../../migrations")]
+async fn direct_duplicate_survives_migration_and_rollback_restores_projection(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("migration-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let member = store
+        .create_user("migration-member@example.com", "x", "member")
+        .await
+        .unwrap();
+    let notebook = Notebook::new("migration");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    let note = store
+        .create_note(None, "migration", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let before = relation_snapshot(&pool, "note_shares", "note_id", note.id).await;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0017_direct_note_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0017_direct_note_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", note.id).await,
+        before
+    );
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    assert!(
+        resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+            .await
+            .is_ok()
+    );
+    store.delete_share(note.id, member.id).await.unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/rollback/0017_rematerialize_notebook_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    let restored = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.caps.bits(),
+        Capabilities::from_bits(Capabilities::WRITE).bits()
+    );
+}
+```
+
+**What it does** — Applies the audit migration twice without changing a deliberately ambiguous direct row, proves it remains authoritative after parent revocation, and proves the forward rollback rematerializes inherited access for legacy code.
+
+**Dependencies** — `Store::{create_note, update_note_meta}` and `NotePatch::notebook_id` — establish a genuinely contained migration fixture; expects containment to be independent of the optional note ID. `migrations/0017_direct_note_shares.sql` — audits without mutation; expects repeat application to preserve identical state. `migrations/rollback/0017_rematerialize_notebook_shares.sql` — recreates the legacy projection; expects idempotent union semantics. `resolve_note_access` — verifies both direct survival and restored access.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification rows 20, 21 and 23.
+
+**Repeated context** — Ambiguity is audited for operator reconciliation and never resolved by deleting user grants.
+
+---
+
 ## Graph context
 
 No exact-commit graph was available. Relationships below are authored inference.
@@ -1963,7 +3206,8 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 12 | `fn note_changes_are_explicitly_non_materializing` | `// md:fn note_changes_are_explicitly_non_materializing` |
 | 13 | `fn authorization_test_config` | `// md:fn authorization_test_config` |
 | 14 | `fn spawn_authorization_server` | `// md:fn spawn_authorization_server` |
-| 15 | `fn register_and_login` | `// md:fn register_and_login` |
+| 15 | `fn spawn_notice_webhook` | `// md:fn spawn_notice_webhook` |
+| 16 | `fn register_and_login` | `// md:fn register_and_login` |
 | 16 | `fn authed_json` | `// md:fn authed_json` |
 | 17 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
 | 18 | `fn relation_snapshot` | `// md:fn relation_snapshot` |
@@ -1973,3 +3217,15 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 22 | `fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference` | `// md:fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference` |
 | 23 | `fn foreign_and_missing_upserts_are_indistinguishable` | `// md:fn foreign_and_missing_upserts_are_indistinguishable` |
 | 24 | `fn foreign_and_missing_mutations_are_indistinguishable` | `// md:fn foreign_and_missing_mutations_are_indistinguishable` |
+| 25 | `fn write_grantee_cannot_move_foreign_note_or_change_direct_grants` | `// md:fn write_grantee_cannot_move_foreign_note_or_change_direct_grants` |
+| 26 | `fn strict_inheritance_is_computed_bounded_and_revocable` | `// md:fn strict_inheritance_is_computed_bounded_and_revocable` |
+| 27 | `fn deleted_notebook_revokes_inherited_note_access` | `// md:fn deleted_notebook_revokes_inherited_note_access` |
+| 28 | `fn moving_from_deleted_notebook_does_not_notify_stale_principals` | `// md:fn moving_from_deleted_notebook_does_not_notify_stale_principals` |
+| 28 | `fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` | `// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback` |
+| 29 | `fn controlled_inherited_loss_requires_preserve_or_revoke` | `// md:fn controlled_inherited_loss_requires_preserve_or_revoke` |
+| 30 | `fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` | `// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations` |
+| 31 | `fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` | `// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` |
+| 32 | `fn inherited_manage_blocks_but_direct_manage_survives_move` | `// md:fn inherited_manage_blocks_but_direct_manage_survives_move` |
+| 33 | `fn strict_notebook_owner_cannot_share_or_eject_foreign_note` | `// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note` |
+| 34 | `fn unknown_permission_scheme_fails_process_startup` | `// md:fn unknown_permission_scheme_fails_process_startup` |
+| 35 | `fn direct_duplicate_survives_migration_and_rollback_restores_projection` | `// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection` |

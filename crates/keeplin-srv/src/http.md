@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{self, AuthedUser},
-    error::AppError,
+    error::{AppError, MoveBlockedCount},
     permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
     state::AppState,
     store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
@@ -1941,7 +1941,13 @@ async fn get_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<NoteResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_read() {
         return Err(AppError::Forbidden);
     }
@@ -2017,6 +2023,100 @@ tri-state pattern above.
 
 ---
 
+## fn inherited_capabilities
+
+**Identification** — async authorization helper; marker `// md:fn inherited_capabilities`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn inherited_capabilities
+async fn inherited_capabilities(
+    state: &AppState,
+    notebook_id: Option<Uuid>,
+    principal: Uuid,
+) -> Result<i32, AppError> {
+    let Some(notebook_id) = notebook_id else {
+        return Ok(0);
+    };
+    let bits = if state.store.notebook_owner(notebook_id).await? == Some(principal) {
+        Capabilities::ALL
+    } else {
+        state
+            .store
+            .get_notebook_share(notebook_id, principal)
+            .await?
+            .map(|share| share.capabilities)
+            .unwrap_or(0)
+    };
+    Ok(
+        Capabilities::from_bits(bits).bits()
+            & state.config.permission_scheme.notebook_inheritance(),
+    )
+}
+```
+
+**What it does** — Computes the containing notebook's effective owner/share bits for one principal and masks them to the configured inheritance ceiling; Inbox notes inherit nothing.
+
+**Dependencies** — `Store::notebook_owner` — identifies ownership; expects deleted or absent notebooks not to confer ownership. `Store::get_notebook_share` — loads a direct notebook grant; expects absence to map to zero. `PermissionScheme::notebook_inheritance` — supplies the maximum inherited bits; expects sharing authority to remain excluded.
+
+**Used by** — note mutation paths that compare access before and after a move.
+
+**Repeated context** — Inheritance is computed, not materialized into `note_shares`.
+
+---
+
+## fn notify_access_revoked
+
+**Identification** — best-effort async notification helper; marker `// md:fn notify_access_revoked`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn notify_access_revoked
+async fn notify_access_revoked(
+    state: &AppState,
+    principal: Uuid,
+    resource_kind: &str,
+    resource_id: Uuid,
+) {
+    let user = match state.store.get_user_by_id(principal).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            tracing::warn!(%principal, %resource_id, resource_kind, "access revocation notice recipient missing");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %principal, %resource_id, resource_kind, "access revocation notice recipient lookup failed");
+            return;
+        }
+    };
+    if let Err(error) = state
+        .mailer
+        .send_notice(
+            crate::mail::MailKind::AccessRevoked,
+            &user.email,
+            &user.display_name,
+            resource_kind,
+            resource_id,
+        )
+        .await
+    {
+        tracing::warn!(%error, %principal, %resource_id, resource_kind, mail_kind = crate::mail::MailKind::AccessRevoked.as_str(), "access revocation notice failed");
+    }
+}
+```
+
+**What it does** — Looks up a revoked principal and sends an access-revoked notice; missing recipients, lookup failures, and delivery failures are logged without reverting the authorization mutation.
+
+**Dependencies** — `Store::get_user_by_id` — resolves the notification address; expects missing users to return `Ok(None)`. `Mailer::send_notice` — submits the webhook notice; expects delivery failures as `Err` rather than panics. `MailKind::AccessRevoked` — fixes the event classification; expects `as_str` to remain stable for webhook consumers. `tracing::warn!` — records best-effort failures; expects structured fields to preserve resource context.
+
+**Used by** — note and notebook operations that remove effective access.
+
+**Repeated context** — Authorization state changes are authoritative even when notification infrastructure is unavailable.
+
+---
+
 ## fn update_note
 
 **Identification** — handler; marker `// md:fn update_note`.
@@ -2032,7 +2132,13 @@ async fn update_note(
     Json(body): Json<UpdateNoteBody>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_write() {
         return Err(AppError::Forbidden);
     }
@@ -2051,6 +2157,83 @@ async fn update_note(
         Some(Some(nb)) if note.notebook_id != Some(*nb) => Some(*nb),
         _ => None,
     };
+    let moved = patch.notebook_id.is_some() && patch.notebook_id != Some(note.notebook_id);
+    let source_notebook_owner = match note.notebook_id {
+        Some(notebook_id) => state.store.notebook_owner(notebook_id).await?,
+        None => None,
+    };
+    let ejection =
+        moved && patch.notebook_id == Some(None) && source_notebook_owner == Some(user.user_id);
+    if moved
+        && note.owner_id != user.user_id
+        && !(ejection && state.config.permission_scheme.foreign_note_ejection())
+    {
+        return Err(AppError::Forbidden);
+    }
+    let mut notify_after_move = Vec::new();
+    if moved && state.config.permission_scheme.move_out_guard() {
+        if let Some(source_notebook) = note.notebook_id {
+            let controls_source = source_notebook_owner == Some(user.user_id);
+            let can_enumerate_source = if controls_source {
+                true
+            } else {
+                resolve_notebook_access(&state.store, source_notebook, user.user_id)
+                    .await
+                    .map(|access| access.caps.can_share_read())
+                    .unwrap_or(false)
+            };
+            let destination = patch.notebook_id.flatten();
+            let mut named_principals = Vec::new();
+            let mut unenumerable_count = 0;
+            for (principal, inherited_bits) in state
+                .store
+                .inherited_note_principals(source_notebook)
+                .await?
+            {
+                if principal == user.user_id {
+                    continue;
+                }
+                let direct_bits = state
+                    .store
+                    .get_share(note.id, principal)
+                    .await?
+                    .map(|share| share.capabilities)
+                    .unwrap_or(0);
+                let source_bits = Capabilities::from_bits(inherited_bits).bits()
+                    & state.config.permission_scheme.notebook_inheritance();
+                let destination_bits =
+                    inherited_capabilities(&state, destination, principal).await?;
+                let before = Capabilities::from_bits(direct_bits | source_bits);
+                let after = Capabilities::from_bits(direct_bits | destination_bits);
+                if before.bits() != after.bits() && (before.bits() & !after.bits()) != 0 {
+                    if controls_source {
+                        if can_enumerate_source {
+                            named_principals.push(principal);
+                        } else {
+                            unenumerable_count += 1;
+                        }
+                    } else {
+                        notify_after_move.push(principal);
+                    }
+                }
+            }
+            if !named_principals.is_empty() {
+                named_principals.sort_unstable();
+                named_principals.dedup();
+                let counted_principals = (unenumerable_count > 0)
+                    .then_some(MoveBlockedCount {
+                        notebook_id: source_notebook,
+                        count: unenumerable_count,
+                    })
+                    .into_iter()
+                    .collect();
+                return Err(AppError::MoveBlocked {
+                    named_principals,
+                    counted_principals,
+                });
+            }
+        }
+    }
     if let Some(nb) = moved_into {
         let nb_access = resolve_notebook_access(&state.store, nb, user.user_id).await?;
         if !nb_access.can_write() {
@@ -2069,8 +2252,13 @@ async fn update_note(
         .update_note_meta(id, &patch)
         .await?
         .ok_or(AppError::NotFound)?;
-    if let Some(nb) = moved_into {
-        state.store.apply_notebook_shares_to_note(id, nb).await?;
+    if ejection && note.owner_id != user.user_id {
+        notify_after_move.push(note.owner_id);
+    }
+    notify_after_move.sort_unstable();
+    notify_after_move.dedup();
+    for principal in notify_after_move {
+        notify_access_revoked(&state, principal, "note", note.id).await;
     }
     Ok(Json(note))
 }
@@ -2093,10 +2281,19 @@ server path by which a note enters a notebook — notes are created notebook-les
 so checking here covers the whole surface, mirroring `ordering::place_new_note` on
 the client. Moving out (to the inbox) needs no destination check. Apply the
 metadata patch; then, for a real move-in, `apply_notebook_shares_to_note` performs
-the cascade.
+the cascade. Before a move leaves a notebook, the move-out guard compares each
+inherited principal's effective access before and after the move. A mover who
+controls the source receives named blocking principals; a mover who does not
+control it may proceed and receives no principal disclosure. Source-access
+resolution failure means the source cannot be enumerated, not that the request
+failed; it is therefore classified as `false` for the future counted-principal
+path. Under the current controlled-source branch that value is necessarily
+`true`.
 
 **Dependencies** — `resolve_note_access`/`resolve_notebook_access`
-(`permissions.rs`); `Store::{get_note, update_note_meta,
+(`permissions.rs`), with source-notebook resolution errors expected to degrade
+to non-enumerability while destination resolution errors remain request errors;
+`Store::{get_note, update_note_meta,
 apply_notebook_shares_to_note, count_live_notes_in_notebook}` — the count expects
 to exclude soft-deleted notes, so tombstones never consume capacity; `NotePatch`
 (`store.rs`); `present` (this file);
@@ -2109,7 +2306,7 @@ surfaces.
 
 **Repeated context** — The destructive cascade (permissions model): a notebook's
 grants are copied over a child note's `note_shares` on share changes and on
-move-in; move-to-inbox leaves the note's own shares intact; consent is required on
+move-in; move-to-inbox leaves the note's own shares intact; controlled access loss is resolved by
 both sides of a move-in. "Inbox" is the canonical name of the default,
 notebook-less location (server representation: `notebook_id IS NULL`).
 
@@ -2129,7 +2326,13 @@ async fn delete_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_delete() {
         return Err(AppError::Forbidden);
     }
@@ -2192,7 +2395,13 @@ async fn create_share(
     Json(body): Json<CreateShareBody>,
 ) -> Result<Json<NoteShare>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_share_write() {
         return Err(AppError::Forbidden);
     }
@@ -2264,7 +2473,13 @@ async fn list_shares(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<NoteShare>>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.caps.can_share_read() {
         return Err(AppError::Forbidden);
     }
@@ -2300,11 +2515,20 @@ async fn delete_share(
         .get_note(note_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    state.store.delete_share(note_id, target_id).await?;
+    let deleted = state.store.delete_share(note_id, target_id).await?;
+    if deleted && target_id != user.user_id {
+        notify_access_revoked(&state, target_id, "note", note_id).await;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 ```
@@ -2313,7 +2537,7 @@ async fn delete_share(
 can revoke anyone; anyone can remove **themselves** (leaving a share); otherwise
 `403`.
 
-**Dependencies** — `resolve_note_access`; `Store::delete_share`. **Used by** —
+**Dependencies** — `resolve_note_access`; `Store::delete_share`, whose boolean result prevents notices for absent rows. **Used by** —
 routed in `router`.
 
 **Repeated context** — Live-session note: revocation takes effect on the
@@ -2356,7 +2580,13 @@ async fn transfer_ownership(
     Json(body): Json<TransferBody>,
 ) -> Result<Json<Note>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_transfer_ownership() {
         return Err(AppError::Forbidden);
     }
@@ -2553,10 +2783,13 @@ async fn delete_notebook_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    state
+    let deleted = state
         .store
         .delete_notebook_share(notebook_id, target_id)
         .await?;
+    if deleted && target_id != user.user_id {
+        notify_access_revoked(&state, target_id, "notebook", notebook_id).await;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 ```
@@ -2565,7 +2798,7 @@ async fn delete_notebook_share(
 self-removal; the revocation **re-cascades** to the notebook's notes inside the
 store call.
 
-**Dependencies** — `resolve_notebook_access`; `Store::delete_notebook_share`.
+**Dependencies** — `resolve_notebook_access`; `Store::delete_notebook_share`, whose boolean result prevents notices for absent rows.
 **Used by** — routed in `router`; `transfer_notebook` (dropping the new owner's
 share). **Repeated context** — as `create_notebook_share`.
 
@@ -2774,7 +3007,13 @@ async fn note_history(
 ) -> Result<Json<Vec<crate::store::EntityVersionRow>>, AppError> {
     match state.store.get_note(id).await? {
         Some(note) => {
-            let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+            let access = resolve_note_access(
+                &state.store,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
             if !access.can_read() {
                 return Err(AppError::Forbidden);
             }
@@ -3024,7 +3263,13 @@ async fn export_note(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ExportResponse>, AppError> {
     let note = state.store.get_note(id).await?.ok_or(AppError::NotFound)?;
-    let access = resolve_note_access(&state.store, &note, user.user_id).await?;
+    let access = resolve_note_access(
+        &state.store,
+        &note,
+        user.user_id,
+        state.config.permission_scheme,
+    )
+    .await?;
     if !access.can_read() {
         return Err(AppError::Forbidden);
     }
@@ -3226,7 +3471,9 @@ and carrying its marker in the code:
 | 55 | `fn get_note` | `// md:fn get_note` |
 | 56 | `fn present` | `// md:fn present` |
 | 57 | `struct UpdateNoteBody` | `// md:UpdateNoteBody` |
-| 58 | `fn update_note` | `// md:fn update_note` |
+| 58 | `fn inherited_capabilities` | `// md:fn inherited_capabilities` |
+| 59 | `fn notify_access_revoked` | `// md:fn notify_access_revoked` |
+| 60 | `fn update_note` | `// md:fn update_note` |
 | 59 | `fn delete_note` | `// md:fn delete_note` |
 | 60 | `struct CreateShareBody` | `// md:CreateShareBody` |
 | 61 | `fn create_share` | `// md:fn create_share` |

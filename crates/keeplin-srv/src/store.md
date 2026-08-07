@@ -760,7 +760,7 @@ pub struct Store {
 
 **Identification** — the inherent impl block; marker `// md:impl Store`.
 
-**Code** — container: members documented as sub-blocks below: fn new, fn with_cipher, fn create_user, fn get_user_by_email, fn get_user_by_id, fn update_password, fn delete_user, fn login_locked, fn record_login_failure, fn clear_login_failures, fn prune_login_attempts, fn create_email_token, fn consume_email_token, fn mark_email_verified, fn prune_email_tokens, fn create_device, fn get_device, fn list_devices_by_user, fn delete_device, fn delete_all_devices, fn touch_device, fn append_changes, fn changes_after, fn entity_history, fn get_cursor, fn advance_cursor, fn prune_delivered_changes, fn purge_deleted_resource_blobs, fn gc_line_tombstones, fn ping, fn counts, fn create_note, fn get_note, fn list_notes_for_user, fn update_note_meta, fn decrypt_note_title, fn soft_delete_note, fn set_note_owner, fn create_or_update_share, fn get_share, fn list_shares, fn delete_share, fn notebook_owner, fn set_notebook_owner, fn get_notebook_share, fn list_notebook_shares, fn create_or_update_notebook_share, fn delete_notebook_share, fn cascade_notebook_to_notes, fn apply_notebook_shares_to_note, fn get_line, fn get_line_on, fn list_lines, fn insert_line, fn insert_line_on, fn update_line, fn update_line_on, fn soft_delete_line, fn soft_delete_line_on, fn get_note_order, fn get_note_order_on, fn set_note_order, fn set_note_order_on, fn pool, fn notify, fn lock_note_order, fn insert_collab_event, fn get_collab_event, fn prune_collab_events, fn upsert_presence, fn delete_presence, fn list_presence, fn touch_instance_presence, fn sweep_presence, fn delete_instance_presence, fn upsert_notebook, fn delete_notebook, fn upsert_tag, fn delete_tag, fn upsert_note_tag, fn upsert_resource_meta, fn delete_resource, fn put_resource_blob, fn get_resource_blob, fn resource_owned_by, fn list_notebooks, fn list_tags, fn list_resources, fn list_note_tag_ids, fn user_blob_bytes_excluding, fn count_live_notes_for_user, fn count_live_notes_in_notebook, fn count_live_lines_on.
+**Code** — container: members are documented as sub-blocks below, in source order; the permission region ends with `delete_notebook_share` and computed-inheritance enumeration via `inherited_note_principals` before line persistence methods begin.
 
 **What it does** — The relay's entire data-access surface. Every method carries its own `// md:impl Store > fn <name>` marker and is documented as a sub-block below, in source order. The methods fall into these regions: Constructors; Users; Login lockout; Email-flow tokens; Devices; Change journal; Delivery cursors; Retention / maintenance / metrics; Notes; Note shares; Notebook ownership & shares; Lines (each with a pool form and an `_on(executor)` form that runs on the connection holding the note's advisory lock); Line order; Cross-instance bus primitives; Domain-entity materialisation (server = source of truth, every write resolved by `incoming_wins` under `SELECT … FOR UPDATE`); Domain-entity reads (cold rehydration); Per-user quotas. All queries run through `self.pool` (or an `_on` executor) and encrypt/decrypt human-readable columns through `self.cipher`.
 
@@ -1910,8 +1910,16 @@ pub struct Store {
                LEFT JOIN note_shares s ON s.note_id = n.id AND s.user_id = $1
                LEFT JOIN notebooks nb
                       ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
+               LEFT JOIN notebook_shares nbs
+                      ON nbs.notebook_id = n.notebook_id AND nbs.user_id = $1
+                     AND EXISTS (
+                         SELECT 1 FROM notebooks shared_nb
+                         WHERE shared_nb.id = nbs.notebook_id
+                           AND shared_nb.deleted_at IS NULL
+                     )
                WHERE n.deleted_at IS NULL
-                 AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL)
+                 AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL
+                      OR nbs.user_id IS NOT NULL)
                  AND ($3::timestamptz IS NULL OR (n.updated_at, n.id) < ($3, $4))
                ORDER BY n.updated_at DESC, n.id DESC
                LIMIT $2"#,
@@ -1930,7 +1938,7 @@ pub struct Store {
     }
 ```
 
-**What it does** — notes visible to the user: owned, shared (`note_shares`), or filed in a notebook they own (the folder-owner rule, mirroring `permissions::resolve_note_access`), newest first; keyset-paginated on `(updated_at, id)`; titles decrypted.
+**What it does** — Returns live notes visible through ownership, a direct note share, ownership of a live containing notebook, or a share on a live containing notebook. A soft-deleted notebook contributes neither owner nor grantee inheritance. Results are newest first, keyset-paginated on `(updated_at, id)`, with titles decrypted.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2194,17 +2202,19 @@ the server-side hook where the note delete is applied.
 
 ```rust
     // md:impl Store > fn delete_share
-    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
-            .bind(note_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(deleted.is_some())
     }
 ```
 
-**What it does** — revoke (or self-remove).
+**What it does** — Deletes one direct note share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2285,8 +2295,10 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
-            r#"SELECT notebook_id, user_id, capabilities, created_at
-               FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2"#,
+            r#"SELECT ns.notebook_id, ns.user_id, ns.capabilities, ns.created_at
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1 AND ns.user_id = $2"#,
         )
         .bind(notebook_id)
         .bind(user_id)
@@ -2296,7 +2308,7 @@ the server-side hook where the note delete is applied.
     }
 ```
 
-**What it does** — lookups.
+**What it does** — Returns a direct notebook grant only while its source notebook is live; a soft-deleted notebook confers no inherited access even if its share row remains.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2349,7 +2361,6 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
         capabilities: i32,
     ) -> Result<NotebookShare, AppError> {
-        let mut tx = self.pool.begin().await?;
         let share = sqlx::query_as::<_, NotebookShare>(
             r#"INSERT INTO notebook_shares (notebook_id, user_id, capabilities)
                VALUES ($1, $2, $3)
@@ -2359,10 +2370,8 @@ the server-side hook where the note delete is applied.
         .bind(notebook_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await?;
-        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
-        tx.commit().await?;
         Ok(share)
     }
 ```
@@ -2387,20 +2396,19 @@ the server-side hook where the note delete is applied.
         &self,
         notebook_id: Uuid,
         user_id: Uuid,
-    ) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2")
+    ) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
+        )
             .bind(notebook_id)
             .bind(user_id)
-            .execute(&mut *tx)
+            .fetch_optional(&self.pool)
             .await?;
-        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
-        tx.commit().await?;
-        Ok(())
+        Ok(deleted.is_some())
     }
 ```
 
-**What it does** — revoke + re-cascade, one transaction.
+**What it does** — Deletes one notebook share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2408,14 +2416,14 @@ the server-side hook where the note delete is applied.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
 
-### fn cascade_notebook_to_notes
+### Retired materialized cascade (historical)
 
-**Identification** — method of `impl Store`; marker `// md:impl Store > fn cascade_notebook_to_notes`.
+**Identification** — removed by ADR 0001; retained only as historical rationale, with no source marker.
 
 **Code** — complete and verbatim:
 
-```rust
-    // md:impl Store > fn cascade_notebook_to_notes
+```text
+    retired: impl Store / cascade_notebook_to_notes
     pub async fn cascade_notebook_to_notes(&self, notebook_id: Uuid) -> Result<(), AppError> {
         let mut tx = self.pool.begin().await?;
         cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
@@ -2432,14 +2440,14 @@ the server-side hook where the note delete is applied.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
 
-### fn apply_notebook_shares_to_note
+### Retired move-time share copy (historical)
 
-**Identification** — method of `impl Store`; marker `// md:impl Store > fn apply_notebook_shares_to_note`.
+**Identification** — removed by ADR 0001; retained only as historical rationale, with no source marker.
 
 **Code** — complete and verbatim:
 
-```rust
-    // md:impl Store > fn apply_notebook_shares_to_note
+```text
+    retired: impl Store / apply_notebook_shares_to_note
     pub async fn apply_notebook_shares_to_note(
         &self,
         note_id: Uuid,
@@ -2459,6 +2467,42 @@ the server-side hook where the note delete is applied.
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn inherited_note_principals
+
+**Identification** — `Store::inherited_note_principals`; marker `// md:impl Store > fn inherited_note_principals`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn inherited_note_principals
+    pub async fn inherited_note_principals(
+        &self,
+        notebook_id: Uuid,
+    ) -> Result<Vec<(Uuid, i32)>, AppError> {
+        let rows = sqlx::query_as::<_, (Uuid, i32)>(
+            r#"SELECT ns.user_id, ns.capabilities
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1
+               UNION
+               SELECT user_id, $2 FROM notebooks WHERE id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(notebook_id)
+        .bind(crate::permissions::Capabilities::ALL)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+```
+
+**What it does** — Returns every directly shared principal plus the owner only for a live notebook, with owner capabilities fixed to the full mask. A deleted notebook produces no inherited principals.
+
+**Dependencies** — `sqlx::query_as` — decodes `(Uuid, i32)` principals; expects both UNION branches to preserve that exact row shape. `Capabilities::ALL` — represents owner authority; expects ownership to remain full capability access. `Store::pool` — executes the bounded notebook lookup; expects deleted notebooks not to contribute either owner or grantee rows.
+
+**Used by** — collaboration authorization invalidation and revocation notification paths.
+
+**Repeated context** — This query enumerates principals for effects; note access itself remains computed dynamically.
 
 ### fn get_line
 
@@ -4285,15 +4329,15 @@ line.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
 
-## fn replace_note_shares_from_notebook_tx
+## Retired note-share replacement helper (historical)
 
 **Identification** — free async fn; marker
-`// md:fn replace_note_shares_from_notebook_tx`.
+removed by ADR 0001; no source marker.
 
 **Code** — complete and verbatim:
 
-```rust
-// md:fn replace_note_shares_from_notebook_tx
+```text
+retired: replace_note_shares_from_notebook_tx
 async fn replace_note_shares_from_notebook_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     note_id: Uuid,
@@ -4330,15 +4374,15 @@ a note in a notebook always carries an exact copy of the notebook's grant profil
 
 ---
 
-## fn cascade_notebook_to_notes_tx
+## Retired notebook cascade helper (historical)
 
 **Identification** — free async fn; marker
-`// md:fn cascade_notebook_to_notes_tx`.
+removed by ADR 0001; no source marker.
 
 **Code** — complete and verbatim:
 
-```rust
-// md:fn cascade_notebook_to_notes_tx
+```text
+retired: cascade_notebook_to_notes_tx
 async fn cascade_notebook_to_notes_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     notebook_id: Uuid,
@@ -4499,8 +4543,7 @@ this companion.
 | 78 | `fn list_notebook_shares` | `// md:impl Store > fn list_notebook_shares` |
 | 79 | `fn create_or_update_notebook_share` | `// md:impl Store > fn create_or_update_notebook_share` |
 | 80 | `fn delete_notebook_share` | `// md:impl Store > fn delete_notebook_share` |
-| 81 | `fn cascade_notebook_to_notes` | `// md:impl Store > fn cascade_notebook_to_notes` |
-| 82 | `fn apply_notebook_shares_to_note` | `// md:impl Store > fn apply_notebook_shares_to_note` |
+| 81 | `fn inherited_note_principals` | `// md:impl Store > fn inherited_note_principals` |
 | 83 | `fn get_line` | `// md:impl Store > fn get_line` |
 | 84 | `fn get_line_on` | `// md:impl Store > fn get_line_on` |
 | 85 | `fn list_lines` | `// md:impl Store > fn list_lines` |
@@ -4547,5 +4590,3 @@ this companion.
 | 126 | `fn count_live_notes_for_user` | `// md:impl Store > fn count_live_notes_for_user` |
 | 127 | `fn count_live_notes_in_notebook` | `// md:impl Store > fn count_live_notes_in_notebook` |
 | 128 | `fn count_live_lines_on` | `// md:impl Store > fn count_live_lines_on` |
-| 127 | `fn replace_note_shares_from_notebook_tx` | `// md:fn replace_note_shares_from_notebook_tx` |
-| 128 | `fn cascade_notebook_to_notes_tx` | `// md:fn cascade_notebook_to_notes_tx` |

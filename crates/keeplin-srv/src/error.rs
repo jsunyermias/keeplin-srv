@@ -1,7 +1,16 @@
 // md:Overview
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Serialize;
 use serde_json::json;
+use uuid::Uuid;
+
+// md:MoveBlockedCount
+#[derive(Debug, Serialize)]
+pub struct MoveBlockedCount {
+    pub notebook_id: Uuid,
+    pub count: usize,
+}
 
 // md:AppError
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +29,12 @@ pub enum AppError {
 
     #[error("forbidden")]
     Forbidden,
+
+    #[error("move would drop controlled access")]
+    MoveBlocked {
+        named_principals: Vec<Uuid>,
+        counted_principals: Vec<MoveBlockedCount>,
+    },
 
     #[error("conflict")]
     Conflict,
@@ -53,7 +68,7 @@ impl AppError {
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::MissingToken | AppError::InvalidToken => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Forbidden | AppError::MoveBlocked { .. } => StatusCode::FORBIDDEN,
             AppError::Conflict => StatusCode::CONFLICT,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
@@ -81,7 +96,17 @@ impl IntoResponse for AppError {
         if status.is_server_error() {
             tracing::error!(error = %self, "request failed");
         }
-        let body = Json(json!({ "error": self.client_message() }));
+        let body = match &self {
+            AppError::MoveBlocked {
+                named_principals,
+                counted_principals,
+            } => Json(json!({
+                "error": self.client_message(),
+                "named_principals": named_principals,
+                "counted_principals": counted_principals,
+            })),
+            _ => Json(json!({ "error": self.client_message() })),
+        };
         (status, body).into_response()
     }
 }

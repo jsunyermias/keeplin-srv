@@ -46,6 +46,7 @@ pub fn test_config() -> Config {
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
+        permission_scheme: keeplin_srv::config::PermissionScheme::Strict,
     }
 }
 

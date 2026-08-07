@@ -1,14 +1,18 @@
 // md:Overview
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddr, process::Command, sync::Arc};
 
-use axum::Router;
+use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
     models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
 };
 use keeplin_srv::{
-    config::Config, http::router, permissions::Capabilities, state::AppState, store::Store,
+    config::{Config, PermissionScheme},
+    http::router,
+    permissions::{resolve_note_access, Capabilities},
+    state::AppState,
+    store::{NotePatch, Store},
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -556,6 +560,7 @@ fn authorization_test_config() -> Config {
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
+        permission_scheme: keeplin_srv::config::PermissionScheme::Strict,
     }
 }
 
@@ -574,6 +579,28 @@ async fn spawn_authorization_server(pool: PgPool) -> SocketAddr {
         .unwrap();
     });
     addr
+}
+
+// md:fn spawn_notice_webhook
+async fn spawn_notice_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+    let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
+    let captured = inbox.clone();
+    let app = Router::new().route(
+        "/mail",
+        axum::routing::post(move |Json(payload): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().await.push(payload);
+                "ok"
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, inbox)
 }
 
 // md:fn register_and_login
@@ -1293,7 +1320,7 @@ async fn known_defect_115_list_note_tag_ids_exposes_foreign_tag_reference(pool: 
 // md:fn foreign_and_missing_upserts_are_indistinguishable
 #[sqlx::test(migrations = "../../migrations")]
 async fn foreign_and_missing_upserts_are_indistinguishable(pool: PgPool) {
-    let store = Store::new(pool);
+    let store = Store::new(pool.clone());
     let attacker = store
         .create_user("attacker@example.com", "hash", "attacker")
         .await
@@ -1480,4 +1507,986 @@ async fn foreign_and_missing_mutations_are_indistinguishable(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(foreign_blob, missing_blob);
+}
+
+// md:fn write_grantee_cannot_move_foreign_note_or_change_direct_grants
+#[sqlx::test(migrations = "../../migrations")]
+async fn write_grantee_cannot_move_foreign_note_or_change_direct_grants(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "move-owner@example.com").await;
+    let attacker_token = register_and_login(addr, "move-attacker@example.com").await;
+    let _carol_token = register_and_login(addr, "move-carol@example.com").await;
+    let store = Store::new(pool.clone());
+    let owner = store
+        .get_user_by_email("move-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let attacker = store
+        .get_user_by_email("move-attacker@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let carol = store
+        .get_user_by_email("move-carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store.create_note(None, "victim", owner.id).await.unwrap();
+    store
+        .create_or_update_share(note.id, attacker.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, carol.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let notebook = Notebook::new("attacker notebook");
+    assert!(store.upsert_notebook(attacker.id, &notebook).await.unwrap());
+    let before = relation_snapshot(&pool, "note_shares", "note_id", note.id).await;
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &attacker_token,
+        json!({ "notebook_id": notebook.id }),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", note.id).await,
+        before
+    );
+    let owner_response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), 200);
+}
+
+// md:fn strict_inheritance_is_computed_bounded_and_revocable
+#[sqlx::test(migrations = "../../migrations")]
+async fn strict_inheritance_is_computed_bounded_and_revocable(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "scheme-owner@example.com").await;
+    let grantee_token = register_and_login(addr, "scheme-grantee@example.com").await;
+    let target_token = register_and_login(addr, "scheme-target@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("scheme-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("scheme-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("scheme-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("shared");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    assert!(!access.can_share_write());
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &grantee_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    let owner_access = resolve_note_access(&store, &note, owner.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(owner_access.caps.bits(), Capabilities::ALL);
+    let owner_share = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &owner_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let target_read = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(target_read.status(), 200);
+    store
+        .delete_notebook_share(notebook.id, grantee.id)
+        .await
+        .unwrap();
+    assert!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+}
+
+// md:fn deleted_notebook_revokes_inherited_note_access
+#[sqlx::test(migrations = "../../migrations")]
+async fn deleted_notebook_revokes_inherited_note_access(pool: PgPool) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("deleted-notebook-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("deleted-notebook-grantee@example.com", "x", "grantee")
+        .await
+        .unwrap();
+    let mut notebook = Notebook::new("deleted notebook");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "contained", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert!(store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    assert!(matches!(
+        resolve_note_access(&store, &note, grantee.id, PermissionScheme::Strict).await,
+        Err(keeplin_srv::error::AppError::Forbidden)
+    ));
+    assert!(!store
+        .list_notes_for_user(grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == note.id));
+}
+
+// md:fn moving_from_deleted_notebook_does_not_notify_stale_principals
+#[sqlx::test(migrations = "../../migrations")]
+async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let owner_token = register_and_login(addr, "deleted-move-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "deleted-move-grantee@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("deleted-move-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("deleted-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut notebook = Notebook::new("deleted move source");
+    notebook.vv = VersionVector::from([("owner".to_string(), 1)]);
+    notebook.last_writer = "owner".into();
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note_id = Uuid::new_v4();
+    let note = store
+        .create_note(Some(note_id), "move from deleted", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let deletion_vv = VersionVector::from([("owner".to_string(), 2)]);
+    assert!(store
+        .delete_notebook(
+            owner.id,
+            notebook.id,
+            Utc::now() + Duration::days(1),
+            &deletion_vv,
+            "owner",
+        )
+        .await
+        .unwrap());
+
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+
+    let _ = register_and_login(addr, "live-move-grantee@example.com").await;
+    let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
+    let live_grantee = store
+        .get_user_by_email("live-move-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("live-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let live_notebook = Notebook::new("live move source");
+    assert!(store
+        .upsert_notebook(mallory.id, &live_notebook)
+        .await
+        .unwrap());
+    let client = reqwest::Client::new();
+    let owner_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": owner.id, "capabilities": Capabilities::WRITE }),
+    )
+    .await;
+    assert_eq!(owner_share.status(), 200);
+    let grantee_share = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/share", live_notebook.id),
+        &mallory_token,
+        json!({ "user_id": live_grantee.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(grantee_share.status(), 200);
+    let live_note = store
+        .create_note(Some(Uuid::new_v4()), "move from live", owner.id)
+        .await
+        .unwrap();
+    let placed = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": live_notebook.id }),
+    )
+    .await;
+    assert_eq!(placed.status(), 200);
+    let owner_revoked = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/notebooks/{}/share/{}", live_notebook.id, owner.id),
+        &mallory_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(owner_revoked.status(), 200);
+    assert!(store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+
+    let live_moved = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", live_note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(live_moved.status(), 200);
+    let mut delivered = false;
+    for _ in 0..100 {
+        delivered = inbox.lock().await.iter().any(|payload| {
+            payload["kind"] == "access_revoked"
+                && payload["to"] == live_grantee.email
+                && payload["resource_id"] == live_note.id.to_string()
+        });
+        if delivered {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(delivered);
+    assert!(!store
+        .list_notes_for_user(live_grantee.id, None, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == live_note.id));
+    assert!(!inbox
+        .lock()
+        .await
+        .iter()
+        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+}
+
+// md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback(pool: PgPool) {
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some("http://127.0.0.1:1/unreachable".into());
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let alice_token = register_and_login(addr, "exit-alice@example.com").await;
+    let _mallory_token = register_and_login(addr, "exit-mallory@example.com").await;
+    let bob_token = register_and_login(addr, "exit-bob@example.com").await;
+    let store = Store::new(pool);
+    let alice = store
+        .get_user_by_email("exit-alice@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let mallory = store
+        .get_user_by_email("exit-mallory@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob = store
+        .get_user_by_email("exit-bob@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("mallory");
+    assert!(store.upsert_notebook(mallory.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, alice.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, bob.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "alice", alice.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    let bob_response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_response.status(), 403);
+}
+
+// md:fn controlled_inherited_loss_requires_preserve_or_revoke
+#[sqlx::test(migrations = "../../migrations")]
+async fn controlled_inherited_loss_requires_preserve_or_revoke(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let alice_token = register_and_login(addr, "guard-alice@example.com").await;
+    let _bob_token = register_and_login(addr, "guard-bob@example.com").await;
+    let store = Store::new(pool);
+    let alice = store
+        .get_user_by_email("guard-alice@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob = store
+        .get_user_by_email("guard-bob@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("source");
+    let destination = Notebook::new("destination");
+    assert!(store.upsert_notebook(alice.id, &source).await.unwrap());
+    assert!(store.upsert_notebook(alice.id, &destination).await.unwrap());
+    store
+        .create_or_update_notebook_share(source.id, bob.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "guarded", alice.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+    let body: Value = blocked.json().await.unwrap();
+    assert!(body.to_string().contains(&bob.id.to_string()));
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        Some(source.id)
+    );
+    store
+        .create_or_update_share(note.id, bob.id, Capabilities::READ | Capabilities::WRITE)
+        .await
+        .unwrap();
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &alice_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    let access = resolve_note_access(
+        &store,
+        &store.get_note(note.id).await.unwrap().unwrap(),
+        bob.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+}
+
+// md:fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations
+#[sqlx::test(migrations = "../../migrations")]
+async fn legitimate_move_has_exact_strict_ceiling_and_direct_grants_survive_notebook_mutations(
+    pool: PgPool,
+) {
+    let store = Store::new(pool);
+    let owner = store
+        .create_user("ceiling-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let member = store
+        .create_user("ceiling-member@example.com", "x", "member")
+        .await
+        .unwrap();
+    let note = store.create_note(None, "ceiling", owner.id).await.unwrap();
+    let notebook = Notebook::new("ceiling");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    let direct = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(direct.caps.bits(), Capabilities::READ);
+}
+
+// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance
+#[sqlx::test(migrations = "../../migrations")]
+async fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "inbox-owner@example.com").await;
+    let _notebook_owner_token = register_and_login(addr, "inbox-notebook@example.com").await;
+    let _inherited_token = register_and_login(addr, "inbox-inherited@example.com").await;
+    let _direct_token = register_and_login(addr, "inbox-direct@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("inbox-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook_owner = store
+        .get_user_by_email("inbox-notebook@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let inherited = store
+        .get_user_by_email("inbox-inherited@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let direct = store
+        .get_user_by_email("inbox-direct@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("foreign");
+    assert!(store
+        .upsert_notebook(notebook_owner.id, &notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, inherited.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "foreign", owner.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_or_update_share(note.id, direct.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let response = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let moved = store.get_note(note.id).await.unwrap().unwrap();
+    assert!(
+        resolve_note_access(&store, &moved, inherited.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+    let direct_access = resolve_note_access(&store, &moved, direct.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(
+        direct_access.caps.bits(),
+        Capabilities::from_bits(Capabilities::WRITE).bits()
+    );
+}
+
+// md:fn inherited_manage_blocks_but_direct_manage_survives_move
+#[sqlx::test(migrations = "../../migrations")]
+async fn inherited_manage_blocks_but_direct_manage_survives_move(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let owner_token = register_and_login(addr, "manage-owner@example.com").await;
+    let _member_token = register_and_login(addr, "manage-member@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("manage-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let member = store
+        .get_user_by_email("manage-member@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("manage source");
+    let destination = Notebook::new("manage destination");
+    assert!(store.upsert_notebook(owner.id, &source).await.unwrap());
+    assert!(store.upsert_notebook(owner.id, &destination).await.unwrap());
+    store
+        .create_or_update_notebook_share(source.id, member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    let note = store.create_note(None, "manage", owner.id).await.unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+    store
+        .delete_notebook_share(source.id, member.id)
+        .await
+        .unwrap();
+    let revoked = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(revoked.status(), 200);
+    let after_revoke = store.get_note(note.id).await.unwrap().unwrap();
+    assert!(
+        resolve_note_access(&store, &after_revoke, member.id, PermissionScheme::Strict)
+            .await
+            .is_err()
+    );
+    let returned = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": source.id }),
+    )
+    .await;
+    assert_eq!(returned.status(), 200);
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    let moved = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": destination.id }),
+    )
+    .await;
+    assert_eq!(moved.status(), 200);
+    let access = resolve_note_access(
+        &store,
+        &store.get_note(note.id).await.unwrap().unwrap(),
+        member.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::ALL);
+}
+
+// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note
+#[sqlx::test(migrations = "../../migrations")]
+async fn strict_notebook_owner_cannot_share_or_eject_foreign_note(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let _note_owner_token = register_and_login(addr, "strict-note-owner@example.com").await;
+    let notebook_owner_token = register_and_login(addr, "strict-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "strict-target@example.com").await;
+    let store = Store::new(pool);
+    let note_owner = store
+        .get_user_by_email("strict-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook_owner = store
+        .get_user_by_email("strict-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = store
+        .get_user_by_email("strict-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("strict foreign");
+    assert!(store
+        .upsert_notebook(notebook_owner.id, &notebook)
+        .await
+        .unwrap());
+    let note = store
+        .create_note(None, "strict foreign", note_owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let access = resolve_note_access(&store, &note, notebook_owner.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(access.caps.bits(), Capabilities::READ | Capabilities::WRITE);
+    let share = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &notebook_owner_token,
+        json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+    )
+    .await;
+    assert_eq!(share.status(), 403);
+    let eject = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &notebook_owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(eject.status(), 403);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        Some(notebook.id)
+    );
+}
+
+// md:fn unknown_permission_scheme_fails_process_startup
+#[test]
+fn unknown_permission_scheme_fails_process_startup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_keeplin-srv"))
+        .env("DATABASE_URL", "postgres://unused:unused@127.0.0.1/unused")
+        .env("JWT_SECRET", "a-valid-test-secret")
+        .env("PERMISSION_SCHEME", "surprising-default")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("unrecognized PERMISSION_SCHEME: surprising-default"));
+}
+
+// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection
+#[sqlx::test(migrations = "../../migrations")]
+async fn direct_duplicate_survives_migration_and_rollback_restores_projection(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("migration-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let member = store
+        .create_user("migration-member@example.com", "x", "member")
+        .await
+        .unwrap();
+    let notebook = Notebook::new("migration");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    let note = store
+        .create_note(None, "migration", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, member.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let before = relation_snapshot(&pool, "note_shares", "note_id", note.id).await;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0017_direct_note_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0017_direct_note_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        relation_snapshot(&pool, "note_shares", "note_id", note.id).await,
+        before
+    );
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    assert!(
+        resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+            .await
+            .is_ok()
+    );
+    store.delete_share(note.id, member.id).await.unwrap();
+    store
+        .create_or_update_notebook_share(notebook.id, member.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/rollback/0017_rematerialize_notebook_shares.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    store
+        .delete_notebook_share(notebook.id, member.id)
+        .await
+        .unwrap();
+    let restored = resolve_note_access(&store, &note, member.id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.caps.bits(),
+        Capabilities::from_bits(Capabilities::WRITE).bits()
+    );
 }

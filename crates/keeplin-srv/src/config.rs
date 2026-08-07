@@ -1,3 +1,35 @@
+// md:PermissionScheme
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionScheme {
+    Strict,
+    EjectionAllowed,
+}
+
+// md:impl PermissionScheme
+impl PermissionScheme {
+    // md:impl PermissionScheme > fn from_name
+    fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "strict" => Ok(Self::Strict),
+            "ejection_allowed" => Ok(Self::EjectionAllowed),
+            _ => Err(format!("unrecognized PERMISSION_SCHEME: {name}")),
+        }
+    }
+
+    // md:impl PermissionScheme > policy accessors
+    pub fn notebook_inheritance(self) -> i32 {
+        crate::permissions::Capabilities::READ | crate::permissions::Capabilities::WRITE
+    }
+
+    pub fn foreign_note_ejection(self) -> bool {
+        matches!(self, Self::EjectionAllowed)
+    }
+
+    pub fn move_out_guard(self) -> bool {
+        true
+    }
+}
+
 // md:Config
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -28,6 +60,7 @@ pub struct Config {
     pub login_max_failures: i32,
     pub login_lockout_secs: u64,
     pub history_since_access: bool,
+    pub permission_scheme: PermissionScheme,
 }
 
 // md:fn env_parse
@@ -132,6 +165,10 @@ impl Config {
             history_since_access: std::env::var("HISTORY_VISIBILITY")
                 .map(|v| v.eq_ignore_ascii_case("access"))
                 .unwrap_or(false),
+            permission_scheme: PermissionScheme::from_name(
+                &std::env::var("PERMISSION_SCHEME").unwrap_or_else(|_| "strict".into()),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
         }
     }
 }
@@ -157,5 +194,14 @@ mod tests {
     fn a_strong_secret_is_accepted() {
         assert!(!is_weak_secret(&"x".repeat(MIN_JWT_SECRET_LEN)));
         assert!(!is_weak_secret("a-genuinely-long-random-production-secret"));
+    }
+
+    // md:mod tests > fn an_unknown_permission_scheme_is_rejected
+    #[test]
+    fn an_unknown_permission_scheme_is_rejected() {
+        assert_eq!(
+            PermissionScheme::from_name("surprising-default"),
+            Err("unrecognized PERMISSION_SCHEME: surprising-default".into())
+        );
     }
 }

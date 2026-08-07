@@ -25,7 +25,9 @@ the top of the file.
 // md:Overview
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use serde::Serialize;
 use serde_json::json;
+use uuid::Uuid;
 ```
 
 **What it does** — This module defines `AppError`, the error type every handler, the
@@ -49,6 +51,37 @@ freely because everything converts into `AppError`; the axum framework then call
 rate-limit middleware (`ratelimit.rs`), because rate rejection happens before a handler
 runs. Information-leak boundary (issue #46): internal detail (database messages that can
 name tables/columns/constraints) is logged server-side and **never** sent to clients.
+
+---
+
+## MoveBlockedCount
+
+**Identification** — serializable aggregate for non-enumerable move-blocked principals;
+marker `// md:MoveBlockedCount`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:MoveBlockedCount
+#[derive(Debug, Serialize)]
+pub struct MoveBlockedCount {
+    pub notebook_id: Uuid,
+    pub count: usize,
+}
+```
+
+**What it does** — Represents affected membership that the mover may not enumerate as
+only the conferring notebook identity and a count. It deliberately has no field capable
+of carrying a principal UUID, so this part of a refusal cannot serialize hidden identities.
+
+**Dependencies** — `serde::Serialize` — emits the aggregate into the specialized 403 JSON;
+expects field names to remain stable. `Uuid` — identifies only the conferring notebook;
+expects callers never to substitute a principal identifier.
+
+**Used by** — `AppError::MoveBlocked` and `update_note`.
+
+**Repeated context** — A caller without ownership or `SHARE_READ` may learn the number of
+affected principals and which notebook confers access, but not their identities.
 
 ---
 
@@ -77,6 +110,12 @@ pub enum AppError {
 
     #[error("forbidden")]
     Forbidden,
+
+    #[error("move would drop controlled access")]
+    MoveBlocked {
+        named_principals: Vec<Uuid>,
+        counted_principals: Vec<MoveBlockedCount>,
+    },
 
     #[error("conflict")]
     Conflict,
@@ -166,7 +205,7 @@ the rate limiter is generated in `ratelimit.rs` directly, not through this enum.
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::MissingToken | AppError::InvalidToken => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Forbidden | AppError::MoveBlocked { .. } => StatusCode::FORBIDDEN,
             AppError::Conflict => StatusCode::CONFLICT,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
@@ -253,7 +292,17 @@ the WebSocket upgrade handlers in `collab.rs` / `sync.rs`.
         if status.is_server_error() {
             tracing::error!(error = %self, "request failed");
         }
-        let body = Json(json!({ "error": self.client_message() }));
+        let body = match &self {
+            AppError::MoveBlocked {
+                named_principals,
+                counted_principals,
+            } => Json(json!({
+                "error": self.client_message(),
+                "named_principals": named_principals,
+                "counted_principals": counted_principals,
+            })),
+            _ => Json(json!({ "error": self.client_message() })),
+        };
         (status, body).into_response()
     }
 ```
@@ -315,9 +364,10 @@ carrying its marker in the code:
 | # | Block (source order) | Marker in code | Documented in section |
 |---|----------------------|----------------|-----------------------|
 | 1 | imports (`use …`) | `// md:Overview` | Overview |
-| 2 | `enum AppError` | `// md:AppError` | AppError |
-| 3 | `impl AppError` | `// md:impl AppError` | impl AppError |
-| 4 | `fn status` | `// md:impl AppError > fn status` | impl AppError › fn status |
-| 5 | `fn client_message` | `// md:impl AppError > fn client_message` | impl AppError › fn client_message |
-| 6 | `impl IntoResponse for AppError` | `// md:impl IntoResponse for AppError` | impl IntoResponse for AppError |
-| 7 | `fn into_response` | `// md:impl IntoResponse for AppError > fn into_response` | impl IntoResponse for AppError › fn into_response |
+| 2 | `struct MoveBlockedCount` | `// md:MoveBlockedCount` | MoveBlockedCount |
+| 3 | `enum AppError` | `// md:AppError` | AppError |
+| 4 | `impl AppError` | `// md:impl AppError` | impl AppError |
+| 5 | `fn status` | `// md:impl AppError > fn status` | impl AppError › fn status |
+| 6 | `fn client_message` | `// md:impl AppError > fn client_message` | impl AppError › fn client_message |
+| 7 | `impl IntoResponse for AppError` | `// md:impl IntoResponse for AppError` | impl IntoResponse for AppError |
+| 8 | `fn into_response` | `// md:impl IntoResponse for AppError > fn into_response` | impl IntoResponse for AppError › fn into_response |

@@ -43,6 +43,7 @@ fn quota_config(max_user_storage_bytes: i64, max_notes_per_user: i64) -> Config 
         login_max_failures: 0,
         login_lockout_secs: 300,
         history_since_access: false,
+        permission_scheme: keeplin_srv::config::PermissionScheme::Strict,
     }
 }
 

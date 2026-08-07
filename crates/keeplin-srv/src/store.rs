@@ -895,8 +895,16 @@ impl Store {
                LEFT JOIN note_shares s ON s.note_id = n.id AND s.user_id = $1
                LEFT JOIN notebooks nb
                       ON nb.id = n.notebook_id AND nb.user_id = $1 AND nb.deleted_at IS NULL
+               LEFT JOIN notebook_shares nbs
+                      ON nbs.notebook_id = n.notebook_id AND nbs.user_id = $1
+                     AND EXISTS (
+                         SELECT 1 FROM notebooks shared_nb
+                         WHERE shared_nb.id = nbs.notebook_id
+                           AND shared_nb.deleted_at IS NULL
+                     )
                WHERE n.deleted_at IS NULL
-                 AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL)
+                 AND (n.owner_id = $1 OR s.user_id IS NOT NULL OR nb.id IS NOT NULL
+                      OR nbs.user_id IS NOT NULL)
                  AND ($3::timestamptz IS NULL OR (n.updated_at, n.id) < ($3, $4))
                ORDER BY n.updated_at DESC, n.id DESC
                LIMIT $2"#,
@@ -1048,13 +1056,15 @@ impl Store {
     }
 
     // md:impl Store > fn delete_share
-    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2")
-            .bind(note_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
+        )
+        .bind(note_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(deleted.is_some())
     }
 
     // md:impl Store > fn notebook_owner
@@ -1091,8 +1101,10 @@ impl Store {
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
-            r#"SELECT notebook_id, user_id, capabilities, created_at
-               FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2"#,
+            r#"SELECT ns.notebook_id, ns.user_id, ns.capabilities, ns.created_at
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1 AND ns.user_id = $2"#,
         )
         .bind(notebook_id)
         .bind(user_id)
@@ -1123,7 +1135,6 @@ impl Store {
         user_id: Uuid,
         capabilities: i32,
     ) -> Result<NotebookShare, AppError> {
-        let mut tx = self.pool.begin().await?;
         let share = sqlx::query_as::<_, NotebookShare>(
             r#"INSERT INTO notebook_shares (notebook_id, user_id, capabilities)
                VALUES ($1, $2, $3)
@@ -1133,10 +1144,8 @@ impl Store {
         .bind(notebook_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await?;
-        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
-        tx.commit().await?;
         Ok(share)
     }
 
@@ -1145,36 +1154,35 @@ impl Store {
         &self,
         notebook_id: Uuid,
         user_id: Uuid,
-    ) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2")
+    ) -> Result<bool, AppError> {
+        let deleted: Option<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
+        )
             .bind(notebook_id)
             .bind(user_id)
-            .execute(&mut *tx)
+            .fetch_optional(&self.pool)
             .await?;
-        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
-        tx.commit().await?;
-        Ok(())
+        Ok(deleted.is_some())
     }
 
-    // md:impl Store > fn cascade_notebook_to_notes
-    pub async fn cascade_notebook_to_notes(&self, notebook_id: Uuid) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
-        cascade_notebook_to_notes_tx(&mut tx, notebook_id).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    // md:impl Store > fn apply_notebook_shares_to_note
-    pub async fn apply_notebook_shares_to_note(
+    // md:impl Store > fn inherited_note_principals
+    pub async fn inherited_note_principals(
         &self,
-        note_id: Uuid,
         notebook_id: Uuid,
-    ) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
-        replace_note_shares_from_notebook_tx(&mut tx, note_id, notebook_id).await?;
-        tx.commit().await?;
-        Ok(())
+    ) -> Result<Vec<(Uuid, i32)>, AppError> {
+        let rows = sqlx::query_as::<_, (Uuid, i32)>(
+            r#"SELECT ns.user_id, ns.capabilities
+               FROM notebook_shares ns
+               JOIN notebooks nb ON nb.id = ns.notebook_id AND nb.deleted_at IS NULL
+               WHERE ns.notebook_id = $1
+               UNION
+               SELECT user_id, $2 FROM notebooks WHERE id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(notebook_id)
+        .bind(crate::permissions::Capabilities::ALL)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     // md:impl Store > fn get_line
@@ -2228,50 +2236,4 @@ impl Store {
         .await?;
         Ok(count)
     }
-}
-
-// md:fn replace_note_shares_from_notebook_tx
-async fn replace_note_shares_from_notebook_tx(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    note_id: Uuid,
-    notebook_id: Uuid,
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM note_shares WHERE note_id = $1")
-        .bind(note_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(
-        r#"INSERT INTO note_shares (note_id, user_id, capabilities)
-           SELECT $1, user_id, capabilities FROM notebook_shares WHERE notebook_id = $2"#,
-    )
-    .bind(note_id)
-    .bind(notebook_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-// md:fn cascade_notebook_to_notes_tx
-async fn cascade_notebook_to_notes_tx(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    notebook_id: Uuid,
-) -> Result<(), AppError> {
-    sqlx::query(
-        "DELETE FROM note_shares WHERE note_id IN
-         (SELECT id FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(notebook_id)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"INSERT INTO note_shares (note_id, user_id, capabilities)
-           SELECT n.id, ns.user_id, ns.capabilities
-           FROM notes n
-           JOIN notebook_shares ns ON ns.notebook_id = n.notebook_id
-           WHERE n.notebook_id = $1 AND n.deleted_at IS NULL"#,
-    )
-    .bind(notebook_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
