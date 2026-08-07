@@ -2444,12 +2444,14 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    assert!(inbox
+    let stale_recipient_kinds: Vec<String> = inbox
         .lock()
         .await
         .iter()
         .filter(|payload| payload["to"] == grantee.email)
-        .all(|payload| payload["kind"] == "verify_email"));
+        .map(|payload| payload["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(stale_recipient_kinds, ["verify_email"]);
 
     let live_grantee_token = register_and_login(addr, "live-move-grantee@example.com").await;
     let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
@@ -2568,13 +2570,11 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .filter(|payload| payload["to"] == grantee.email)
         .map(|payload| payload["kind"].as_str().unwrap().to_string())
         .collect();
-    assert!(stale_recipient_kinds
-        .iter()
-        .all(|kind| kind == "verify_email"));
+    assert_eq!(stale_recipient_kinds, ["verify_email"]);
 }
 ```
 
-**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then materializes a live notebook owned by Mallory with `Notebook::new` defaults. Through authenticated handlers, Mallory grants the note owner `WRITE` and a distinct grantee `READ`, the owner moves its note into Mallory's notebook, and Mallory revokes the owner's notebook grant. The test positively establishes that the grantee can list the contained note before the owner moves it back to the inbox. Because the mover no longer controls Mallory's grant, strict authorization permits that exit; the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks the deleted grantee's absence from every revocation notice. The reachable live control proves both pre-existing access and the non-controlled-principal notification branch before the ordered negative assertion, while filtering only by notice kind prevents registration's `VerifyEmail` mail from being mistaken for stale revocation. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
+**What it does** — Creates a note in a shared notebook, causally soft-deletes that notebook, and moves the note to the inbox through the production PATCH handler. The move must commit without sending any `access_revoked` notice to the historical grantee, because deletion already ended that principal's inherited access. It then materializes a live notebook owned by Mallory with `Notebook::new` defaults. Through authenticated handlers, Mallory grants the note owner `WRITE` and a distinct grantee `READ`, the owner moves its note into Mallory's notebook, and Mallory revokes the owner's notebook grant. The test positively establishes that the grantee can list the contained note before the owner moves it back to the inbox. Because the mover no longer controls Mallory's grant, strict authorization permits that exit; the test waits up to two seconds for the expected `access_revoked` payload, verifies that the live grantee can no longer list the moved note, and finally rechecks that the deleted grantee has exactly its one registration `VerifyEmail` payload and no revocation notice. The exact singleton assertion makes the allow-list control fail if registration emits nothing as well as if an unexpected kind appears. This specifically detects `inherited_note_principals` returning share rows from deleted notebooks.
 
 **Dependencies** — `spawn_notice_webhook` — captures actual notification payloads; expects a completed PATCH response to imply all synchronous notice attempts have reached the webhook. `register_and_login`, `router`, and `authed_json` — create the owner, grantees, and Mallory and exercise production share, revoke, and move handlers; expect Mallory to control its notebook grants, `WRITE` to authorize the owner's entry move, revocation to leave the contained note in place, and note ownership to authorize the later unilateral exit. `Store::{upsert_notebook, create_or_update_notebook_share, create_note, update_note_meta}` — establish the deleted fixture and persist both notes plus Mallory's `Notebook::new` live notebook; expect the notebook owner passed to `upsert_notebook` to determine control without forged version metadata. The live fixture deliberately does not use the direct share or metadata-update methods. `VersionVector` and `Store::delete_notebook` — make only the deleted fixture's deletion causally dominate creation; expect its historical notebook-share row to remain while the deleted notebook becomes authorization-inactive. `Store::inherited_note_principals` through `update_note` — enumerates principals potentially affected by each move; expects a deleted source notebook to contribute none and Mallory's live source notebook to contribute its grantee as a principal not controlled by the mover. `Mailer::send_notice` through `notify_access_revoked` — exposes enumeration as webhook payloads; expects an `access_revoked` notice to identify the live grantee and moved note. `tokio::time::sleep` — bounds polling for the positive notice at approximately two seconds; expects webhook delivery to complete within that integration-test allowance. `Store::list_notes_for_user` — proves the live grantee has inherited access before the exit and observes its removal afterward; expects containment plus the live notebook grant to make the note listable until the PATCH commits.
 
@@ -3487,6 +3487,10 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .create_user("report-inbox@example.com", "x", "inbox")
         .await
         .unwrap();
+    let second_inbox_member = store
+        .create_user("report-second-inbox@example.com", "x", "second inbox")
+        .await
+        .unwrap();
     let notebook = Notebook::new("report");
     assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
     let contained_note = store
@@ -3508,6 +3512,10 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .create_note(None, "inbox report", owner.id)
         .await
         .unwrap();
+    let second_inbox_note = store
+        .create_note(None, "second inbox report", owner.id)
+        .await
+        .unwrap();
     store
         .create_or_update_notebook_share(
             notebook.id,
@@ -3526,6 +3534,14 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .unwrap();
     store
         .create_or_update_share(inbox_note.id, inbox_member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(
+            second_inbox_note.id,
+            second_inbox_member.id,
+            Capabilities::READ,
+        )
         .await
         .unwrap();
     let (subscriber, logs) = capturing_subscriber();
@@ -3549,10 +3565,16 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         inbox_member.id,
         Capabilities::MANAGE
     )));
+    assert!(report.contains(&format!(
+        "note_id={}, user_id={}, capabilities={}, kind=inbox",
+        second_inbox_note.id,
+        second_inbox_member.id,
+        Capabilities::READ
+    )));
 }
 ```
 
-**What it does** — Creates both ambiguous legacy classes, reruns migration 0017 under a tracing subscriber, and requires each notice to carry the exact note, user, capabilities, and classification.
+**What it does** — Creates both ambiguous legacy classes, including two inbox rows with different note, user, and capability values, reruns migration 0017 under a tracing subscriber, and requires a separate notice carrying every row's exact note, user, capabilities, and classification. The repeated class distinguishes row-level reporting from per-class collapse.
 
 **Dependencies** — `migrations/0017_direct_note_shares.sql` — emits one PostgreSQL NOTICE per ambiguous row; expects exact row-level fields. `sqlx::postgres::notice` through `capturing_subscriber` — makes server NOTICE output assertable without changing production behavior.
 

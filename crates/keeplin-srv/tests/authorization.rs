@@ -1857,12 +1857,14 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    assert!(inbox
+    let stale_recipient_kinds: Vec<String> = inbox
         .lock()
         .await
         .iter()
         .filter(|payload| payload["to"] == grantee.email)
-        .all(|payload| payload["kind"] == "verify_email"));
+        .map(|payload| payload["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(stale_recipient_kinds, ["verify_email"]);
 
     let live_grantee_token = register_and_login(addr, "live-move-grantee@example.com").await;
     let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
@@ -1981,9 +1983,7 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .filter(|payload| payload["to"] == grantee.email)
         .map(|payload| payload["kind"].as_str().unwrap().to_string())
         .collect();
-    assert!(stale_recipient_kinds
-        .iter()
-        .all(|kind| kind == "verify_email"));
+    assert_eq!(stale_recipient_kinds, ["verify_email"]);
 }
 
 // md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
@@ -2720,6 +2720,10 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .create_user("report-inbox@example.com", "x", "inbox")
         .await
         .unwrap();
+    let second_inbox_member = store
+        .create_user("report-second-inbox@example.com", "x", "second inbox")
+        .await
+        .unwrap();
     let notebook = Notebook::new("report");
     assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
     let contained_note = store
@@ -2739,6 +2743,10 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .unwrap();
     let inbox_note = store
         .create_note(None, "inbox report", owner.id)
+        .await
+        .unwrap();
+    let second_inbox_note = store
+        .create_note(None, "second inbox report", owner.id)
         .await
         .unwrap();
     store
@@ -2761,6 +2769,14 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         .create_or_update_share(inbox_note.id, inbox_member.id, Capabilities::MANAGE)
         .await
         .unwrap();
+    store
+        .create_or_update_share(
+            second_inbox_note.id,
+            second_inbox_member.id,
+            Capabilities::READ,
+        )
+        .await
+        .unwrap();
     let (subscriber, logs) = capturing_subscriber();
     sqlx::raw_sql(include_str!(
         "../../../migrations/0017_direct_note_shares.sql"
@@ -2781,5 +2797,11 @@ async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
         inbox_note.id,
         inbox_member.id,
         Capabilities::MANAGE
+    )));
+    assert!(report.contains(&format!(
+        "note_id={}, user_id={}, capabilities={}, kind=inbox",
+        second_inbox_note.id,
+        second_inbox_member.id,
+        Capabilities::READ
     )));
 }
