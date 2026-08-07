@@ -244,13 +244,14 @@ escalate in order to use it, which is the per-pull-request cost that
 at 18:48 UTC without the `Review loop converged` check ever having been evaluated on its merge
 candidate, `3862005`. No `Review loop converged` check exists on `3862005` at all: its checks are
 `Check, Test & Lint` and `Knowledge graph up to date`, both successful. The results that opened
-this stall are the two failures on the first commit, `43517cb`. Whether the evaluator ran on any
-commit in between was not established here. Why the
-evaluator did not run again after the push to `3862005` is undetermined. GitHub Actions had stopped
-dispatching workflows for this repository by then: no run was created after 16:52 UTC, and the
-merge itself triggered no build of `main` either. Consequently, the merged `main` tree remains
-unverified by CI, and any other pull request merged during that window likewise lacks checks on
-its merge commit; verification of those merged trees remains pending.
+this stall are the two failures on the first commit, `43517cb`. Evaluator run `31095205483`
+evaluated `3862005` at 10:55:51 UTC but exited on the invalid ledger identifier `REV-121-06` before
+publishing `Review loop converged`. Whether the evaluator ran on any other commit between
+`43517cb` and the merge was not established here. That evaluator run preceded the repository's
+last observed workflow run at 16:52 UTC by roughly six hours. No repository workflow run was
+created after 16:52 UTC, and the merge itself triggered no build of `main`. Consequently, the
+merged `main` tree remains unverified by CI, and any other pull request merged during that window
+likewise lacks checks on its merge commit; verification of those merged trees remains pending.
 
 What that leaves unproven is narrow and should not be overstated. The convergence condition was
 never computed on the merged tree: not that it would have failed. Its inputs were green when the
@@ -289,5 +290,5 @@ rather than overlooked.
 | Detected | Pull request | Stuck on | Exit | Resolution |
 |---|---|---|---|---|
 | 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | authorized genesis | The verified [genesis directive](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982) closed `GENESIS`; the unresolved candidate-evaluation gap is [recorded here](#keeplin-srv-121-evaluation-gap). |
-| 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-002 | dismissed | Accepted [ADR 0008](adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) bounds the claim; the three-probe follow-up is [tracked](review-loop-spike.md). |
+| 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-002 | dismissed | Accepted [ADR 0008](https://github.com/jsunyermias/keeplin/blob/main/docs/adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) bounds the claim; the three-probe follow-up is [tracked](review-loop-spike.md). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-008<br>F-013 | resolved | Default-branch isolation and verified-disposal tests pass. |
