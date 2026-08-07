@@ -61,11 +61,17 @@ unless the code in its area changed. See
 States: `open` · `resolved` · `dismissed` · `advisory`. An `open` finding must name a failing
 check; leave `Reified by` as `advisory` only for a finding that is not blocking.
 
+IDs are `F-` plus at least three digits and are never reused. `Round` is an integer from 1.
+`State` is exactly `open`, `resolved`, `dismissed` or `advisory`.
+
 | ID | Round | Reified by | State | Resolution |
 |---|---|---|---|---|
 
 For `resolved` or `dismissed`, `Resolution` is compact JSON containing `referenceId`, `author`
-and `bodyDigest`; `resolved` also contains `checkRunId` and one exact required `checkName`.
+and `bodyDigest`; `resolved` also contains one exact required `checkName`. The evaluator derives
+the check from the workflow run being evaluated; a legacy `checkRunId` is ignored.
+See [`docs/review-directives.md` step 5](../docs/review-directives.md) for the disposal
+procedure.
 The referenced review/comment body must carry a `keeplin-review-loop-authorize` HTML comment
 whose JSON names the exact `finding`, target `state` and non-empty `reason`. Its author must be
 an independent MEMBER, OWNER or COLLABORATOR. Genesis and tombstones use states `genesis` and

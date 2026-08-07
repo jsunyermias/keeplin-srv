@@ -200,7 +200,7 @@ entry to Cleared with the exit that was taken and a link to it.
 |---|---|---|---|---|
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
-| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | 1 | — |
+| 2026-08-07 | [keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) | F-002 | 3 | — |
 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
 is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
@@ -230,14 +230,64 @@ merged there via [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217) 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116). The exit is therefore
 exit 2 of the three below, taken through the procedure in
 [`docs/review-directives.md`](review-directives.md): a verified genesis directive from a qualifying
-principal. It is recorded as open here because issuing that directive is the maintainer's act, not
-the loop's — and because a reader should be able to see that the very first pull request opened
-after the exit landed still had to escalate to use it, which is the per-pull-request cost that
+principal. That directive was issued, at
+[#issuecomment-5202730982](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982),
+and the five reified findings of review round two were dismissed with cited reasons at
+[#issuecomment-5203525444](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5203525444).
+It is worth recording that the very first pull request opened after the exit landed still had to
+escalate in order to use it, which is the per-pull-request cost that
 [keeplin#220](https://github.com/jsunyermias/keeplin/issues/220) exists to remove.
+
+<a id="keeplin-srv-121-evaluation-gap"></a>
+
+**The exit was taken, but its effect was never observed.** `keeplin-srv#121` merged on 2026-08-06
+at 18:48 UTC without the `Review loop converged` check ever having been evaluated on its merge
+candidate, `3862005`. No `Review loop converged` check exists on `3862005` at all: its checks are
+`Check, Test & Lint` and `Knowledge graph up to date`, both successful. The results that opened
+this stall are the two failures on the first commit, `43517cb`. Whether the evaluator ran on any
+commit in between was not established here. Why the
+evaluator did not run again after the push to `3862005` is undetermined. GitHub Actions had stopped
+dispatching workflows for this repository by then: no run was created after 16:52 UTC, and the
+merge itself triggered no build of `main` either. Consequently, the merged `main` tree remains
+unverified by CI, and any other pull request merged during that window likewise lacks checks on
+its merge commit; verification of those merged trees remains pending.
+
+What that leaves unproven is narrow and should not be overstated. The convergence condition was
+never computed on the merged tree: not that it would have failed. Its inputs were green when the
+merge happened — `Check, Test & Lint` and `Knowledge graph up to date` both succeeded on
+`3862005`, the genesis anchor was authorized, and no reified finding remained open. Independent
+review is a separate and conjunctive requirement, and it was met: two rounds by a different model
+family, recorded on the pull request. What is missing is the machine's own verdict, and a
+convergence claim that no machine computed is exactly the kind of claim this file exists to keep
+visible.
+
+There is no remedy inside this decision. Re-evaluating a closed pull request is the route left
+undefined above, so this row moves to Cleared naming the exit that was taken, with the gap stated
+rather than implied.
+
+[keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) escalated at journal
+observation 4 (run ID `31165307830`, head `2a9e60d`) because the blocking set had not shrunk for
+three rounds. Its size remained one throughout, but its membership changed completely:
+observations 1–3 each had `GENESIS` as their sole blocker, while observation 4 records
+`unauthenticatedAnchor: false`, a verified genesis directive and `F-002` as the sole open finding.
+The genesis gate therefore closed and real progress was made even though the blocking-set size
+did not shrink.
+
+Like keeplin-srv#116 above, this pull request is blocked by the defect it fixes. The evaluator
+runs from the default branch, so the contract that would close `F-002` is `main`'s rather than
+this branch's. Unlike #116, two exits exist. The maintainer can re-run the evaluator for CI
+workflow run `31164587869`, to which `F-002`'s recorded check run ID `92822415400` is bound, or
+#126 can merge, after which its derived-check contract removes this class of problem for later
+pull requests. An automated attempt to re-run the evaluator was refused with
+`403 Resource not accessible by integration`; the re-run is therefore a maintainer action, not
+an overlooked automated step. This is recorded for the same reason as #116: a reader who finds
+an implementation blocked by the defect it fixes can see that the mechanism was understood
+rather than overlooked.
 
 ## Cleared
 
 | Detected | Pull request | Stuck on | Exit | Resolution |
 |---|---|---|---|---|
+| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | authorized genesis | The verified [genesis directive](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982) closed `GENESIS`; the unresolved candidate-evaluation gap is [recorded here](#keeplin-srv-121-evaluation-gap). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-002 | dismissed | Accepted [ADR 0008](adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) bounds the claim; the three-probe follow-up is [tracked](review-loop-spike.md). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-008<br>F-013 | resolved | Default-branch isolation and verified-disposal tests pass. |
