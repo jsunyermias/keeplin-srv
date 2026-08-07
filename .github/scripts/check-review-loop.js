@@ -552,7 +552,7 @@ function parseFindings(section) {
     if (!id) continue;
 
     if (!FINDING_ID.test(id)) {
-      return { error: `Review ledger: '${id}' is not a stable finding ID of the form F-001.` };
+      return { error: `Review ledger: '${id}' is not a stable finding ID beginning with F- followed by at least three digits.` };
     }
     if (seen.has(id)) {
       return { error: `Review ledger: finding ID ${id} appears more than once.` };

@@ -39,7 +39,7 @@ evidence and explicitly fail when the affected check is cited for resolution, ra
 aborting the adapter with an uncaught exception. A present but malformed trusted-metadata marker
 also fails explicitly; absence alone retains the empty-metadata default. Once a unique open pull
 request is identified, malformed pagination or item evidence, ledger syntax, trusted metadata,
-and cited-check workflow identity are report-only evaluation refusals: each creates a failing
+the identified pull request fetch, and cited-check workflow identity are report-only evaluation refusals: each creates a failing
 `Review loop converged` check with the exact refusal as its summary before failing the workflow,
 and none appends a journal observation.
 The evaluator's journal helper escapes HTML comment delimiters inside serialized record fields

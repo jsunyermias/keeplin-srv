@@ -578,13 +578,16 @@ async function executeTrustedWorkflow(repositoryRoot, pullBody, comments, option
         listPullRequestsAssociatedWithCommit: endpoints.associatedPulls,
       },
       pulls: {
-        get: async () => ({ data: {
-          number: 200,
-          body: pullBody,
-          user: { login: "author" },
-          head: { sha: "ccc", repo: { id: options.headRepositoryId ?? 7 } },
-          base: { repo: { id: 7 } },
-        } }),
+        get: async () => {
+          if (options.pullGetError) throw options.pullGetError;
+          return { data: {
+            number: 200,
+            body: pullBody,
+            user: { login: "author" },
+            head: { sha: "ccc", repo: { id: options.headRepositoryId ?? 7 } },
+            base: { repo: { id: 7 } },
+          } };
+        },
         listReviews: endpoints.reviews,
         listFiles: endpoints.files,
       },
@@ -1984,7 +1987,7 @@ for (const refusal of [
 
 test("trusted workflow publishes an exact ledger parse failure without journaling", async () => {
   const repositoryRoot = process.env.REVIEW_LOOP_REPO || ".";
-  const parserMessage = "Review ledger: 'finding-1' is not a stable finding ID of the form F-001.";
+  const parserMessage = "Review ledger: 'finding-1' is not a stable finding ID beginning with F- followed by at least three digits.";
   const body = ledger(["| finding-1 | 1 | advisory | advisory | naming |"], []);
   const outcome = await executeTrustedWorkflow(repositoryRoot, body, [], { expectJournal: false });
 
@@ -1994,6 +1997,22 @@ test("trusted workflow publishes an exact ledger parse failure without journalin
   assert.equal(outcome.reportedCheck.conclusion, "failure");
   assert.equal(outcome.reportedCheck.output.title, "evaluation-unavailable");
   assert.equal(outcome.reportedCheck.output.summary, parserMessage);
+});
+
+test("trusted workflow publishes evaluation-unavailable when the identified pull request cannot be fetched", async () => {
+  const repositoryRoot = process.env.REVIEW_LOOP_REPO || ".";
+  const outcome = await executeTrustedWorkflow(repositoryRoot, "", [], {
+    expectJournal: false,
+    pullGetError: new Error("transport failed"),
+  });
+
+  assert.equal(outcome.postedBody, undefined);
+  assert.deepEqual(outcome.failures, ["Unable to read pull request 200: transport failed"]);
+  assert.equal(outcome.reportedCheck.name, "Review loop converged");
+  assert.equal(outcome.reportedCheck.head_sha, "ccc");
+  assert.equal(outcome.reportedCheck.conclusion, "failure");
+  assert.equal(outcome.reportedCheck.output.title, "evaluation-unavailable");
+  assert.equal(outcome.reportedCheck.output.summary, "Unable to read pull request 200: transport failed");
 });
 
 test("normal blocking evaluation still appends, reports failure and fails the workflow", async () => {

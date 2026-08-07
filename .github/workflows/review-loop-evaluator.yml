@@ -54,14 +54,19 @@ jobs:
             });
             const open = pulls.filter((pull) => pull.state === 'open' && pull.head.sha === run.head_sha);
             if (open.length !== 1) return core.info('No unique open pull request matches the completed run; nothing was written.');
-            const pull = (await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: open[0].number })).data;
             const publishUnavailable = async (message) => evaluator.publishEvaluation({
               result: { ok: false, state: 'evaluation-unavailable', message },
               alreadyRecorded: false,
-              reportCheck: async (conclusion) => github.rest.checks.create({ owner: context.repo.owner, repo: context.repo.repo, name: 'Review loop converged', head_sha: pull.head.sha, status: 'completed', conclusion, output: { title: 'evaluation-unavailable', summary: message } }),
+              reportCheck: async (conclusion) => github.rest.checks.create({ owner: context.repo.owner, repo: context.repo.repo, name: 'Review loop converged', head_sha: open[0].head.sha, status: 'completed', conclusion, output: { title: 'evaluation-unavailable', summary: message } }),
               setFailed: (failure) => core.setFailed(failure),
               info: (information) => core.info(information),
             });
+            let pull;
+            try {
+              pull = (await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: open[0].number })).data;
+            } catch (error) {
+              return publishUnavailable(`Unable to read pull request ${open[0].number}: ${error.message}`);
+            }
             const principalEnumeration = await evaluator.enumerateRepositoryPrincipals({
               request: (url) => github.request(url), owner: context.repo.owner, repo: context.repo.repo,
             });
