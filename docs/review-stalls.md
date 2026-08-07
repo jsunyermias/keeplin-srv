@@ -200,7 +200,6 @@ entry to Cleared with the exit that was taken and a link to it.
 |---|---|---|---|---|
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
-| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | 1 | — |
 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
 is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
@@ -230,14 +229,45 @@ merged there via [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217) 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116). The exit is therefore
 exit 2 of the three below, taken through the procedure in
 [`docs/review-directives.md`](review-directives.md): a verified genesis directive from a qualifying
-principal. It is recorded as open here because issuing that directive is the maintainer's act, not
-the loop's — and because a reader should be able to see that the very first pull request opened
-after the exit landed still had to escalate to use it, which is the per-pull-request cost that
+principal. That directive was issued, at
+[#issuecomment-5202730982](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982),
+and the five reified findings of review round two were dismissed with cited reasons at
+[#issuecomment-5203525444](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5203525444).
+It is worth recording that the very first pull request opened after the exit landed still had to
+escalate in order to use it, which is the per-pull-request cost that
 [keeplin#220](https://github.com/jsunyermias/keeplin/issues/220) exists to remove.
+
+<a id="keeplin-srv-121-evaluation-gap"></a>
+
+**The exit was taken, but its effect was never observed.** `keeplin-srv#121` merged on 2026-08-06
+at 18:48 UTC without the `Review loop converged` check ever having been evaluated on its merge
+candidate, `3862005`. No `Review loop converged` check exists on `3862005` at all: its checks are
+`Check, Test & Lint` and `Knowledge graph up to date`, both successful. The results that opened
+this stall are the two failures on the first commit, `43517cb`. Whether the evaluator ran on any
+commit in between was not established here. Why the
+evaluator did not run again after the push to `3862005` is undetermined. GitHub Actions had stopped
+dispatching workflows for this repository by then: no run was created after 16:52 UTC, and the
+merge itself triggered no build of `main` either. Consequently, the merged `main` tree remains
+unverified by CI, and any other pull request merged during that window likewise lacks checks on
+its merge commit; verification of those merged trees remains pending.
+
+What that leaves unproven is narrow and should not be overstated. The convergence condition was
+never computed on the merged tree: not that it would have failed. Its inputs were green when the
+merge happened — `Check, Test & Lint` and `Knowledge graph up to date` both succeeded on
+`3862005`, the genesis anchor was authorized, and no reified finding remained open. Independent
+review is a separate and conjunctive requirement, and it was met: two rounds by a different model
+family, recorded on the pull request. What is missing is the machine's own verdict, and a
+convergence claim that no machine computed is exactly the kind of claim this file exists to keep
+visible.
+
+There is no remedy inside this decision. Re-evaluating a closed pull request is the route left
+undefined above, so this row moves to Cleared naming the exit that was taken, with the gap stated
+rather than implied.
 
 ## Cleared
 
 | Detected | Pull request | Stuck on | Exit | Resolution |
 |---|---|---|---|---|
+| 2026-08-06 | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) | GENESIS | authorized genesis | The verified [genesis directive](https://github.com/jsunyermias/keeplin-srv/pull/121#issuecomment-5202730982) closed `GENESIS`; the unresolved candidate-evaluation gap is [recorded here](#keeplin-srv-121-evaluation-gap). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-002 | dismissed | Accepted [ADR 0008](adr/0008-trusted-evaluator-verified-disposal-and-a-bounded-history-claim.md) bounds the claim; the three-probe follow-up is [tracked](review-loop-spike.md). |
 | 2026-08-03 | [keeplin#198](https://github.com/jsunyermias/keeplin/pull/198) | F-008<br>F-013 | resolved | Default-branch isolation and verified-disposal tests pass. |
