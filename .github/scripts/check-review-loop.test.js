@@ -1982,6 +1982,20 @@ for (const refusal of [
   });
 }
 
+test("trusted workflow publishes an exact ledger parse failure without journaling", async () => {
+  const repositoryRoot = process.env.REVIEW_LOOP_REPO || ".";
+  const parserMessage = "Review ledger: 'finding-1' is not a stable finding ID of the form F-001.";
+  const body = ledger(["| finding-1 | 1 | advisory | advisory | naming |"], []);
+  const outcome = await executeTrustedWorkflow(repositoryRoot, body, [], { expectJournal: false });
+
+  assert.equal(outcome.postedBody, undefined);
+  assert.deepEqual(outcome.failures, [parserMessage]);
+  assert.equal(outcome.reportedCheck.name, "Review loop converged");
+  assert.equal(outcome.reportedCheck.conclusion, "failure");
+  assert.equal(outcome.reportedCheck.output.title, "evaluation-unavailable");
+  assert.equal(outcome.reportedCheck.output.summary, parserMessage);
+});
+
 test("normal blocking evaluation still appends, reports failure and fails the workflow", async () => {
   const calls = { appended: 0, conclusions: [], failures: [] };
   const outcome = await publishEvaluation({

@@ -451,7 +451,7 @@ function journalComment(record, identity, message = "") {
 }
 
 async function publishEvaluation({ result, alreadyRecorded, appendJournal, reportCheck, setFailed, info }) {
-  const reportOnly = ["history-unverifiable", "fork-refused"].includes(result.state);
+  const reportOnly = ["history-unverifiable", "fork-refused", "evaluation-unavailable"].includes(result.state);
   const appendRequired = !reportOnly && !alreadyRecorded;
   if (appendRequired && typeof appendJournal !== "function") throw new Error(`Evaluation state ${result.state} requires a journal writer.`);
   if (appendRequired) await appendJournal();
