@@ -10,9 +10,15 @@ Self-contained companion for `crates/keeplin-srv/tests/authorization.rs`.
 
 ```rust
 // md:Overview
-use std::{collections::BTreeSet, net::SocketAddr, process::Command, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    net::SocketAddr,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
-use axum::{Json, Router};
+use axum::{body::Body, extract::ConnectInfo, http::Request, Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
     models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
@@ -28,6 +34,8 @@ use keeplin_srv::{
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
+use tower::ServiceExt;
+use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 ```
 
@@ -38,6 +46,114 @@ use uuid::Uuid;
 **Used by** — all blocks in this test module.
 
 **Repeated context** — Negative cases compare the victim projection before and after attempted mutation.
+
+---
+
+## CapturedLogs
+
+**Identification** — cloneable in-memory tracing writer; marker `// md:CapturedLogs`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:CapturedLogs
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+```
+
+**What it does** — Shares captured tracing bytes across writer instances and the asserting test.
+
+**Dependencies** — `Arc<Mutex<Vec<u8>>>` — retains emitted bytes safely; expects poisoned locks to fail the test.
+
+**Used by** — `capturing_subscriber` and log-observability tests.
+
+**Repeated context** — Test-only diagnostics are asserted after the awaited operation.
+
+---
+
+## impl Write for CapturedLogs
+
+**Identification** — tracing output writer; marker `// md:impl Write for CapturedLogs`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:impl Write for CapturedLogs
+impl Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+```
+
+**What it does** — Appends every formatted event and treats flushing as complete because storage is memory-resident.
+
+**Dependencies** — `std::io::Write` — tracing formatter sink contract; expects complete buffer appends.
+
+**Used by** — `tracing_subscriber::fmt`.
+
+**Repeated context** — none.
+
+---
+
+## impl CapturedLogs
+
+**Identification** — captured-text accessor; marker `// md:impl CapturedLogs`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:impl CapturedLogs
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+```
+
+**What it does** — Snapshots captured UTF-8 output for assertions.
+
+**Dependencies** — `String::from_utf8` — decodes formatter output; expects tracing to emit UTF-8.
+
+**Used by** — revocation-failure and migration-report tests.
+
+**Repeated context** — none.
+
+---
+
+## fn capturing_subscriber
+
+**Identification** — tracing capture factory; marker `// md:fn capturing_subscriber`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn capturing_subscriber
+fn capturing_subscriber() -> (impl tracing::Subscriber + Send + Sync, CapturedLogs) {
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    (subscriber, logs)
+}
+```
+
+**What it does** — Builds an ANSI-free subscriber accepting all levels and returns its shared capture.
+
+**Dependencies** — `tracing_subscriber::fmt` — formats structured events; expects custom writers to receive SQLx notices and application warnings.
+
+**Used by** — ADR 0001 verification rows 14 and 22.
+
+**Repeated context** — The subscriber is attached to the exact future or server task being observed.
 
 ---
 
@@ -2328,13 +2444,14 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    assert!(!inbox
+    assert!(inbox
         .lock()
         .await
         .iter()
-        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+        .filter(|payload| payload["to"] == grantee.email)
+        .all(|payload| payload["kind"] == "verify_email"));
 
-    let _ = register_and_login(addr, "live-move-grantee@example.com").await;
+    let live_grantee_token = register_and_login(addr, "live-move-grantee@example.com").await;
     let mallory_token = register_and_login(addr, "live-notebook-owner@example.com").await;
     let live_grantee = store
         .get_user_by_email("live-move-grantee@example.com")
@@ -2396,12 +2513,31 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
     )
     .await;
     assert_eq!(owner_revoked.status(), 200);
-    assert!(store
-        .list_notes_for_user(live_grantee.id, None, None)
+    let ungranted_token = register_and_login(addr, "live-ungranted@example.com").await;
+    let listed: Vec<Value> = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(&live_grantee_token)
+        .send()
         .await
         .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(listed
         .iter()
-        .any(|listed| listed.id == live_note.id));
+        .any(|item| item["id"] == live_note.id.to_string()));
+    let ungranted_listed: Vec<Value> = client
+        .get(format!("http://{addr}/api/notes"))
+        .bearer_auth(ungranted_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!ungranted_listed
+        .iter()
+        .any(|item| item["id"] == live_note.id.to_string()));
 
     let live_moved = authed_json(
         &client,
@@ -2413,18 +2549,11 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
     )
     .await;
     assert_eq!(live_moved.status(), 200);
-    let mut delivered = false;
-    for _ in 0..100 {
-        delivered = inbox.lock().await.iter().any(|payload| {
-            payload["kind"] == "access_revoked"
-                && payload["to"] == live_grantee.email
-                && payload["resource_id"] == live_note.id.to_string()
-        });
-        if delivered {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    let delivered = inbox.lock().await.iter().any(|payload| {
+        payload["kind"] == "access_revoked"
+            && payload["to"] == live_grantee.email
+            && payload["resource_id"] == live_note.id.to_string()
+    });
     assert!(delivered);
     assert!(!store
         .list_notes_for_user(live_grantee.id, None, None)
@@ -2432,11 +2561,16 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
         .unwrap()
         .iter()
         .any(|listed| listed.id == live_note.id));
-    assert!(!inbox
+    let stale_recipient_kinds: Vec<String> = inbox
         .lock()
         .await
         .iter()
-        .any(|payload| { payload["kind"] == "access_revoked" && payload["to"] == grantee.email }));
+        .filter(|payload| payload["to"] == grantee.email)
+        .map(|payload| payload["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert!(stale_recipient_kinds
+        .iter()
+        .all(|kind| kind == "verify_email"));
 }
 ```
 
@@ -2460,15 +2594,19 @@ async fn moving_from_deleted_notebook_does_not_notify_stale_principals(pool: PgP
 // md:fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback
 #[sqlx::test(migrations = "../../migrations")]
 async fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback(pool: PgPool) {
+    let (subscriber, logs) = capturing_subscriber();
+    let dispatch = tracing::Dispatch::new(subscriber);
     let mut config = authorization_test_config();
     config.mail_webhook_url = Some("http://127.0.0.1:1/unreachable".into());
     let state = Arc::new(AppState::new(config, pool.clone()));
+    let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let server_app = app.clone();
     tokio::spawn(async move {
         axum::serve(
             listener,
-            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            server_app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .unwrap();
@@ -2514,37 +2652,59 @@ async fn note_owner_has_unilateral_exit_and_failed_notice_does_not_rollback(pool
         .await
         .unwrap()
         .unwrap();
-    let response = authed_json(
-        &reqwest::Client::new(),
-        reqwest::Method::PATCH,
-        addr,
-        &format!("/api/notes/{}", note.id),
-        &alice_token,
-        json!({ "notebook_id": Uuid::nil() }),
-    )
+    let (response, bob_response) = async {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/notes/{}", note.id))
+                    .extension(ConnectInfo(addr))
+                    .header("authorization", format!("Bearer {alice_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "notebook_id": Uuid::nil() }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bob_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/notes/{}", note.id))
+                    .extension(ConnectInfo(addr))
+                    .header("authorization", format!("Bearer {bob_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (response, bob_response)
+    }
+    .with_subscriber(dispatch)
     .await;
     assert_eq!(response.status(), 200);
     assert_eq!(
         store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
-    let bob_response = reqwest::Client::new()
-        .get(format!("http://{addr}/api/notes/{}", note.id))
-        .bearer_auth(bob_token)
-        .send()
-        .await
-        .unwrap();
     assert_eq!(bob_response.status(), 403);
+    let recorded = logs.text();
+    assert!(recorded.contains("access revocation notice failed"));
+    assert!(recorded.contains(&bob.id.to_string()));
+    assert!(recorded.contains(&note.id.to_string()));
+    assert!(recorded.contains("mail_kind=\"access_revoked\""));
 }
 ```
 
-**What it does** — Proves a note owner can leave another user's notebook despite a fully privileged inherited principal and that an unreachable revocation-notice webhook cannot roll back the committed move.
+**What it does** — Proves a note owner can leave another user's notebook despite a fully privileged inherited principal and that an unreachable revocation-notice webhook cannot roll back the committed move. The mutation and Bob's follow-up read are driven directly through cloned router services inside the test-local tracing dispatch, so the handler warning is captured without relying on subscriber propagation into Axum connection tasks.
 
 **Dependencies** — `Store::{create_note, update_note_meta}` and `NotePatch::notebook_id` — establish a note inside the foreign notebook; expects the fixture to distinguish note identity from containment. `update_note` — performs the guarded move; expects ownership to bound the guard. `Mailer::send_notice` — attempts notification after commit; expects delivery failure to remain non-blocking. `resolve_note_access` — reflected by the final HTTP denial; expects inheritance to disappear immediately.
 
 **Used by** — `cargo test --workspace`; ADR 0001 verification rows 12 and 14.
 
-**Repeated context** — Notification is owed but never authority to veto an owner's exit.
+**Repeated context** — Notification is owed but never authority to veto an owner's exit. A process-global tracing subscriber is deliberately avoided because PostgreSQL tests run concurrently; only the two relevant router futures enter this test's capture scope.
 
 ---
 
@@ -3024,6 +3184,149 @@ async fn strict_notebook_owner_cannot_share_or_eject_foreign_note(pool: PgPool) 
 
 ---
 
+## fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner
+
+**Identification** — PostgreSQL-backed ejection guard regression; marker `// md:fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner
+#[sqlx::test(migrations = "../../migrations")]
+async fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.permission_scheme = PermissionScheme::EjectionAllowed;
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let note_owner_token = register_and_login(addr, "ejection-note-owner@example.com").await;
+    let notebook_owner_token =
+        register_and_login(addr, "ejection-notebook-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "ejection-grantee@example.com").await;
+    inbox.lock().await.clear();
+    let store = Store::new(pool);
+    let note_owner = store
+        .get_user_by_email("ejection-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook_owner = store
+        .get_user_by_email("ejection-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("ejection-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("ejection source");
+    assert!(store
+        .upsert_notebook(notebook_owner.id, &notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(notebook.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "foreign ejection", note_owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    let blocked = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &notebook_owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+    let body: Value = blocked.json().await.unwrap();
+    assert!(body.to_string().contains(&grantee.id.to_string()));
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        Some(notebook.id)
+    );
+    assert!(inbox.lock().await.is_empty());
+    let revoked = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        &format!("/api/notebooks/{}/share/{}", notebook.id, grantee.id),
+        &notebook_owner_token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(revoked.status(), 200);
+    let ejected = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &notebook_owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(ejected.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+    let notices = inbox.lock().await;
+    assert!(notices.iter().any(|payload| {
+        payload["kind"] == "access_revoked"
+            && payload["to"] == grantee.email
+            && payload["resource_id"] == notebook.id.to_string()
+    }));
+    assert!(notices.iter().any(|payload| {
+        payload["kind"] == "access_revoked"
+            && payload["to"] == note_owner.email
+            && payload["resource_id"] == note.id.to_string()
+    }));
+    let owner_note = reqwest::Client::new()
+        .get(format!("http://{addr}/api/notes/{}", note.id))
+        .bearer_auth(note_owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_note.status(), 200);
+}
+```
+
+**What it does** — Under `EjectionAllowed`, proves the notebook owner is the guard actor: their controlled grantee blocks ejection by identity and containment remains unchanged with no premature notice. After the owner revokes that notebook grant, the retry succeeds, the note reaches Inbox, the grantee receives the revocation notice, and the foreign note owner receives the ejection notice.
+
+**Dependencies** — `update_note` — enforces the move-out guard and ejection exception; expects controlled notebook grants to block before mutation. `delete_notebook_share` — supplies the explicit Revoke resolution; expects its awaited 200 to include the best-effort notice attempt. `spawn_notice_webhook` — captures both owed notices; expects handler completion to form the observation barrier.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification row 19 and R4-05.
+
+**Repeated context** — A refused controlled-loss move sends no notice; the later ejection always notifies the foreign note owner even though ownership preserves API access.
+
+---
+
 ## fn unknown_permission_scheme_fails_process_startup
 
 **Identification** — process-boundary startup regression; marker `// md:fn unknown_permission_scheme_fails_process_startup`.
@@ -3161,6 +3464,104 @@ async fn direct_duplicate_survives_migration_and_rollback_restores_projection(po
 
 ---
 
+## fn direct_share_migration_reports_each_unattributable_row
+
+**Identification** — PostgreSQL migration-report regression; marker `// md:fn direct_share_migration_reports_each_unattributable_row`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn direct_share_migration_reports_each_unattributable_row
+#[sqlx::test(migrations = "../../migrations")]
+async fn direct_share_migration_reports_each_unattributable_row(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("report-owner@example.com", "x", "owner")
+        .await
+        .unwrap();
+    let contained_member = store
+        .create_user("report-contained@example.com", "x", "contained")
+        .await
+        .unwrap();
+    let inbox_member = store
+        .create_user("report-inbox@example.com", "x", "inbox")
+        .await
+        .unwrap();
+    let notebook = Notebook::new("report");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    let contained_note = store
+        .create_note(None, "contained report", owner.id)
+        .await
+        .unwrap();
+    let contained_note = store
+        .update_note_meta(
+            contained_note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let inbox_note = store
+        .create_note(None, "inbox report", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_notebook_share(
+            notebook.id,
+            contained_member.id,
+            Capabilities::READ | Capabilities::WRITE,
+        )
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(
+            contained_note.id,
+            contained_member.id,
+            Capabilities::READ | Capabilities::WRITE,
+        )
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(inbox_note.id, inbox_member.id, Capabilities::MANAGE)
+        .await
+        .unwrap();
+    let (subscriber, logs) = capturing_subscriber();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0017_direct_note_shares.sql"
+    ))
+    .execute(&pool)
+    .with_subscriber(subscriber)
+    .await
+    .unwrap();
+    let report = logs.text();
+    assert!(report.contains(&format!(
+        "note_id={}, user_id={}, capabilities={}, kind=matches_containing_notebook_share",
+        contained_note.id,
+        contained_member.id,
+        Capabilities::READ | Capabilities::WRITE
+    )));
+    assert!(report.contains(&format!(
+        "note_id={}, user_id={}, capabilities={}, kind=inbox",
+        inbox_note.id,
+        inbox_member.id,
+        Capabilities::MANAGE
+    )));
+}
+```
+
+**What it does** — Creates both ambiguous legacy classes, reruns migration 0017 under a tracing subscriber, and requires each notice to carry the exact note, user, capabilities, and classification.
+
+**Dependencies** — `migrations/0017_direct_note_shares.sql` — emits one PostgreSQL NOTICE per ambiguous row; expects exact row-level fields. `sqlx::postgres::notice` through `capturing_subscriber` — makes server NOTICE output assertable without changing production behavior.
+
+**Used by** — `cargo test --workspace`; ADR 0001 verification row 22 and the report that closes REV-122-01.
+
+**Repeated context** — The migration reports and preserves ambiguous rows; it does not decide their provenance.
+
+---
+
 ## Graph context
 
 No exact-commit graph was available. Relationships below are authored inference.
@@ -3193,6 +3594,10 @@ No exact-commit graph was available. Relationships below are authored inference.
 | # | Block (source order) | Marker in code |
 |---|----------------------|----------------|
 | 1 | imports | `// md:Overview` |
+| 2 | `CapturedLogs` | `// md:CapturedLogs` |
+| 3 | `impl Write for CapturedLogs` | `// md:impl Write for CapturedLogs` |
+| 4 | `impl CapturedLogs` | `// md:impl CapturedLogs` |
+| 5 | `fn capturing_subscriber` | `// md:fn capturing_subscriber` |
 | 2 | authorization case inventory | `// md:authorization_case_inventory` |
 | 3 | `fn mutating_handlers` | `// md:fn mutating_handlers` |
 | 4 | `fn source_handlers` | `// md:fn source_handlers` |
@@ -3227,5 +3632,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 31 | `fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` | `// md:fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance` |
 | 32 | `fn inherited_manage_blocks_but_direct_manage_survives_move` | `// md:fn inherited_manage_blocks_but_direct_manage_survives_move` |
 | 33 | `fn strict_notebook_owner_cannot_share_or_eject_foreign_note` | `// md:fn strict_notebook_owner_cannot_share_or_eject_foreign_note` |
+| 34 | `fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner` | `// md:fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner` |
 | 34 | `fn unknown_permission_scheme_fails_process_startup` | `// md:fn unknown_permission_scheme_fails_process_startup` |
 | 35 | `fn direct_duplicate_survives_migration_and_rollback_restores_projection` | `// md:fn direct_duplicate_survives_migration_and_rollback_restores_projection` |
+| 36 | `fn direct_share_migration_reports_each_unattributable_row` | `// md:fn direct_share_migration_reports_each_unattributable_row` |
