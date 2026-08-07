@@ -23,6 +23,15 @@ Malformed ledger data fails before evaluation. Comment and review references are
 the API request's repository and pull-request coordinates, then those coordinates are verified
 again inside the evaluator.
 
+If the associated-pull-request listing rejects before a pull request can be identified, the
+adapter reports `evaluation-unavailable` directly against the triggering run's `head_sha`. Once
+a unique open pull request is identified, rejection of the comments, reviews, jobs, check runs or
+changed-files listing reports the evidence-specific API failure against that pull request's head.
+The successful-listing case that produces anything other than one matching open pull request
+remains an informational no-op and publishes no check. Publishing is necessarily best effort: a
+rejection from the reporting `checks.create` call itself still escapes because the adapter cannot
+create a check while the checks API is unreachable.
+
 Before evaluating any directive, the adapter enumerates repository collaborators with the same
 workflow `GITHUB_TOKEN`, `affiliation=all`, and explicit traversal of every `Link: rel="next"`.
 The resulting exhaustive set is supplied to every authorization verification. Unreadable,
@@ -39,7 +48,8 @@ evidence and explicitly fail when the affected check is cited for resolution, ra
 aborting the adapter with an uncaught exception. A present but malformed trusted-metadata marker
 also fails explicitly; absence alone retains the empty-metadata default. Once a unique open pull
 request is identified, malformed pagination or item evidence, ledger syntax, trusted metadata,
-the identified pull request fetch, and cited-check workflow identity are report-only evaluation refusals: each creates a failing
+the identified pull request fetch, evidence-listing rejection, and cited-check workflow identity
+are report-only evaluation refusals: each creates a failing
 `Review loop converged` check with the exact refusal as its summary before failing the workflow,
 and none appends a journal observation.
 The evaluator's journal helper escapes HTML comment delimiters inside serialized record fields
