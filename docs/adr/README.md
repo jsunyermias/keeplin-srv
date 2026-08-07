@@ -39,15 +39,19 @@ link the ADR in both directions.
 
 ## Server-specific decisions
 
-The accepted server-specific decisions are registered below.
+The server-specific decisions are registered below.
 
 | ADR | Status | Scope | Issue | Acceptance PR |
 |---|---|---|---|---|
 | [0001 — Note moves and the provenance of note shares](0001-note-moves-and-share-provenance.md) | accepted | note/notebook permission surface: who may move a note, whether a move may alter its grants, and the named deployment-selected permission scheme that fixes those policy points | [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110) | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) |
+| [0002 — Authorization and mutation atomicity](0002-authorization-mutation-atomicity.md) | proposed | server-wide rule joining each HTTP authorization check to the mutation it authorizes through transactional re-verification | [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/pull/123) | none; proposed does not authorize implementation |
 
 `0001` has no canonical or companion ADR in `keeplin`: the capability model, both share tables and
 every function it names are local to this repository, and it moves no shared wire or format
 surface.
+
+`0002` has no canonical or companion ADR in `keeplin`: `keeplin` has neither this HTTP layer nor
+PostgreSQL, and the decision changes no shared wire, format or `keeplin-core` surface.
 
 A second local decision is expected for
 [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75): it must decide between
