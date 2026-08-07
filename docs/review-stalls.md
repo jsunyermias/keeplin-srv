@@ -200,6 +200,7 @@ entry to Cleared with the exit that was taken and a link to it.
 |---|---|---|---|---|
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
+| 2026-08-07 | [keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) | F-002 | 3 | — |
 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
 is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
@@ -263,6 +264,25 @@ visible.
 There is no remedy inside this decision. Re-evaluating a closed pull request is the route left
 undefined above, so this row moves to Cleared naming the exit that was taken, with the gap stated
 rather than implied.
+
+[keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) escalated at journal
+observation 4 (run ID `31165307830`, head `2a9e60d`) because the blocking set had not shrunk for
+three rounds. Its size remained one throughout, but its membership changed completely:
+observations 1–3 each had `GENESIS` as their sole blocker, while observation 4 records
+`unauthenticatedAnchor: false`, a verified genesis directive and `F-002` as the sole open finding.
+The genesis gate therefore closed and real progress was made even though the blocking-set size
+did not shrink.
+
+Like keeplin-srv#116 above, this pull request is blocked by the defect it fixes. The evaluator
+runs from the default branch, so the contract that would close `F-002` is `main`'s rather than
+this branch's. Unlike #116, two exits exist. The maintainer can re-run the evaluator for CI
+workflow run `31164587869`, to which `F-002`'s recorded check run ID `92822415400` is bound, or
+#126 can merge, after which its derived-check contract removes this class of problem for later
+pull requests. An automated attempt to re-run the evaluator was refused with
+`403 Resource not accessible by integration`; the re-run is therefore a maintainer action, not
+an overlooked automated step. This is recorded for the same reason as #116: a reader who finds
+an implementation blocked by the defect it fixes can see that the mechanism was understood
+rather than overlooked.
 
 ## Cleared
 
