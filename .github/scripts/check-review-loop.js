@@ -128,9 +128,12 @@ function verifyAuthorization({ finding, reference, pullAuthor, targetState, repo
 
 function verifyResolvedCheck({ finding, checks, headSha, config }) {
   const evidence = finding.evidence || {};
-  const check = (checks || []).find((candidate) => String(candidate.id) === String(evidence.checkRunId));
-  if (!check) return { ok: false, reason: "resolution check is unreachable" };
-  if (!REQUIRED_JOBS.includes(evidence.checkName) || check.name !== evidence.checkName || check.status !== "completed" || check.conclusion !== "success") return { ok: false, reason: "resolution check is not an explicitly required successful job" };
+  if (!REQUIRED_JOBS.includes(evidence.checkName)) return { ok: false, reason: "resolution check name is not an explicitly required job" };
+  const matches = (checks || []).filter((candidate) => candidate.name === evidence.checkName && candidate.workflow_run_id === config.runId);
+  if (matches.length === 0) return { ok: false, reason: "resolution check is absent from the evaluated workflow run" };
+  if (matches.length > 1) return { ok: false, reason: "resolution check is ambiguous within the evaluated workflow run" };
+  const [check] = matches;
+  if (check.status !== "completed" || check.conclusion !== "success") return { ok: false, reason: "resolution check is not an explicitly required successful job" };
   if (check.head_sha !== headSha || check.workflow_id !== config.workflowId || check.workflow_run_id !== config.runId || check.app_slug !== config.appSlug || check.app_id !== config.appId) return { ok: false, reason: "resolution check is not bound to this head, workflow and App" };
   return { ok: true };
 }

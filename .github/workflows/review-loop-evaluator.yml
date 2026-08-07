@@ -125,12 +125,12 @@ jobs:
             if (mappedChecks.some((item) => item === null)) {
               return publishUnavailable('Unable to read check-run evidence: malformed paginated item.');
             }
-            const referencedCheckIds = new Set(findings.filter((finding) => finding.state === 'resolved').map((finding) => String(finding.evidence && finding.evidence.checkRunId)));
-            if (mappedChecks.some((checkRun) => referencedCheckIds.has(String(checkRun.id)) && checkRun.workflow_lookup_failed)) {
-              return publishUnavailable('Unable to verify workflow identity for check run referenced as resolution evidence.');
+            const resolvedCheckNames = new Set(findings.filter((finding) => finding.state === 'resolved').map((finding) => finding.evidence && finding.evidence.checkName));
+            if (mappedChecks.some((checkRun) => resolvedCheckNames.has(checkRun.name) && checkRun.workflow_run_id === run.id && checkRun.workflow_lookup_failed)) {
+              return publishUnavailable('Unable to verify workflow identity for a resolution check in the evaluated run.');
             }
-            if (mappedChecks.some((checkRun) => referencedCheckIds.has(String(checkRun.id)) && checkRun.workflow_id !== configuredCiWorkflowId)) {
-              return publishUnavailable('A referenced resolution check does not match the configured CI_WORKFLOW_ID repository variable.');
+            if (mappedChecks.some((checkRun) => resolvedCheckNames.has(checkRun.name) && checkRun.workflow_run_id === run.id && checkRun.workflow_id !== configuredCiWorkflowId)) {
+              return publishUnavailable('A resolution check in the evaluated run does not match the configured CI_WORKFLOW_ID repository variable.');
             }
             const config = { repositoryId: repository.id, repository: repository.full_name, pullNumber: pull.number, maintainerLogin: repository.owner.login, workflowId: configuredCiWorkflowId, runId: run.id, runAttempt: run.run_attempt, appSlug: 'github-actions', appId: 15368 };
             const result = evaluator.evaluateTrustedReviewLoop({
