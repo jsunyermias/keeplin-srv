@@ -1814,6 +1814,10 @@
         "origin": "EXTRACTED",
         "value": [
           "Overview",
+          "CapturedLogs",
+          "impl Write for CapturedLogs",
+          "impl CapturedLogs",
+          "fn capturing_subscriber",
           "authorization_case_inventory",
           "fn mutating_handlers",
           "fn source_handlers",
@@ -1848,8 +1852,10 @@
           "fn inbox_move_preserves_direct_and_drops_uncontrolled_inheritance",
           "fn inherited_manage_blocks_but_direct_manage_survives_move",
           "fn strict_notebook_owner_cannot_share_or_eject_foreign_note",
+          "fn allowed_foreign_ejection_is_guarded_until_revoke_then_notifies_owner",
           "fn unknown_permission_scheme_fails_process_startup",
-          "fn direct_duplicate_survives_migration_and_rollback_restores_projection"
+          "fn direct_duplicate_survives_migration_and_rollback_restores_projection",
+          "fn direct_share_migration_reports_each_unattributable_row"
         ]
       },
       "purpose": {
