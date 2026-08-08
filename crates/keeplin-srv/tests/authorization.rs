@@ -722,9 +722,9 @@ async fn owner_note_access_does_not_acquire_a_connection() {
     assert!(access.is_owner);
 }
 
-// md:fn serializable_invariant_inventory_is_exact_and_deferred
+// md:fn serializable_invariant_inventory_is_exact_and_enforced
 #[test]
-fn serializable_invariant_inventory_is_exact_and_deferred() {
+fn serializable_invariant_inventory_is_exact_and_enforced() {
     let expected: BTreeSet<_> = [
         "update_note",
         "delete_note",
@@ -745,7 +745,17 @@ fn serializable_invariant_inventory_is_exact_and_deferred() {
         expected
     );
     let source = include_str!("../src/http.rs");
-    for handler in SERIALIZABLE_INVARIANT_HANDLERS {
+    let mutations = [
+        "update_note_meta_on",
+        "soft_delete_note_on",
+        "create_or_update_share_on",
+        "delete_share_on",
+        "set_note_owner_on",
+        "create_or_update_notebook_share_on",
+        "delete_notebook_share_on",
+        "set_notebook_owner_on",
+    ];
+    for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
             .split(&format!("// {}fn {handler}", "md:"))
             .nth(1)
@@ -754,8 +764,9 @@ fn serializable_invariant_inventory_is_exact_and_deferred() {
             .next()
             .unwrap();
         assert!(
-            !body.contains("SERIALIZABLE"),
-            "{handler} starts SERIALIZABLE in phase 1"
+            body.contains(&format!("serializable(state.clone(), \"{handler}\","))
+                && body.contains(mutation),
+            "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
         );
     }
 }
@@ -1301,6 +1312,24 @@ async fn spawn_authorization_server(pool: PgPool) -> SocketAddr {
     addr
 }
 
+// md:fn spawn_authorization_state
+#[cfg(debug_assertions)]
+async fn spawn_authorization_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) {
+    let state = Arc::new(AppState::new(authorization_test_config(), pool));
+    let app: Router = router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, state)
+}
+
 // md:fn spawn_notice_webhook
 async fn spawn_notice_webhook() -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<Value>>>) {
     let inbox: Arc<tokio::sync::Mutex<Vec<Value>>> = Arc::default();
@@ -1387,6 +1416,332 @@ async fn relation_snapshot(pool: &PgPool, table: &str, column: &str, id: Uuid) -
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+// md:fn serializable_move_interleaving_and_byte_equivalent_refusal
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_move_interleaving_and_byte_equivalent_refusal(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "serializable-owner@example.com").await;
+    let _carol_token = register_and_login(addr, "serializable-carol@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("serializable-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let carol = store
+        .get_user_by_email("serializable-carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("serializable source");
+    assert!(store.upsert_notebook(owner.id, &source).await.unwrap());
+    let owner_id = owner.id;
+    let source_id = source.id;
+    let make_source_note = |title: &'static str| {
+        let store = store.clone();
+        async move {
+            let note = store.create_note(None, title, owner_id).await.unwrap();
+            store
+                .update_note_meta(
+                    note.id,
+                    &NotePatch {
+                        notebook_id: Some(Some(source_id)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    let raced = make_source_note("raced move").await;
+    let ordinary = make_source_note("ordinary refusal").await;
+    state
+        .http_test_hooks
+        .pause_at("update_note", "after_early_move_guard")
+        .await;
+    let client = reqwest::Client::new();
+    let raced_request = {
+        let client = client.clone();
+        let owner_token = owner_token.clone();
+        tokio::spawn(async move {
+            authed_json(
+                &client,
+                reqwest::Method::PATCH,
+                addr,
+                &format!("/api/notes/{}", raced.id),
+                &owner_token,
+                json!({ "notebook_id": Uuid::nil() }),
+            )
+            .await
+        })
+    };
+    state.http_test_hooks.wait_until_reached().await;
+    store
+        .create_or_update_notebook_share(source.id, carol.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    let raced_response = raced_request.await.unwrap();
+    assert_eq!(raced_response.status(), 403);
+    let raced_body = raced_response.bytes().await.unwrap();
+    let ordinary_response = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", ordinary.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(ordinary_response.status(), 403);
+    assert_eq!(raced_body, ordinary_response.bytes().await.unwrap());
+    assert!(String::from_utf8(raced_body.to_vec())
+        .unwrap()
+        .contains(&carol.id.to_string()));
+    assert_eq!(
+        store.get_note(raced.id).await.unwrap().unwrap().notebook_id,
+        Some(source.id)
+    );
+}
+
+// md:fn serializable_move_stable_success
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_move_stable_success(pool: PgPool) {
+    let (addr, _state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stable-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("stable-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("stable source");
+    assert!(store.upsert_notebook(owner.id, &source).await.unwrap());
+    let note = store
+        .create_note(None, "stable move", owner.id)
+        .await
+        .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    let stable = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "notebook_id": Uuid::nil() }),
+    )
+    .await;
+    assert_eq!(stable.status(), 200);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
+        None
+    );
+}
+
+// md:fn serializable_post_mutation_failure_rolls_back
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "rollback-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("rollback-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "rollback original", owner.id)
+        .await
+        .unwrap();
+    state.http_test_hooks.inject_failure_after_mutation();
+    let failed = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "title": "must roll back" }),
+    )
+    .await;
+    assert_eq!(failed.status(), 500);
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().title,
+        "rollback original"
+    );
+}
+
+// md:fn serializable_one_failure_replays_once
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_one_failure_replays_once(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "one-retry-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("one-retry-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "before one retry", owner.id)
+        .await
+        .unwrap();
+    let before = state.http_test_hooks.observations();
+    state.http_test_hooks.inject_serialization_failures(1);
+    let replayed = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "title": "replayed once" }),
+    )
+    .await;
+    assert_eq!(replayed.status(), 200);
+    let after = state.http_test_hooks.observations();
+    assert_eq!((after.0 - before.0, after.1 - before.1), (2, 1));
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().title,
+        "replayed once"
+    );
+}
+
+// md:fn serializable_two_failures_defer_revocation_notice_until_commit
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_two_failures_defer_revocation_notice_until_commit(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let app: Router = router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let owner_token = register_and_login(addr, "two-retry-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "two-retry-grantee@example.com").await;
+    inbox.lock().await.clear();
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("two-retry-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("two-retry-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("two-retry notebook");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    let notebook_id = notebook.id;
+    let grantee_id = grantee.id;
+    store
+        .create_or_update_notebook_share(notebook_id, grantee_id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_notebook_share", "after_mutation")
+        .await;
+    let before = state.http_test_hooks.observations();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notebooks/{notebook_id}/share/{grantee_id}"),
+            &owner_token,
+            json!({}),
+        )
+        .await
+    });
+    state.http_test_hooks.wait_until_reached().await;
+    assert!(inbox.lock().await.is_empty());
+    assert_eq!(state.http_test_hooks.observations().3 - before.3, 0);
+    state.http_test_hooks.inject_serialization_failures(2);
+    state.http_test_hooks.resume();
+    let replayed = request.await.unwrap();
+    assert_eq!(replayed.status(), 200);
+    let after = state.http_test_hooks.observations();
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1, after.3 - before.3),
+        (3, 1, 1)
+    );
+    assert_eq!(inbox.lock().await.len(), 1);
+    assert!(store
+        .get_notebook_share(notebook_id, grantee_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn serializable_three_failures_exhaust_retry_bound
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_three_failures_exhaust_retry_bound(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "exhausted-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("exhausted-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "before exhaustion", owner.id)
+        .await
+        .unwrap();
+    let before = state.http_test_hooks.observations();
+    state.http_test_hooks.inject_serialization_failures(3);
+    let exhausted = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::PATCH,
+        addr,
+        &format!("/api/notes/{}", note.id),
+        &owner_token,
+        json!({ "title": "must not commit" }),
+    )
+    .await;
+    assert_eq!(exhausted.status(), 503);
+    let after = state.http_test_hooks.observations();
+    assert_eq!(
+        (
+            after.0 - before.0,
+            after.1 - before.1,
+            after.2 - before.2,
+            after.3 - before.3,
+        ),
+        (3, 0, 1, 0)
+    );
+    assert_eq!(
+        store.get_note(note.id).await.unwrap().unwrap().title,
+        "before exhaustion"
+    );
 }
 
 // md:fn cross_tenant_http_mutations_leave_victim_unchanged

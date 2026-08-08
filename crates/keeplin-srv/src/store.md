@@ -280,7 +280,7 @@ when the cipher is enabled; every read path decrypts before returning. **Used by
 
 ```rust
 // md:NotePatch
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NotePatch {
     pub title: Option<String>,
     pub notebook_id: Option<Option<Uuid>>,

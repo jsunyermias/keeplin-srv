@@ -46,6 +46,8 @@ The server-specific decisions are registered below.
 | [0001 — Note moves and the provenance of note shares](0001-note-moves-and-share-provenance.md) | accepted | note/notebook permission surface: who may move a note, whether a move may alter its grants, and the named deployment-selected permission scheme that fixes those policy points | [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110) | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) |
 | [0002 — Authorization and mutation atomicity](0002-authorization-mutation-atomicity.md) | accepted | server-wide rule joining each HTTP authorization check to the mutation it authorizes through transactional re-verification | [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/issues/123) | [keeplin-srv#132](https://github.com/jsunyermias/keeplin-srv/pull/132) |
 | [0003 — Making per-user quotas hold](0003-per-user-quota-serialization.md) | accepted | enforcement at every path that creates a counted object, plus a per-user advisory lock so the check and the write it authorizes are mutually exclusive | [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | [keeplin-srv#143](https://github.com/jsunyermias/keeplin-srv/pull/143) |
+| [0005 — Who must join the serializable protocol](0005-serializable-participant-set.md) | **accepted**; supersedes `0002` in part (its eight-handler enumeration and its deferral of non-HTTP entry points, only as they concern the serializable participant set) | widens the participant set to nine handlers plus the synchronization path's notebook writes, and makes the set structural, after phase 2 established that a `SERIALIZABLE` transaction neither observes nor is aborted by a concurrent `READ COMMITTED` writer | [keeplin-srv#147](https://github.com/jsunyermias/keeplin-srv/issues/147) | [keeplin-srv#148](https://github.com/jsunyermias/keeplin-srv/pull/148) |
+| [0006 — Making a journaled change reach its projection](0006-durable-projection.md) | accepted | a durable projection job written inside the journal transaction, claimed under a lease and retried, with a retention interlock so pruning cannot erase a job's own input, plus a reconciliation command; a journaled change is projected or visibly dead-lettered. Answers the exhaustion sentence `0005` defers, and forecloses no option of `0004` | [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75) | [keeplin-srv#148](https://github.com/jsunyermias/keeplin-srv/pull/148) |
 | [0004 — How the synchronization path refuses an over-quota change](0004-sync-quota-refusal.md) | rejected | proposed admission control before the journal insert; rejected because it could not hold `0003`'s invariants 2 and 3 on this path and would have superseded them the day they were accepted. The question moves to `keeplin-srv#75`'s ADR, which inherits this document's eleven verified facts, its four-mechanism analysis and its verification rows | [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | none — rejected in [keeplin-srv#146](https://github.com/jsunyermias/keeplin-srv/pull/146) |
 
 `0001` has no canonical or companion ADR in `keeplin`: the capability model, both share tables and
@@ -59,6 +61,14 @@ PostgreSQL, and the decision changes no shared wire, format or `keeplin-core` su
 equivalent write path in `keeplin`, and the decision moves no shared wire, format or `keeplin-core`
 surface.
 
+`0005` is accepted and supersedes `0002` in part: its enumeration of eight handlers and
+its deferral of non-HTTP entry points, both only as they concern which transactions must be
+serializable. `0002`'s re-verification rule, refusal shapes, retry bound, `503` on exhaustion and
+notice ordering are untouched. The partial supersession is recorded here because `0002` states both
+that every participant must join the protocol and that non-HTTP entry points are deferred, and phase
+2 of its implementation established that the synchronization path is a participant. `0005` has no
+canonical or companion ADR in `keeplin`, which has neither this HTTP layer nor PostgreSQL.
+
 `0004` is rejected and kept rather than withdrawn. It proposed deciding the synchronization path's
 quota refusal ahead of `keeplin-srv#75`, and two review rounds established that doing so would have
 required superseding `0003`'s invariants 2 and 3 on that path the day they were accepted, would have
@@ -67,12 +77,17 @@ sequential. A rejected ADR whose analysis is discarded costs the next decision t
 so the record stays: its eleven facts were each read out of the tree and five of them were wrong in
 an earlier draft.
 
-A further local decision is therefore expected for
-[keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75). It must decide between
-transactional materialization and a durable projection queue before implementation begins, and it now
-also carries the synchronization path's quota refusal, which `0003` requires be settled before
-implementation. `0004`'s *What keeplin-srv#75's ADR inherits* lists what that decision need not
-re-derive.
+`0006` is accepted and is that decision for
+[keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75). It rejects the single
+transaction the issue itself recommended, on the ground that no acknowledgement exists and the client
+never re-sends, so a rolled-back journal append loses a batch irrecoverably. The issue's bar is a
+queue only if a queue is demonstrably needed; the demonstration is in the decision, and it is that
+`put_resource_blob` carries no last-writer guard while multiple replicas are a documented deployment,
+so concurrent appliers are unsafe without a lease. It inherits `0004`'s verified facts and answers the exhaustion sentence `0005` defers.
+It does **not** decide the synchronization path's quota representation, which stays with
+[keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145); it records that a durable
+queue is what makes that decision expressible. `0006` has no canonical or companion ADR in `keeplin`:
+the journal, the projections and the worker are local to this repository.
 
 When adding a local ADR, register it here with status, scope, issue, acceptance PR, and any
 canonical or companion ADR in `keeplin`.
