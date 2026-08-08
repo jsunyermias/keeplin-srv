@@ -477,7 +477,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "crate::sync::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the sync session protocol is outside the per-HTTP-operation interleaving harness"), case: None },
     HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_notebook_share") },
     HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
     HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -491,7 +493,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
     HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
     HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_notebook") },
     HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_ownership") },
     HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
     HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
@@ -1457,6 +1461,370 @@ async fn target_principals_are_reverified_inside_every_mutating_transaction(pool
 
 ---
 
+## fn revoked_share_authority_is_reverified_for_create_share
+
+**Identification** — note share-authority transition interleaving; marker `// md:fn revoked_share_authority_is_reverified_for_create_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_share_authority_is_reverified_for_create_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "create-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "create-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "create-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("create-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("create-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("create-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "create-share authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("create_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", note.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts `create_share` while the actor owns the note, pauses before the operation snapshot, transfers ownership, and retains a direct `WRITE` grant for the actor. Resolution therefore still succeeds, but `WRITE` lacks `SHARE_WRITE`; ADR 0001's capability ceiling and ADR 0002's current-state re-verification require 403. The absent target share also pins rollback. Removing only the transaction-local capability guard permits the share and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the authority change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_note_owner, create_or_update_share}` leaves the actor resolvable with exactly `WRITE`; expects ownership and direct grants to remain independent. `Store::get_share` verifies no unauthorized grant committed; expects absent shares to return `None`.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_share`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_ownership_is_reverified_for_transfer_ownership
+
+**Identification** — note ownership-transition interleaving; marker `// md:fn revoked_ownership_is_reverified_for_transfer_ownership`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_ownership_is_reverified_for_transfer_ownership
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-note-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-note-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-note-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-note-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-note-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer-note authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+```
+
+**What it does** — Starts `transfer_ownership` while the actor owns the note, pauses before the operation snapshot, transfers ownership to another principal, and retains `READ` for the actor. Resolution succeeds while `can_transfer_ownership` is false, so ADR 0001's owner-only transfer power and ADR 0002's re-verification rule require 403. The current owner remains unchanged. Removing only the transaction-local ownership guard transfers to the request target and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the ownership change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_note_owner, create_or_update_share}` leaves the former owner resolvable with `READ`; expects `Access::granted` never to set owner status. `Store::get_note` verifies the refused transfer did not mutate ownership; expects `owner_id` to remain authoritative.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_ownership`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_share_authority_is_reverified_for_create_notebook_share
+
+**Identification** — notebook share-authority transition interleaving; marker `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_share_authority_is_reverified_for_create_notebook_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_notebook_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "notebook-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "notebook-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "notebook-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("notebook-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("notebook-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("notebook-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("notebook-share authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("create_notebook_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_notebook_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts `create_notebook_share` while the actor owns the notebook, pauses before the operation snapshot, transfers ownership, and retains a notebook `WRITE` grant. Resolution succeeds but `can_share_write` is false, so ADR 0001's strict capability model and ADR 0002's re-verification rule require 403. The absent target grant pins rollback. Removing only the transaction-local capability guard permits the share and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the authority change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_notebook_owner, create_or_update_notebook_share}` leaves the actor resolvable with exactly `WRITE`; expects `WRITE` not to imply `SHARE_WRITE`. `Store::get_notebook_share` verifies no unauthorized grant committed; expects absent shares to return `None`.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_notebook_share`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_ownership_is_reverified_for_transfer_notebook
+
+**Identification** — notebook ownership-transition interleaving; marker `// md:fn revoked_ownership_is_reverified_for_transfer_notebook`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_ownership_is_reverified_for_transfer_notebook
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_notebook(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-notebook-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-notebook-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-notebook-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-notebook-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("transfer-notebook authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("transfer_notebook", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_notebook", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(new_owner.id)
+    );
+}
+```
+
+**What it does** — Starts `transfer_notebook` while the actor owns the notebook, pauses before the operation snapshot, transfers ownership, and retains a notebook `READ` grant. Resolution succeeds while owner-only transfer authority is gone, so ADR 0001 and ADR 0002 require 403. The intermediate owner remains authoritative. Removing only the transaction-local ownership guard transfers to the request target and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the ownership change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_notebook_owner, create_or_update_notebook_share}` leaves the former owner resolvable with `READ`; expects delegated access never to confer ownership. `Store::notebook_owner` verifies the refused transfer did not mutate ownership; expects it to return the current owner.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_notebook`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
 ## fn revoked_note_guard_is_refused_for_delete_share
 
 **Identification** — delegated-authorization revocation interleaving for note-share deletion; marker `// md:fn revoked_note_guard_is_refused_for_delete_share`.
@@ -2163,7 +2531,11 @@ fn mutating_handler_interleaving_harness_is_complete() {
         .map(|entry| entry.handler)
         .collect::<BTreeSet<_>>();
     assert_eq!(inventory, harness);
-    assert_eq!(harness.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
+    let distinct_rows = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| (entry.handler, entry.transition))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(distinct_rows.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
     let tests = include_str!("authorization.rs");
     for entry in MUTATING_HANDLER_INTERLEAVINGS {
         assert!(!entry.transition.is_empty());
@@ -2186,9 +2558,9 @@ fn mutating_handler_interleaving_harness_is_complete() {
 }
 ```
 
-**What it does** — Derives every mutating entry from `HTTP_HANDLER_AUTHORIZATION`, requires exactly one harness row per entry, and requires each row to carry either one pinned refusal/replay status and a real test or an explicit non-empty exemption reason.
+**What it does** — Derives every mutating entry from `HTTP_HANDLER_AUTHORIZATION`, requires at least one harness row per entry, rejects duplicate handler/transition pairs, and requires each row to carry either one pinned refusal/replay status and a real test or an explicit non-empty exemption reason. Multiple rows for one handler distinguish independent guards, including actor authority and target existence.
 
-**Dependencies** — `HTTP_HANDLER_AUTHORIZATION` supplies the classification source of truth; expects additions to expand the derived set. `MUTATING_HANDLER_INTERLEAVINGS` supplies per-handler transition data; expects set equality and duplicate rejection to fail when an entry is absent or repeated.
+**Dependencies** — `HTTP_HANDLER_AUTHORIZATION` supplies the classification source of truth; expects additions to expand the derived set. `MUTATING_HANDLER_INTERLEAVINGS` supplies per-handler transition data; expects set equality to fail when a handler is absent and `(handler, transition)` uniqueness to reject a repeated property without forbidding distinct properties for one handler.
 
 **Used by** — ADR 0002 verification row 3.
 
@@ -5657,6 +6029,10 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
 | 13c | `fn serializable_participants_form_a_real_ssi_conflict` | `// md:fn serializable_participants_form_a_real_ssi_conflict` |
 | 13d | `fn target_principals_are_reverified_inside_every_mutating_transaction` | `// md:fn target_principals_are_reverified_inside_every_mutating_transaction` |
+| 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
+| 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |
+| 13d3 | `fn revoked_share_authority_is_reverified_for_create_notebook_share` | `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share` |
+| 13d4 | `fn revoked_ownership_is_reverified_for_transfer_notebook` | `// md:fn revoked_ownership_is_reverified_for_transfer_notebook` |
 | 13e | `fn revoked_note_guard_is_refused_for_delete_share` | `// md:fn revoked_note_guard_is_refused_for_delete_share` |
 | 13f | `fn transferred_ownership_is_reverified_for_delete_note` | `// md:fn transferred_ownership_is_reverified_for_delete_note` |
 | 10 | `fn authorization_reads_observe_transaction_local_state` | `// md:fn authorization_reads_observe_transaction_local_state` |

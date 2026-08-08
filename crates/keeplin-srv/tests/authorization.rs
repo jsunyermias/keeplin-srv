@@ -376,7 +376,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "crate::sync::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the sync session protocol is outside the per-HTTP-operation interleaving harness"), case: None },
     HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_notebook_share") },
     HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
     HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -390,7 +392,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
     HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
     HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_notebook") },
     HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_ownership") },
     HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
     HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
@@ -1141,6 +1145,298 @@ async fn target_principals_are_reverified_inside_every_mutating_transaction(pool
     }
 }
 
+// md:fn revoked_share_authority_is_reverified_for_create_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "create-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "create-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "create-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("create-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("create-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("create-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "create-share authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("create_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", note.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn revoked_ownership_is_reverified_for_transfer_ownership
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-note-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-note-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-note-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-note-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-note-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer-note authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+
+// md:fn revoked_share_authority_is_reverified_for_create_notebook_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_notebook_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "notebook-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "notebook-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "notebook-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("notebook-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("notebook-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("notebook-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("notebook-share authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("create_notebook_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_notebook_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn revoked_ownership_is_reverified_for_transfer_notebook
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_notebook(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-notebook-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-notebook-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-notebook-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-notebook-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("transfer-notebook authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("transfer_notebook", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_notebook", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(new_owner.id)
+    );
+}
+
 // md:fn revoked_note_guard_is_refused_for_delete_share
 #[cfg(debug_assertions)]
 #[sqlx::test(migrations = "../../migrations")]
@@ -1692,7 +1988,11 @@ fn mutating_handler_interleaving_harness_is_complete() {
         .map(|entry| entry.handler)
         .collect::<BTreeSet<_>>();
     assert_eq!(inventory, harness);
-    assert_eq!(harness.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
+    let distinct_rows = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| (entry.handler, entry.transition))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(distinct_rows.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
     let tests = include_str!("authorization.rs");
     for entry in MUTATING_HANDLER_INTERLEAVINGS {
         assert!(!entry.transition.is_empty());
