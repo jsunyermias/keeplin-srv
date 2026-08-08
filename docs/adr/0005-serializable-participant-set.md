@@ -62,13 +62,21 @@ authority — and the handler commits on the earlier view.
 
 **`delete_account`.** It calls `Store::delete_user`, which runs `DELETE FROM users` on the pool
 (`store.rs:377`), outside any serializable boundary. Foreign keys cascade to `notes`, `note_shares`,
-`notebooks` and `notebook_shares`. It deletes the requester's own account, which sounds self-contained
-and is not: when a grantee deletes their account, their `note_shares` rows vanish while another
-user's move guard is mid-transaction deciding whether that same grantee loses access. It is an HTTP
-handler, inside ADR 0002's own stated audit boundary, and it is not among the eight.
+`notebooks` and `notebook_shares`. It deletes the requester's own account, and it is an HTTP handler
+inside ADR 0002's own stated audit boundary that is not among the eight.
 
-An exhaustive search found no others: `collab.rs` writes no share, ownership or notebook row, and the
-maintenance tasks in `main.rs` write none of these tables.
+Its schedules against a stale guard are **fail-closed**, which an earlier draft of this ADR got wrong
+and which the decision section now states in full: the grantee and their share row vanish together,
+so no surviving principal loses access silently. What it does produce is a spurious refusal naming a
+principal who has just ceased to exist, and a concurrent `transfer_ownership` to the deleted user that
+raises SQLSTATE `23503` rather than `40001` and is therefore not retried.
+
+No others were found by searching this crate for statements writing those tables and by reading
+`collab.rs` and `main.rs`'s maintenance tasks, which write none of them. That is inspection — the
+same technique that missed both of these writers for a full review phase — so it is stated as what
+was done rather than as a guarantee that the list is complete. Part three exists because inspection
+is not enough, and because inspection over source would itself have missed the cascade that motivates
+part one.
 
 ### The contradiction
 
@@ -111,7 +119,10 @@ synchronization writer is any device of any user syncing an ordinary notebook de
 privilege; both are the product working normally.
 
 **Consequence.** A move, share, ejection or transfer commits against an authorization view that a
-concurrently committed change had already invalidated, with no error raised anywhere.
+concurrently committed change had already invalidated, with no error raised anywhere. That is
+demonstrated for the synchronization writer, whose notebook deletion can leave a handler admitting or
+refusing on state that no longer exists. It is **not** demonstrated for `delete_account`, whose
+schedules are fail-closed; part one of the decision says so and rests on a different argument.
 
 **Out of scope.** Collaboration line editing, which writes none of this state; and read paths, which
 are phase 3.
@@ -122,9 +133,10 @@ are phase 3.
 
 Narrow what phase 2 claims, document the two writers as a known limit, open an issue.
 
-Rejected by the maintainer, and the reason is worth recording rather than the rejection alone: the
-gap is not an edge. It is reachable by syncing a notebook deletion, which is ordinary use, so a
-documented limit would be a documented defect.
+Not adopted. The maintainer's input on being shown the two writers was that the gap is not an edge:
+it is reachable by syncing a notebook deletion, which is ordinary use, so a documented limit would be
+a documented defect. That input is recorded as input — this ADR is `proposed`, and nothing in it
+predetermines the decision the maintainer has yet to take on the document as a whole.
 
 ### Option 2 — Bring both writers into the serializable protocol, and enumerate participants
 
@@ -141,9 +153,13 @@ would close the window without changing any isolation level, and it composes wit
 decision has not foreseen. Its costs: it introduces a second serialization mechanism alongside the
 one ADR 0002 chose, it requires every participant to agree on the anchor — which is the same
 enumeration problem in a different shape — and the anchor becomes a per-notebook or per-user
-bottleneck on paths that have none today. It also collides with the lock-domain contract
-[ADR 0003](0003-per-user-quota-serialization.md) requires, since `lock_note_order` already shares the
-advisory-lock space.
+bottleneck on paths that have none today.
+
+An earlier draft added a fourth cost, that it would collide with the lock-domain contract
+[ADR 0003](0003-per-user-quota-serialization.md) requires. **That was wrong.** `SELECT … FOR UPDATE`
+takes row locks, not advisory locks, so it does not touch `lock_note_order`'s space at all. The claim
+is removed rather than quietly dropped, because the strongest alternative was being rejected partly on
+a false ground. The three costs above stand on their own.
 
 ### Option 4 — `REPEATABLE READ` for the writers instead of `SERIALIZABLE`
 
@@ -159,10 +175,29 @@ about what the guard transaction observes.
 
 **Part one — the enumerated set becomes nine.** `delete_account` joins `update_note`, `delete_note`,
 `create_share`, `delete_share`, `transfer_ownership`, `create_notebook_share`,
-`delete_notebook_share` and `transfer_notebook`. It is an HTTP mutation inside ADR 0002's own audit
-boundary whose cascade revokes authority that ADR 0001's invariants govern; its absence was an
-omission in the enumeration rather than a scoping choice, because ADR 0002 never states a reason for
-excluding it.
+`delete_notebook_share` and `transfer_notebook`.
+
+**The justification is weaker than an earlier draft claimed, and the correction matters.** That draft
+said the cascade can silently remove a controlled principal's access, violating ADR 0001 invariant 6.
+Review established it cannot: when a grantee deletes their account, the grantee and their
+`note_shares` row vanish together, so no principal survives to have lost access silently. Every
+schedule this cascade produces against a stale guard is **fail-closed** — the guard refuses a move
+naming a principal who has just ceased to exist, which is a spurious refusal rather than a silent
+loss.
+
+Two reasons remain, and they are what part one now rests on:
+
+- **A concrete defect, not a precaution.** A `transfer_ownership` to a user whose account is being
+  deleted concurrently hits a foreign-key check against current, non-snapshot data and raises
+  SQLSTATE `23503`. That is not `40001`, so ADR 0002's retry does not classify it and the request
+  surfaces as an unenumerated `500`. Bringing `delete_account` into the protocol is what makes that
+  schedule decidable instead of accidental.
+- **Precautionary closure**, stated as such. A writer of authorization state that sits outside the
+  protocol is a standing invitation for the next change to turn a fail-closed schedule into a
+  fail-open one, and nothing today would detect that.
+
+`ADR 0002` states no reason for excluding `delete_account`, so its absence reads as an omission
+rather than a scoping choice — but the ADR is silent, not explicit, and that is an inference.
 
 **Part two — the synchronization path's notebook writes join the protocol.** `materialize`'s calls to
 `upsert_notebook` and `delete_notebook` execute in a serializable transaction with the same retry
@@ -172,11 +207,24 @@ writes, only because they feed authorization guards.** Nothing else in `material
 this ADR does not decide anything about the rest of the synchronization path, which remains
 keeplin-srv#75's ground.
 
-**Part three — the participant set is structural.** A test enumerates every writer of the state the
-enumerated guards read — note rows, note shares, notebook rows, notebook shares and ownership — and
-fails when a writer appears that is not in the set or does not join the protocol. The handler
-inventory added in phase 1 detects a new *handler*; nothing today detects a new *writer*, which is
-exactly how both of these arrived unnoticed.
+**Part three — the participant set is structural, and its derivation must reach cascades.** A test
+enumerates every writer of the state the enumerated guards read — note rows, note shares, notebook
+rows, notebook shares and ownership — and fails when a writer appears that is not in the set or does
+not join the protocol. The handler inventory added in phase 1 detects a new *handler*; nothing today
+detects a new *writer*, which is exactly how both of these arrived unnoticed.
+
+**The derivation is named here because the obvious one would have missed the writer that motivates
+this decision.** `delete_user` never writes `note_shares`; a foreign-key cascade does. An inventory
+that scans source SQL statements would have found `DELETE FROM users` at `store.rs:377` and
+enumerated it as a writer of `users`, while missing the share revocation entirely — and the share
+revocation is the part that matters. So the derivation must union:
+
+- **source-level writers**: statements in this crate that write those tables;
+- **schema-level writers**: the foreign-key cascade closure over those tables, read from the
+  PostgreSQL catalog rather than from a list in a test, plus any trigger that writes them.
+
+An inventory built from source alone does not establish invariant 3, and saying so is the point of
+naming the method rather than the goal.
 
 **Part four — what remains true and unclaimed.** A serializable transaction is still unprotected
 against any writer outside the set. That is a property of PostgreSQL, not of this decision, and part
@@ -192,17 +240,29 @@ The invariants proposed are:
 4. ADR 0002's re-verification rule, its `403`/`MoveBlocked` refusal shapes, its three-attempt bound,
    its `503` on exhaustion and its notice ordering are unchanged.
 5. Retry exhaustion on the synchronization path does not return `503`, because that path is not an
-   HTTP request. Its representation is decided below.
+   HTTP request. What it *does* is keeplin-srv#75's to decide, and this ADR does not decide it.
 
-### The synchronization path's exhaustion, decided rather than left
+### The synchronization path's exhaustion, which this ADR does not decide
 
-ADR 0002's `503` is an HTTP answer and `materialize` has no response. On exhaustion the batch's
-notebook write is **not applied**, the failure is recorded in telemetry, and the change remains in the
-journal. This is the existing behaviour for any materialization failure — ADR 0004 fact 3 — so this
-decision adds no new loss mode; it makes the existing one reachable by contention as well as by error.
+An earlier draft decided it, and review established that doing so would have been this ADR's own
+version of the error [ADR 0004](0004-sync-quota-refusal.md) was rejected for.
 
-That is stated as a cost rather than hidden: a notebook deletion can fail to materialize under
-contention and nothing retries it, which is keeplin-srv#75's defect and not a new one.
+The draft said: on exhaustion the notebook write is not applied, telemetry records it, and the change
+remains in the journal. **That last clause presupposes that the journal entry and the projection are
+separately durable — which is exactly what keeplin-srv#75's option A abolishes.** Under
+journal-plus-projections-in-one-transaction, a failed notebook write rolls the journal append back
+with it, and the behaviour that draft "decided" is not expressible at all. Deciding it here would
+also entrench the non-retried loss #75 exists to eliminate.
+
+So this ADR decides only the isolation level and the retry bound on those writes. What happens when
+the bound is exhausted is **keeplin-srv#75's, and is recorded here as an observation of current
+behaviour rather than as a decision**: today a materialization failure applies nothing, logs, and is
+never re-attempted, because nothing re-drives the journal and no watermark records what was
+projected. Serializing these writes makes that existing outcome reachable by contention as well as by
+error.
+
+Whether that is acceptable in the interval before #75 lands is a cost the maintainer is accepting,
+and it is stated below rather than softened.
 
 ### Costs, stated rather than implied
 
@@ -227,8 +287,11 @@ registry records it.
 ## Consequences and risks
 
 - The invariant ADR 0002 claims becomes true against every writer this repository has today.
-- The synchronization path can now fail to apply a notebook write under contention, with the same
-  silence as any other materialization failure.
+- The synchronization path can now fail to apply a notebook write under contention. **Nothing
+  re-drives the journal and no watermark records what was projected**, so that failure is permanent:
+  a deleted notebook's inherited access can persist indefinitely and silently. This is the existing
+  behaviour of every materialization failure, made reachable by contention rather than only by error,
+  and it is keeplin-srv#75's to repair.
 - A new writer of guarded state fails a check instead of joining silently.
 - `delete_account` acquires a retry loop and can return `503`, which it cannot today.
 
@@ -244,15 +307,15 @@ Rollback returns to ADR 0002's eight and reopens the window this decision closes
 
 | # | Evidence | Kind | What fails if the decision is violated |
 |---|---|---|---|
-| 1 | A deterministic interleaving test pauses one of the nine after its serializable snapshot, materializes a notebook deletion through the synchronization path, resumes, and requires either replay against the deletion or the ordinary current-state refusal | negative, forced interleaving | **Fails on the current tree.** That is the point: it is the defect this decision exists to close |
+| 1 | A deterministic interleaving test pauses one of the nine after its serializable snapshot, materializes a notebook deletion through the synchronization path, and resumes. The expected outcome is pinned per interleaving rather than offered as a choice: when the deletion removes the destination's write authority the request is refused with the ordinary current-state refusal; when it removes an inherited principal the move is admitted and the refusal that the stale view produced does not occur | negative, forced interleaving | **Fails on the current tree.** An oracle phrased as "either replay or refuse" would pass against an implementation that always takes one branch, which is why each interleaving names its outcome |
 | 2 | The same for a `delete_account` cascade that removes an authorizing share while one of the nine is paused | negative, forced interleaving | Fails if the cascade can revoke authority a paused transaction still believes in |
 | 3 | A structural writer inventory enumerates every writer of note rows, note shares, notebook rows, notebook shares and ownership, and fails when one is not in the protocol | structural | Fails if a new writer can be added outside the set, which is how both known writers arrived |
-| 4 | Replacing the inventory's derivation with a hand-written list makes row 3 pass while a planted writer is uncovered | mutation | Fails if the inventory checks that a list exists rather than that it is derived |
+| 4 | A decoy writer of one guarded table, planted permanently in the test fixtures, is detected by the inventory on every run | standing check | Fails if the inventory stops deriving. A one-time mutation performed during the pull request proves nothing a year later, when someone can replace the derivation with a hand-written list and row 3 passes forever |
 | 5 | Downgrading any one participant to `READ COMMITTED` fails a test | mutation | Fails if the protocol is asserted by spelling rather than by behaviour |
-| 6 | The synchronization path retries `40001` within the same bound and, on exhaustion, applies no notebook write, emits telemetry, and returns no HTTP status | failure injection | Fails if ADR 0002's `503` is copied onto a path that is not a request, or if a partial write survives |
+| 6 | The synchronization path retries `40001` within the same bound and, on exhaustion, applies no notebook write, emits telemetry, returns no HTTP status, and leaves the journal row present and unmarked | failure injection | Fails if ADR 0002's `503` is copied onto a path that is not a request, if a partial write survives, or if the end state is other than the permanent non-application this ADR records as current behaviour and does not decide |
 | 7 | `delete_account` under injected `40001` retries within the bound and returns `503` only on exhaustion, with the account not deleted | failure injection | Fails if the cascade partially commits or exhaustion is hidden |
 | 8 | ADR 0002's existing evidence — the move interleaving, byte-equivalent refusal, rollback, replay, retry bound and exhaustion tests — still passes unchanged | regression | Fails if widening the set changed the behaviour ADR 0002 established |
-| 9 | A measurement of the synchronization path's throughput and latency before and after, recorded in the pull request | operational | Fails if the cost of serializing a fan-in path is assumed rather than observed |
+| 9 | The synchronization path's throughput, latency and `40001` abort rate are measured before and after against a stated regression budget, and the budget is agreed before the measurement is taken | operational, budgeted | Fails if the measured regression exceeds the budget. A row that only requires a number to be recorded passes on a catastrophic result, which is why the budget precedes the measurement |
 | 10 | `./scripts/check-docs.sh` passes with every changed source companion synchronized | documentation | Fails if implementation and documentation diverge |
 | 11 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all --check` pass | repository | Fails on behavioral regressions, warnings, or formatting drift |
 
