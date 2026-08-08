@@ -120,30 +120,49 @@ impl Access {
 }
 
 // md:fn resolve_note_access
+fn is_note_owner(note: &Note, user_id: Uuid) -> bool {
+    note.owner_id == user_id
+}
+
 pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
-    if note.owner_id == user_id {
+    if is_note_owner(note, user_id) {
+        return Ok(Access::owner());
+    }
+    let mut conn = store.pool().acquire().await?;
+    resolve_note_access_on(store, &mut conn, note, user_id, scheme).await
+}
+
+pub async fn resolve_note_access_on(
+    store: &crate::store::Store,
+    conn: &mut sqlx::PgConnection,
+    note: &Note,
+    user_id: Uuid,
+    scheme: crate::config::PermissionScheme,
+) -> Result<Access, AppError> {
+    if is_note_owner(note, user_id) {
         return Ok(Access::owner());
     }
     let direct = store
-        .get_share(note.id, user_id)
+        .get_share_on(&mut *conn, note.id, user_id)
         .await?
         .map(|share| Capabilities::from_bits(share.capabilities))
         .unwrap_or_else(Capabilities::empty);
     let inherited = if let Some(notebook_id) = note.notebook_id {
-        let notebook_bits = if store.notebook_owner(notebook_id).await? == Some(user_id) {
-            Capabilities::ALL
-        } else {
-            store
-                .get_notebook_share(notebook_id, user_id)
-                .await?
-                .map(|share| share.capabilities)
-                .unwrap_or(0)
-        };
+        let notebook_bits =
+            if store.notebook_owner_on(&mut *conn, notebook_id).await? == Some(user_id) {
+                Capabilities::ALL
+            } else {
+                store
+                    .get_notebook_share_on(&mut *conn, notebook_id, user_id)
+                    .await?
+                    .map(|share| share.capabilities)
+                    .unwrap_or(0)
+            };
         Capabilities::from_bits(
             Capabilities::from_bits(notebook_bits).bits() & scheme.notebook_inheritance(),
         )
@@ -164,14 +183,27 @@ pub async fn resolve_notebook_access(
     notebook_id: Uuid,
     user_id: Uuid,
 ) -> Result<Access, AppError> {
+    let mut conn = store.pool().acquire().await?;
+    resolve_notebook_access_on(store, &mut conn, notebook_id, user_id).await
+}
+
+pub async fn resolve_notebook_access_on(
+    store: &crate::store::Store,
+    conn: &mut sqlx::PgConnection,
+    notebook_id: Uuid,
+    user_id: Uuid,
+) -> Result<Access, AppError> {
     let owner = store
-        .notebook_owner(notebook_id)
+        .notebook_owner_on(&mut *conn, notebook_id)
         .await?
         .ok_or(AppError::NotFound)?;
     if owner == user_id {
         return Ok(Access::owner());
     }
-    match store.get_notebook_share(notebook_id, user_id).await? {
+    match store
+        .get_notebook_share_on(&mut *conn, notebook_id, user_id)
+        .await?
+    {
         Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
         None => Err(AppError::Forbidden),
     }

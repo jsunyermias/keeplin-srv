@@ -503,30 +503,49 @@ tombstone write is owner-only.
 
 ```rust
 // md:fn resolve_note_access
+fn is_note_owner(note: &Note, user_id: Uuid) -> bool {
+    note.owner_id == user_id
+}
+
 pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
-    if note.owner_id == user_id {
+    if is_note_owner(note, user_id) {
+        return Ok(Access::owner());
+    }
+    let mut conn = store.pool().acquire().await?;
+    resolve_note_access_on(store, &mut conn, note, user_id, scheme).await
+}
+
+pub async fn resolve_note_access_on(
+    store: &crate::store::Store,
+    conn: &mut sqlx::PgConnection,
+    note: &Note,
+    user_id: Uuid,
+    scheme: crate::config::PermissionScheme,
+) -> Result<Access, AppError> {
+    if is_note_owner(note, user_id) {
         return Ok(Access::owner());
     }
     let direct = store
-        .get_share(note.id, user_id)
+        .get_share_on(&mut *conn, note.id, user_id)
         .await?
         .map(|share| Capabilities::from_bits(share.capabilities))
         .unwrap_or_else(Capabilities::empty);
     let inherited = if let Some(notebook_id) = note.notebook_id {
-        let notebook_bits = if store.notebook_owner(notebook_id).await? == Some(user_id) {
-            Capabilities::ALL
-        } else {
-            store
-                .get_notebook_share(notebook_id, user_id)
-                .await?
-                .map(|share| share.capabilities)
-                .unwrap_or(0)
-        };
+        let notebook_bits =
+            if store.notebook_owner_on(&mut *conn, notebook_id).await? == Some(user_id) {
+                Capabilities::ALL
+            } else {
+                store
+                    .get_notebook_share_on(&mut *conn, notebook_id, user_id)
+                    .await?
+                    .map(|share| share.capabilities)
+                    .unwrap_or(0)
+            };
         Capabilities::from_bits(
             Capabilities::from_bits(notebook_bits).bits() & scheme.notebook_inheritance(),
         )
@@ -542,20 +561,24 @@ pub async fn resolve_note_access(
 }
 ```
 
-**What it does** — Resolves `user_id`'s `Access` to `note`, or `Forbidden` if they
-have none. Order:
+**What it does** — A single `is_note_owner` predicate defines the owner fast path. The compatibility
+entry point returns owner access before acquiring a connection; non-owner access acquires one
+pooled connection and delegates to `resolve_note_access_on`. The executor-aware entry point uses
+the same predicate and otherwise resolves `user_id`'s access entirely through the supplied
+`PgConnection`, or returns `Forbidden` if they have none. Order:
 
 1. `note.owner_id == user_id` → `Access::owner()`.
 2. The note is filed in a notebook and `user_id` owns that notebook
-   (`store.notebook_owner`) → implicit `manage`: `granted(Capabilities::all())` —
+   (`store.notebook_owner_on`) → implicit `manage`: `granted(Capabilities::all())` —
    full capabilities but **not** ownership (delete/transfer stay with
    `note.owner_id`). Resolved here rather than materialised by the cascade so it
    survives notebook ownership transfers with no share rows to maintain.
-3. Their `note_shares` row (`store.get_share`) → its (already normalised, already
+3. Their `note_shares` row (`store.get_share_on`) → its (already normalised, already
    cascade-resolved) capabilities.
 4. No row → `Err(AppError::Forbidden)`.
 
-**Dependencies** — `Note`, `Store::{notebook_owner, get_share}` (`store.rs`);
+**Dependencies** — `Note`, `Store::{pool, notebook_owner_on, get_share_on,
+get_notebook_share_on}` (`store.rs`); expects: the `_on` reads use only the supplied connection.
 `Access`/`Capabilities` (this file); `AppError` (`error.rs`).
 
 **Used by** — `http.rs` (get/update/delete/export/import-into, share
@@ -583,27 +606,43 @@ pub async fn resolve_notebook_access(
     notebook_id: Uuid,
     user_id: Uuid,
 ) -> Result<Access, AppError> {
+    let mut conn = store.pool().acquire().await?;
+    resolve_notebook_access_on(store, &mut conn, notebook_id, user_id).await
+}
+
+pub async fn resolve_notebook_access_on(
+    store: &crate::store::Store,
+    conn: &mut sqlx::PgConnection,
+    notebook_id: Uuid,
+    user_id: Uuid,
+) -> Result<Access, AppError> {
     let owner = store
-        .notebook_owner(notebook_id)
+        .notebook_owner_on(&mut *conn, notebook_id)
         .await?
         .ok_or(AppError::NotFound)?;
     if owner == user_id {
         return Ok(Access::owner());
     }
-    match store.get_notebook_share(notebook_id, user_id).await? {
+    match store
+        .get_notebook_share_on(&mut *conn, notebook_id, user_id)
+        .await?
+    {
         Some(share) => Ok(Access::granted(Capabilities::from_bits(share.capabilities))),
         None => Err(AppError::Forbidden),
     }
 }
 ```
 
-**What it does** — Resolves `user_id`'s `Access` to a notebook. Missing notebook →
+**What it does** — The compatibility entry point acquires one pooled connection and delegates to
+`resolve_notebook_access_on`; the executor-aware entry point resolves `user_id`'s `Access` to a
+notebook using only the caller-supplied connection. Missing notebook →
 `NotFound`. Owner (`notebooks.user_id`) → `Access::owner()`. Else their
 `notebook_shares` row (`store.get_notebook_share`) → its capabilities; no row →
 `Forbidden`.
 
-**Dependencies** — `Store::{notebook_owner, get_notebook_share}` (`store.rs`);
-`Access`/`Capabilities` (this file); `AppError` (`error.rs`).
+**Dependencies** — `Store::{pool, notebook_owner_on, get_notebook_share_on}` (`store.rs`);
+expects: both authorization reads observe the same supplied connection. `Access`/`Capabilities`
+(this file); `AppError` (`error.rs`).
 
 **Used by** — `http.rs` notebook handlers (update/delete/share create/list/revoke,
 notebook transfer, listing a notebook's notes), and the note-move path (moving a
