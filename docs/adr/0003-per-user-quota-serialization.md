@@ -11,7 +11,8 @@
 
 ## Context and problem
 
-`Verified at`: `keeplin-srv@b5b82b1`.
+`Verified at`: `keeplin-srv@0f86825`, which includes the merge of
+[keeplin-srv#141](https://github.com/jsunyermias/keeplin-srv/pull/141), phase 1 of ADR 0002.
 
 The server declares two per-user quotas, `max_notes_per_user` and `max_user_storage_bytes`, and
 refuses over-limit requests with `507 QuotaExceeded`. Neither holds.
@@ -162,7 +163,12 @@ test.
 > This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
 > the maintainer may accept or reject it.
 
-**Proposed decision: adopt Option 3, in two parts that must land together to mean anything.**
+**Proposed decision: adopt Option 3, in two parts.** They are separable and each establishes
+something on its own — enforcement alone removes the two unconditional bypasses and leaves a bounded
+race; the lock alone closes the race on the paths that already check and leaves the bypasses open.
+Only together do they establish the invariant this ADR advertises. They may therefore be implemented
+as separately reviewable commits, but must be released and claimed as one change, and each commit's
+tests must say which partial guarantee it establishes.
 
 **Part one — enforcement is a property of the write, not of the handler.** Every path that creates a
 counted object consults the limit: `create_note`, `import_note`, `put_resource_data`, and the
@@ -189,9 +195,18 @@ both deliberate:
   lock and no deadlock cycle is constructible. That property is load-bearing and the verification
   plan makes it structural rather than a comment.
 
-The discriminator exists because the advisory-lock space is global to the database. Nothing else in
-this repository uses advisory locks today, and an unnamespaced key would make the next user of that
-space collide with this one silently.
+**The advisory-lock space already has an occupant, and this ADR's first draft asserted it did
+not.** `// md:impl Store > fn lock_note_order` takes
+`pg_advisory_xact_lock(hashtextextended($1, 0))` keyed on a note identifier, and `collab.rs` calls
+it while holding the returned transaction. So the discriminator is not protection against a future
+collision: the collision domain exists now. A quota key derived the same way can collide with a
+note-order key, and the consequence is not two users waiting on each other but a quota write waiting
+on an unrelated collaboration operation.
+
+This decision therefore requires a **lock-domain contract** rather than a bare discriminator: every
+advisory-lock call site in this repository derives its key through one shared construction that
+takes a named domain, and `lock_note_order` is migrated into it. Two call sites choosing their own
+derivation is how the space silently overlaps, and it is already how it is.
 
 The proposed invariants are:
 
@@ -202,7 +217,8 @@ The proposed invariants are:
    transaction.
 4. Concurrent quota-bearing writes from the same user for the same quota are serialized. Different
    users, and different quotas for one user, are not, except where the key collides.
-5. Each transaction acquires at most one advisory lock.
+5. Each transaction acquires at most one advisory lock, counting `lock_note_order` and any future
+   lock, not only the quota locks.
 6. An HTTP refusal is `507 QuotaExceeded` with today's body, indistinguishable from a refusal issued
    with no contention.
 7. ADR 0002's eight-handler `SERIALIZABLE` enumeration is unchanged.
@@ -220,6 +236,11 @@ longer. If a statement or lock timeout is configured, the wait can fail, and tha
 internal error rather than a quota refusal — it must not be reported as `507`, because the request
 was never determined to be over limit. Invariant 6 constrains what a *refusal* looks like; it does
 not promise that no request can fail for any other reason.
+
+What a client may do about it must be stated, or the honest status becomes an unusable one. The lock
+precedes the deciding read and the write, so a failed acquisition leaves **no quota-bearing mutation
+committed** and the request is safe to retry. That is a property of the ordering rather than a
+promise about scheduling, and the verification plan pins it.
 
 **A transaction now spans the deciding read and the write.** On `put_resource_data` that transaction
 also spans the blob write, holding a connection for the duration of an arbitrarily large statement.
@@ -244,9 +265,11 @@ also spans the blob write, holding a connection for the duration of an arbitrari
   That is the point, and it is a behaviour change visible to any client currently over its limit.
 - A user issuing many writes against one quota has them serialized. Visible as latency.
 - Colliding lock keys serialize two unrelated users. Stricter than needed, never wrong.
-- `count_live_notes_for_user` must gain an executor-aware form; `user_blob_bytes_excluding` already
-  has one. Phase 1 of ADR 0002 converted one and not the other, and this decision resolves that
-  asymmetry rather than inheriting it.
+- `count_live_notes_for_user` must gain an executor-aware form; `user_blob_bytes_excluding` has one
+  as of the merge of [keeplin-srv#141](https://github.com/jsunyermias/keeplin-srv/pull/141), and had
+  none before it. That phase converted one quota read and not the other because quota was outside
+  its scope, so the asymmetry is arbitrary and this decision resolves it rather than inheriting it.
+  The dependency is stated because the claim is false against any commit before that merge.
 - The synchronization path acquires a per-user lock it does not take today, on a path whose latency
   characteristics differ from HTTP.
 - Deadlock risk is nil as written, by invariant 5. It stops being nil the moment a transaction takes
@@ -280,10 +303,11 @@ not hold at all; it should be considered a rollback of the whole decision rather
 | 8 | Two different users issue concurrent quota-bearing writes and both reach a test-controlled barrier between read and write; neither blocks the other | concurrency, deterministic | Fails if the lock is coarser than the key it claims: with a shared key the second transaction never reaches the barrier and the test fails by timeout rather than by luck |
 | 9 | Coarsening the lock key to a constant makes row 8 fail | mutation | Fails if row 8 is insensitive to granularity, which would make it a timing observation rather than evidence |
 | 10 | A user's `create_note` and `put_resource_data` proceed concurrently, demonstrating that the two quotas do not share a key | concurrency, deterministic | Fails if one key serves both quotas, reintroducing the false sharing this decision rejects |
-| 11 | A structural assertion that no transaction acquires more than one advisory lock, and that every advisory-lock call site uses the namespaced key derivation | structural | Fails if a second call site takes a raw key, or if a path takes two locks, either of which makes invariant 5 and the deadlock argument false |
+| 11 | A repository-wide advisory-lock inventory naming every call site and its domain, asserting that each derives its key through the shared construction and that no transaction holds more than one | structural | **Fails on the current tree**, because `lock_note_order` derives a raw key. That is the point: the row is not future protection but a statement that the condition already exists and must be repaired |
+| 11b | Replacing the quota key derivation with `lock_note_order`'s raw derivation makes row 11 fail | mutation | Fails if the inventory checks that a derivation exists rather than that the domains are separated |
 | 12 | An HTTP refusal issued under contention is byte-equivalent to one issued with no contention | compatibility | Fails if a concurrency-specific status or message leaks |
 | 13 | No `503` and no retry appear on any quota path | structural | Fails if ADR 0002's retry protocol is applied here by copying |
-| 14 | A failed lock wait surfaces as an internal error and never as `507` | negative | Fails if a request that was never determined to be over limit is reported as over limit |
+| 14 | A failed lock wait surfaces as an internal error and never as `507`, leaves no aggregate or object mutated, and the same request succeeds when retried after contention clears | negative, recovery | Fails if a request that was never determined to be over limit is reported as over limit, or if a timed-out attempt left a partial write that makes the retry wrong |
 | 15 | `count_live_notes_for_user` has an executor-aware form and every enforcement point uses one | structural | Fails if one quota read runs on the transaction and another does not |
 | 16 | Failure injection between the deciding read and the write leaves no partial state and no lock held after rollback | recovery | Fails if a crash can commit a write its quota check did not authorize, or strand a lock |
 | 17 | `./scripts/check-docs.sh` passes with every changed source companion and project document synchronized | documentation | Fails if implementation and documentation diverge |
