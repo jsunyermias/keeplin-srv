@@ -503,12 +503,19 @@ tombstone write is owner-only.
 
 ```rust
 // md:fn resolve_note_access
+fn is_note_owner(note: &Note, user_id: Uuid) -> bool {
+    note.owner_id == user_id
+}
+
 pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
+    if is_note_owner(note, user_id) {
+        return Ok(Access::owner());
+    }
     let mut conn = store.pool().acquire().await?;
     resolve_note_access_on(store, &mut conn, note, user_id, scheme).await
 }
@@ -520,7 +527,7 @@ pub async fn resolve_note_access_on(
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
-    if note.owner_id == user_id {
+    if is_note_owner(note, user_id) {
         return Ok(Access::owner());
     }
     let direct = store
@@ -554,17 +561,19 @@ pub async fn resolve_note_access_on(
 }
 ```
 
-**What it does** — The compatibility entry point acquires one pooled connection and delegates to
-`resolve_note_access_on`; the executor-aware entry point resolves `user_id`'s `Access` to `note`
-entirely through a caller-supplied `PgConnection`, or returns `Forbidden` if they have none. Order:
+**What it does** — A single `is_note_owner` predicate defines the owner fast path. The compatibility
+entry point returns owner access before acquiring a connection; non-owner access acquires one
+pooled connection and delegates to `resolve_note_access_on`. The executor-aware entry point uses
+the same predicate and otherwise resolves `user_id`'s access entirely through the supplied
+`PgConnection`, or returns `Forbidden` if they have none. Order:
 
 1. `note.owner_id == user_id` → `Access::owner()`.
 2. The note is filed in a notebook and `user_id` owns that notebook
-   (`store.notebook_owner`) → implicit `manage`: `granted(Capabilities::all())` —
+   (`store.notebook_owner_on`) → implicit `manage`: `granted(Capabilities::all())` —
    full capabilities but **not** ownership (delete/transfer stay with
    `note.owner_id`). Resolved here rather than materialised by the cascade so it
    survives notebook ownership transfers with no share rows to maintain.
-3. Their `note_shares` row (`store.get_share`) → its (already normalised, already
+3. Their `note_shares` row (`store.get_share_on`) → its (already normalised, already
    cascade-resolved) capabilities.
 4. No row → `Err(AppError::Forbidden)`.
 

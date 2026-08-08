@@ -20,10 +20,10 @@ use keeplin_srv::{
         resolve_note_access, resolve_note_access_on, resolve_notebook_access_on, Capabilities,
     },
     state::AppState,
-    store::{NotePatch, Store},
+    store::{Note, NotePatch, Store},
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
@@ -328,6 +328,20 @@ const RELAY_CHANGE_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
 
 const READ_ISOLATION_CASES: &[&str] = &["users_do_not_see_each_others_changes"];
 
+const AUTHORIZATION_READ_METHODS: &[&str] = &[
+    "get_note_on",
+    "count_live_notes_in_notebook_on",
+    "list_tags_on",
+    "get_user_by_email_on",
+    "get_user_by_id_on",
+    "get_share_on",
+    "notebook_owner_on",
+    "get_notebook_share_on",
+    "inherited_note_principals_on",
+    "resource_owned_by_on",
+    "user_blob_bytes_excluding_on",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HandlerKind {
     ReadOnly,
@@ -433,7 +447,7 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
     HandlerAuthorization {
         handler: "import_note",
         kind: HandlerKind::Mutating,
-        inputs: &["authenticated identity", "quota"],
+        inputs: &["authenticated identity"],
     },
     HandlerAuthorization {
         handler: "list_devices",
@@ -605,6 +619,7 @@ fn routed_handlers(source: &str) -> Vec<String> {
         .collect()
 }
 
+// md:fn handler_authorization_inventory_covers_router
 #[test]
 fn handler_authorization_inventory_covers_router() {
     let routed = routed_handlers(include_str!("../src/http.rs"));
@@ -621,9 +636,12 @@ fn handler_authorization_inventory_covers_router() {
         routed.into_iter().collect::<BTreeSet<_>>(),
         classified.into_iter().collect()
     );
-    assert!(HTTP_HANDLER_AUTHORIZATION.iter().all(|entry| {
-        !entry.inputs.is_empty() && entry.inputs.iter().all(|input| !input.is_empty())
-    }));
+    assert!(
+        HTTP_HANDLER_AUTHORIZATION.iter().all(|entry| {
+            !entry.inputs.is_empty() && entry.inputs.iter().all(|input| !input.is_empty())
+        }),
+        "handler names are checked against the router, but kind and inputs are non-empty human-maintained claims whose accuracy this test does not verify"
+    );
     assert!(HTTP_HANDLER_AUTHORIZATION
         .iter()
         .any(|entry| entry.kind == HandlerKind::ReadOnly));
@@ -648,6 +666,63 @@ fn handler_authorization_inventory_covers_router() {
     assert_ne!(expanded, classified);
 }
 
+// md:fn authorization_reads_never_fall_back_to_the_pool
+#[test]
+fn authorization_reads_never_fall_back_to_the_pool() {
+    let source = include_str!("../src/store.rs");
+    for method in AUTHORIZATION_READ_METHODS {
+        let declaration = format!("pub async fn {method}");
+        let reads_pool = |candidate: &str| {
+            candidate
+                .split(&declaration)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing executor-aware read {method}"))
+                .split("pub async fn ")
+                .next()
+                .unwrap()
+                .contains("self.pool")
+        };
+        assert!(
+            !reads_pool(source),
+            "executor-aware authorization read {method} falls back to self.pool"
+        );
+        let mutant = source.replacen(&declaration, &format!("{declaration} self.pool"), 1);
+        assert!(
+            reads_pool(&mutant),
+            "pool-redirection mutant for {method} survived"
+        );
+    }
+}
+
+// md:fn owner_note_access_does_not_acquire_a_connection
+#[tokio::test]
+async fn owner_note_access_does_not_acquire_a_connection() {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://localhost:1/owner-fast-path")
+        .unwrap();
+    let store = Store::new(pool);
+    let owner_id = Uuid::new_v4();
+    let now = Utc::now();
+    let note = Note {
+        id: Uuid::new_v4(),
+        title: "owner fast path".into(),
+        owner_id,
+        notebook_id: None,
+        is_todo: false,
+        todo_due: None,
+        todo_completed: None,
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    };
+    let access = resolve_note_access(&store, &note, owner_id, PermissionScheme::Strict)
+        .await
+        .unwrap();
+    assert!(access.is_owner);
+}
+
+// md:fn serializable_invariant_inventory_is_exact_and_deferred
 #[test]
 fn serializable_invariant_inventory_is_exact_and_deferred() {
     let expected: BTreeSet<_> = [
@@ -798,6 +873,52 @@ async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
             .unwrap()
             .id,
         transaction_user_id
+    );
+    assert_eq!(
+        store
+            .get_user_by_email_on(&mut tx, "transaction-user@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        transaction_user_id
+    );
+    assert_eq!(
+        store
+            .get_note_on(&mut tx, note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .notebook_id,
+        Some(notebook_id)
+    );
+    assert_eq!(
+        store
+            .count_live_notes_in_notebook_on(&mut tx, notebook_id)
+            .await
+            .unwrap(),
+        1
+    );
+    let tag_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tags
+         (id, user_id, title, created_at, updated_at, vv, last_writer)
+         VALUES ($1, $2, 'transaction tag', now(), now(), '{}', 'test')",
+    )
+    .bind(tag_id)
+    .bind(owner.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .list_tags_on(&mut tx, owner.id, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.id)
+            .collect::<BTreeSet<_>>(),
+        [tag_id].into_iter().collect()
     );
     sqlx::query(
         "INSERT INTO resources

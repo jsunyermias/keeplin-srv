@@ -120,12 +120,19 @@ impl Access {
 }
 
 // md:fn resolve_note_access
+fn is_note_owner(note: &Note, user_id: Uuid) -> bool {
+    note.owner_id == user_id
+}
+
 pub async fn resolve_note_access(
     store: &crate::store::Store,
     note: &Note,
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
+    if is_note_owner(note, user_id) {
+        return Ok(Access::owner());
+    }
     let mut conn = store.pool().acquire().await?;
     resolve_note_access_on(store, &mut conn, note, user_id, scheme).await
 }
@@ -137,7 +144,7 @@ pub async fn resolve_note_access_on(
     user_id: Uuid,
     scheme: crate::config::PermissionScheme,
 ) -> Result<Access, AppError> {
-    if note.owner_id == user_id {
+    if is_note_owner(note, user_id) {
         return Ok(Access::owner());
     }
     let direct = store

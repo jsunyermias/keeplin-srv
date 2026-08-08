@@ -859,18 +859,29 @@ pub struct Store {
 ```rust
     // md:impl Store > fn get_user_by_email
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_user_by_email_on(&mut conn, email).await
+    }
+
+    pub async fn get_user_by_email_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        email: &str,
+    ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE email = $1"#,
         )
         .bind(email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(user)
     }
 ```
 
-**What it does** — straightforward lookups (include `password_hash` for verification; it is never serialised).
+**What it does** — The pool-backed lookup acquires and forwards to `get_user_by_email_on`, keeping
+one copy of the query. The executor-aware form returns the account including `password_hash` for
+credential verification and transfer-target resolution; the hash is never serialised.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -1876,11 +1887,20 @@ pub struct Store {
 ```rust
     // md:impl Store > fn get_note
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_note_on(&mut conn, id).await
+    }
+
+    pub async fn get_note_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let mut note = sqlx::query_as::<_, Note>(&format!(
             "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         if let Some(note) = note.as_mut() {
             note.title = self.cipher.decrypt(&note.title)?;
@@ -1889,7 +1909,9 @@ pub struct Store {
     }
 ```
 
-**What it does** — live note by id (`deleted_at IS NULL`); title decrypted.
+**What it does** — The pool-backed lookup acquires and forwards to `get_note_on`, keeping one copy
+of the live-note query (`deleted_at IS NULL`). The executor-aware form observes caller-local state
+and decrypts the returned title.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2059,6 +2081,7 @@ pub struct Store {
         Ok(note)
     }
 
+    #[doc = "The caller must supply a transaction so the note tombstone and resource cascade commit atomically."]
     pub async fn soft_delete_note_on(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -2079,7 +2102,7 @@ pub struct Store {
     }
 ```
 
-**What it does** — The pool-backed form retains its existing transaction boundary: begin, invoke the executor-aware form for both statements, then commit. The `_on` form tombstones the note (sets `deleted_at`, bumps `updated_at`) and cascades on the supplied connection; callers of `_on` supply the transaction when those statements must be atomic. **Delete cascade (issue
+**What it does** — The pool-backed form retains its existing transaction boundary: begin, invoke the executor-aware form for both statements, then commit. The `_on` form tombstones the note (sets `deleted_at`, bumps `updated_at`) and cascades on the supplied connection. Its Rust documentation contract requires every caller to supply a transaction so the two statements commit atomically; a bare pooled connection does not satisfy that contract. **Delete cascade (issue
 #125, D5):** in the same transaction, if a live note was tombstoned, every live attachment of
 that note is stamped with the note's `deleted_at` via `cascade_resources_note_deleted` — this is
 the server-side hook where the note delete is applied.
@@ -4105,6 +4128,17 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         limit: Option<i64>,
         cursor: Option<PageCursor>,
     ) -> Result<Vec<Tag>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.list_tags_on(&mut conn, user_id, limit, cursor).await
+    }
+
+    pub async fn list_tags_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Tag>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
             "SELECT id, title, created_at, updated_at, deleted_at, system
@@ -4118,12 +4152,14 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         .bind(limit.unwrap_or(i64::MAX))
         .bind(cur_ts)
         .bind(cur_id)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await?)
     }
 ```
 
-**What it does** — the user's live rows, keyset-paginated on `(created_at, id)`.
+**What it does** — The pool-backed form acquires and forwards to `list_tags_on`; the shared query
+returns the user's live rows, keyset-paginated on `(created_at, id)`, while allowing an authorization
+transaction to supply its own connection.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -4420,17 +4456,29 @@ attachments).
 ```rust
     // md:impl Store > fn count_live_notes_in_notebook
     pub async fn count_live_notes_in_notebook(&self, notebook_id: Uuid) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.count_live_notes_in_notebook_on(&mut conn, notebook_id)
+            .await
+    }
+
+    pub async fn count_live_notes_in_notebook_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<i64, AppError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL",
         )
         .bind(notebook_id)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(count)
     }
 ```
 
-**What it does** — Live notes in one notebook — the input to the notes-per-notebook
+**What it does** — The pool-backed form acquires and forwards to
+`count_live_notes_in_notebook_on`, keeping one count query that can observe caller-local state.
+It counts live notes in one notebook — the input to the notes-per-notebook
 cap (`keeplin_core::format::MAX_NOTES_PER_NOTEBOOK`, issue keeplin#130). `deleted_at
 IS NULL` is what makes "live" mean the same thing here as on the client, whose
 `NotebookSortProfile::live_notes` is likewise built from non-deleted notes: tombstones

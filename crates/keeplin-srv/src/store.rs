@@ -324,12 +324,21 @@ impl Store {
 
     // md:impl Store > fn get_user_by_email
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_user_by_email_on(&mut conn, email).await
+    }
+
+    pub async fn get_user_by_email_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        email: &str,
+    ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE email = $1"#,
         )
         .bind(email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(user)
     }
@@ -877,11 +886,20 @@ impl Store {
 
     // md:impl Store > fn get_note
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_note_on(&mut conn, id).await
+    }
+
+    pub async fn get_note_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let mut note = sqlx::query_as::<_, Note>(&format!(
             "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         if let Some(note) = note.as_mut() {
             note.title = self.cipher.decrypt(&note.title)?;
@@ -996,6 +1014,7 @@ impl Store {
         Ok(note)
     }
 
+    #[doc = "The caller must supply a transaction so the note tombstone and resource cascade commit atomically."]
     pub async fn soft_delete_note_on(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -2199,6 +2218,17 @@ impl Store {
         limit: Option<i64>,
         cursor: Option<PageCursor>,
     ) -> Result<Vec<Tag>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.list_tags_on(&mut conn, user_id, limit, cursor).await
+    }
+
+    pub async fn list_tags_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Tag>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
             "SELECT id, title, created_at, updated_at, deleted_at, system
@@ -2212,7 +2242,7 @@ impl Store {
         .bind(limit.unwrap_or(i64::MAX))
         .bind(cur_ts)
         .bind(cur_id)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await?)
     }
 
@@ -2370,11 +2400,21 @@ impl Store {
 
     // md:impl Store > fn count_live_notes_in_notebook
     pub async fn count_live_notes_in_notebook(&self, notebook_id: Uuid) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.count_live_notes_in_notebook_on(&mut conn, notebook_id)
+            .await
+    }
+
+    pub async fn count_live_notes_in_notebook_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<i64, AppError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL",
         )
         .bind(notebook_id)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(count)
     }
