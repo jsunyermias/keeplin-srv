@@ -65,11 +65,27 @@ authority — and the handler commits on the earlier view.
 `notebooks` and `notebook_shares`. It deletes the requester's own account, and it is an HTTP handler
 inside ADR 0002's own stated audit boundary that is not among the eight.
 
-Its schedules against a stale guard are **fail-closed**, which an earlier draft of this ADR got wrong
-and which the decision section now states in full: the grantee and their share row vanish together,
-so no surviving principal loses access silently. What it does produce is a spurious refusal naming a
-principal who has just ceased to exist, and a concurrent `transfer_ownership` to the deleted user that
-raises SQLSTATE `23503` rather than `40001` and is therefore not retried.
+**Deleting a grantee is fail-closed. Deleting a notebook owner is not**, and the difference is a
+missing foreign key. `notebooks.user_id` cascades from `users` and `notebook_shares.notebook_id`
+cascades from `notebooks`, so closing a notebook owner's account hard-deletes the notebook and every
+grant through it. But `notes.notebook_id` is a bare `UUID` with **no foreign key at all**
+(`migrations/0003_note_metadata.sql`), so notes owned by surviving users stay attached to a notebook
+row that no longer exists.
+
+The fail-open schedule follows:
+
+1. Bob holds inherited write access to a note through Alice's notebook.
+2. Bob's `update_note` transaction resolves that inherited access and takes its snapshot.
+3. Alice closes her account; her notebook and its shares cascade away.
+4. Bob resumes and writes the note on the stale inherited authority, and commits.
+
+Account deletion runs at `READ COMMITTED`, so nothing rejects that execution. **A surviving principal
+commits after their authority was revoked** — which is the shape ADR 0001 invariant 6 exists to
+prevent, reached by a user closing their own account.
+
+Two further consequences of the same cascade: a spurious refusal naming a grantee who has just ceased
+to exist, and a concurrent `transfer_ownership` to the deleted user that raises SQLSTATE `23503`
+rather than `40001` and is therefore never retried.
 
 No others were found by searching this crate for statements writing those tables and by reading
 `collab.rs` and `main.rs`'s maintenance tasks, which write none of them. That is inspection — the
@@ -86,9 +102,10 @@ ADR 0002 says both of these, and they cannot both hold:
 > join the `SERIALIZABLE` protocol; making only the move transaction serializable would not establish
 > the invariant against a `READ COMMITTED` share writer.
 
-> **Not decided** — Authorization atomicity for non-HTTP entry points, including
-> collaboration/WebSocket paths. A later audit may extend the rule through a separate decision if
-> their mutation model requires it.
+and, as a bullet under its `### Not decided` heading:
+
+> Authorization atomicity for non-HTTP entry points, including collaboration/WebSocket paths. A later
+> audit may extend the rule through a separate decision if their mutation model requires it.
 
 The synchronization path participates and is deferred. `delete_account` participates and is simply
 absent from an enumeration ADR 0002 calls complete. Phase 2 cannot resolve this by choosing an
@@ -120,9 +137,9 @@ privilege; both are the product working normally.
 
 **Consequence.** A move, share, ejection or transfer commits against an authorization view that a
 concurrently committed change had already invalidated, with no error raised anywhere. That is
-demonstrated for the synchronization writer, whose notebook deletion can leave a handler admitting or
-refusing on state that no longer exists. It is **not** demonstrated for `delete_account`, whose
-schedules are fail-closed; part one of the decision says so and rests on a different argument.
+demonstrated for both writers: the synchronization path's notebook deletion leaves a handler
+admitting or refusing on state that no longer exists, and an account closure that cascades a notebook
+away lets a surviving principal commit on inherited authority that has already been revoked.
 
 **Out of scope.** Collaboration line editing, which writes none of this state; and read paths, which
 are phase 3.
@@ -177,31 +194,39 @@ about what the guard transaction observes.
 `create_share`, `delete_share`, `transfer_ownership`, `create_notebook_share`,
 `delete_notebook_share` and `transfer_notebook`.
 
-**The justification is weaker than an earlier draft claimed, and the correction matters.** That draft
-said the cascade can silently remove a controlled principal's access, violating ADR 0001 invariant 6.
-Review established it cannot: when a grantee deletes their account, the grantee and their
-`note_shares` row vanish together, so no principal survives to have lost access silently. Every
-schedule this cascade produces against a stale guard is **fail-closed** — the guard refuses a move
-naming a principal who has just ceased to exist, which is a spurious refusal rather than a silent
-loss.
+**This justification has been wrong in both directions, and the record of that is kept.** The first
+draft claimed the cascade silently removes a controlled principal's access. Round 1 refuted it for
+the case it examined — a grantee's deletion takes the grantee and their share together, leaving no
+survivor to have lost anything — and a second draft generalized that to *every* schedule being
+fail-closed. **That generalization was false**, and round 2 produced the counter-example: the
+notebook-owner case above, where a surviving principal commits on revoked inherited authority because
+`notes.notebook_id` carries no foreign key. A claim weakened past what is true is as wrong as one
+left too strong.
 
-Two reasons remain, and they are what part one now rests on:
+So part one rests on three things, in descending order of force:
 
-- **A concrete defect, not a precaution.** A `transfer_ownership` to a user whose account is being
-  deleted concurrently hits a foreign-key check against current, non-snapshot data and raises
-  SQLSTATE `23503`. That is not `40001`, so ADR 0002's retry does not classify it and the request
-  surfaces as an unenumerated `500`. Bringing `delete_account` into the protocol is what makes that
-  schedule decidable instead of accidental.
-- **Precautionary closure**, stated as such. A writer of authorization state that sits outside the
-  protocol is a standing invitation for the next change to turn a fail-closed schedule into a
-  fail-open one, and nothing today would detect that.
+- **A demonstrated fail-open schedule**, the notebook-owner deletion above. It is the ADR 0001
+  invariant 6 shape, reached without an adversary.
+- **A concrete unenumerated failure.** A `transfer_ownership` to a user whose account is being deleted
+  raises SQLSTATE `23503`, which ADR 0002's retry does not classify, so it surfaces as a `500`.
+- **Precautionary closure** for the remaining fail-closed schedules, labelled as precautionary.
+
+**Serializing `delete_account` alone does not close the second of those**, and the ADR says so rather
+than implying otherwise: `transfer_ownership` resolves its target user *before* entering the
+transaction and never re-reads it inside, so no serialization dependency exists to detect the
+deletion. This decision therefore also requires that **every handler resolving a target principal
+re-verify that principal's existence inside its transaction** — `transfer_ownership`,
+`transfer_notebook`, `create_share` and `create_notebook_share` all resolve outside today.
 
 `ADR 0002` states no reason for excluding `delete_account`, so its absence reads as an omission
 rather than a scoping choice — but the ADR is silent, not explicit, and that is an inference.
 
-**Part two — the synchronization path's notebook writes join the protocol.** `materialize`'s calls to
-`upsert_notebook` and `delete_notebook` execute in a serializable transaction with the same retry
-bound. This is the part that extends ADR 0002 into a non-HTTP entry point, which that ADR reserved
+**Part two — the synchronization path's notebook writes join the protocol, stated as a property
+rather than as a call boundary.** Any transaction that contains a guarded notebook write is
+serializable and is retried as one whole unit within the same bound. Today that unit is
+`materialize`'s call to `upsert_notebook` or `delete_notebook`; under keeplin-srv#75's option A it
+would be the transaction containing the journal append and every projection, and the property is
+written so that it survives that change instead of pinning the current boundary. This is the part that extends ADR 0002 into a non-HTTP entry point, which that ADR reserved
 for a separate decision; this is that decision, and it is deliberately narrow: **only the notebook
 writes, only because they feed authorization guards.** Nothing else in `materialize` changes, and
 this ADR does not decide anything about the rest of the synchronization path, which remains
@@ -225,6 +250,16 @@ revocation is the part that matters. So the derivation must union:
 
 An inventory built from source alone does not establish invariant 3, and saying so is the point of
 naming the method rather than the goal.
+
+**What that derivation still cannot do, stated so the check is not read as complete.** The catalog
+enumerates declared foreign-key actions and triggers; it does not map a database-side write back to
+the Rust entry point that must join the protocol, so the union produces a set of *tables reachable by
+a write* and a set of *code sites that write*, and joining them is a judgement the check cannot make.
+It does not follow trigger functions recursively, dynamically executed SQL, writable views or rules,
+or writes inside called database functions. The planted decoy proves detection of the shape the decoy
+has and no other. Invariant 3 is therefore established **up to that boundary**, and the boundary is
+written here rather than left for the next reader to discover the way this decision's own authors
+discovered the cascade.
 
 **Part four — what remains true and unclaimed.** A serializable transaction is still unprotected
 against any writer outside the set. That is a property of PostgreSQL, not of this decision, and part
@@ -308,11 +343,11 @@ Rollback returns to ADR 0002's eight and reopens the window this decision closes
 | # | Evidence | Kind | What fails if the decision is violated |
 |---|---|---|---|
 | 1 | A deterministic interleaving test pauses one of the nine after its serializable snapshot, materializes a notebook deletion through the synchronization path, and resumes. The expected outcome is pinned per interleaving rather than offered as a choice: when the deletion removes the destination's write authority the request is refused with the ordinary current-state refusal; when it removes an inherited principal the move is admitted and the refusal that the stale view produced does not occur | negative, forced interleaving | **Fails on the current tree.** An oracle phrased as "either replay or refuse" would pass against an implementation that always takes one branch, which is why each interleaving names its outcome |
-| 2 | The same for a `delete_account` cascade that removes an authorizing share while one of the nine is paused | negative, forced interleaving | Fails if the cascade can revoke authority a paused transaction still believes in |
+| 2 | Three `delete_account` interleavings against a paused participant, each with its outcome pinned: **notebook owner** — Bob's inherited write is refused rather than committed, which is the fail-open case and the essential one; **grantee** — the refusal does not name the vanished principal; **target of a transfer** — the request does not surface an unenumerated `500` | negative, forced interleaving | Fails if the cascade can revoke authority a paused transaction still acts on. Named per case because the three differ materially and an unpinned oracle passes on whichever the implementation happens to produce |
 | 3 | A structural writer inventory enumerates every writer of note rows, note shares, notebook rows, notebook shares and ownership, and fails when one is not in the protocol | structural | Fails if a new writer can be added outside the set, which is how both known writers arrived |
 | 4 | A decoy writer of one guarded table, planted permanently in the test fixtures, is detected by the inventory on every run | standing check | Fails if the inventory stops deriving. A one-time mutation performed during the pull request proves nothing a year later, when someone can replace the derivation with a hand-written list and row 3 passes forever |
 | 5 | Downgrading any one participant to `READ COMMITTED` fails a test | mutation | Fails if the protocol is asserted by spelling rather than by behaviour |
-| 6 | The synchronization path retries `40001` within the same bound and, on exhaustion, applies no notebook write, emits telemetry, returns no HTTP status, and leaves the journal row present and unmarked | failure injection | Fails if ADR 0002's `503` is copied onto a path that is not a request, if a partial write survives, or if the end state is other than the permanent non-application this ADR records as current behaviour and does not decide |
+| 6 | The synchronization path retries `40001` within the same bound and, on exhaustion, applies no notebook write, emits telemetry and returns no HTTP status | failure injection | Fails if ADR 0002's `503` is copied onto a path that is not a request, or if a partial write survives. The row deliberately says nothing about the journal row: what happens to it is keeplin-srv#75's, and an acceptance row requiring it to remain present would be unsatisfiable under that issue's option A |
 | 7 | `delete_account` under injected `40001` retries within the bound and returns `503` only on exhaustion, with the account not deleted | failure injection | Fails if the cascade partially commits or exhaustion is hidden |
 | 8 | ADR 0002's existing evidence — the move interleaving, byte-equivalent refusal, rollback, replay, retry bound and exhaustion tests — still passes unchanged | regression | Fails if widening the set changed the behaviour ADR 0002 established |
 | 9 | The synchronization path's throughput, latency and `40001` abort rate are measured before and after against a stated regression budget, and the budget is agreed before the measurement is taken | operational, budgeted | Fails if the measured regression exceeds the budget. A row that only requires a number to be recorded passes on a catastrophic result, which is why the budget precedes the measurement |
