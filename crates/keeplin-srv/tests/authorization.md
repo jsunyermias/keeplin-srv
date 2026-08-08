@@ -1786,7 +1786,7 @@ async fn spawn_authorization_state(pool: PgPool) -> (SocketAddr, Arc<AppState>) 
 
 **Dependencies** — `AppState::new`, `router`, `TcpListener::bind`, and `axum::serve`; expects the returned state to be the router's shared state.
 
-**Used by** — `serializable_move_interleaving_and_failure_evidence`.
+**Used by** — the six independent serializable move and retry evidence tests.
 
 **Repeated context** — The helper exists only in integration-test code.
 
@@ -1970,17 +1970,17 @@ async fn relation_snapshot(pool: &PgPool, table: &str, column: &str, id: Uuid) -
 
 ---
 
-## fn serializable_move_interleaving_and_failure_evidence
+## fn serializable_move_interleaving_and_byte_equivalent_refusal
 
-**Identification** — ADR 0002 deterministic move and retry evidence; marker `// md:fn serializable_move_interleaving_and_failure_evidence`.
+**Identification** — ADR 0002 deterministic move interleaving and refusal evidence; marker `// md:fn serializable_move_interleaving_and_byte_equivalent_refusal`.
 
 **Code** — complete and verbatim:
 
 ```rust
-// md:fn serializable_move_interleaving_and_failure_evidence
+// md:fn serializable_move_interleaving_and_byte_equivalent_refusal
 #[cfg(debug_assertions)]
 #[sqlx::test(migrations = "../../migrations")]
-async fn serializable_move_interleaving_and_failure_evidence(pool: PgPool) {
+async fn serializable_move_interleaving_and_byte_equivalent_refusal(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "serializable-owner@example.com").await;
     let _carol_token = register_and_login(addr, "serializable-carol@example.com").await;
@@ -2065,49 +2065,164 @@ async fn serializable_move_interleaving_and_failure_evidence(pool: PgPool) {
         store.get_note(raced.id).await.unwrap().unwrap().notebook_id,
         Some(source.id)
     );
+}
+```
 
-    store
-        .delete_notebook_share(source.id, carol.id)
+**What it does** — Pauses a move after its early inherited-principal read, commits Carol's share, and proves transactional re-verification returns the ordinary byte-identical `403 MoveBlocked` body while retaining the source notebook.
+
+**Dependencies** — `HttpTestHooks` scheduling, injection, and counters; expects the seam to be scoped to this state. `authed_json` drives the real HTTP handler; expects ordinary status and JSON serialization. `Store` reads authoritative committed rows; expects dropped failed transactions to roll back. PostgreSQL `40001` raised by the helper exercises the real database-error classifier.
+
+**Used by** — `cargo test --workspace`; ADR 0002 verification rows 1 and 2.
+
+**Repeated context** — The interleaved and ordinary refusals intentionally share one fixture so their response bytes can be compared directly.
+
+---
+
+## fn serializable_move_stable_success
+
+**Identification** — ADR 0002 stable move success evidence; marker `// md:fn serializable_move_stable_success`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_move_stable_success
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_move_stable_success(pool: PgPool) {
+    let (addr, _state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stable-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("stable-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let source = Notebook::new("stable source");
+    assert!(store.upsert_notebook(owner.id, &source).await.unwrap());
+    let note = store
+        .create_note(None, "stable move", owner.id)
         .await
         .unwrap();
+    let note = store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(source.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
     let stable = authed_json(
         &client,
         reqwest::Method::PATCH,
         addr,
-        &format!("/api/notes/{}", raced.id),
+        &format!("/api/notes/{}", note.id),
         &owner_token,
         json!({ "notebook_id": Uuid::nil() }),
     )
     .await;
     assert_eq!(stable.status(), 200);
     assert_eq!(
-        store.get_note(raced.id).await.unwrap().unwrap().notebook_id,
+        store.get_note(note.id).await.unwrap().unwrap().notebook_id,
         None
     );
+}
+```
 
+**What it does** — Builds a note in an unshared source notebook and proves the stable move commits it to the root.
+
+**Dependencies** — `spawn_authorization_state`, `Store`, and `authed_json`; expects the real update handler and committed store reads.
+
+**Used by** — `cargo test --workspace`; ADR 0002 verification row 8.
+
+**Repeated context** — The source notebook and note are created explicitly because this test has an independent SQLx fixture.
+
+---
+
+## fn serializable_post_mutation_failure_rolls_back
+
+**Identification** — ADR 0002 post-mutation rollback evidence; marker `// md:fn serializable_post_mutation_failure_rolls_back`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_post_mutation_failure_rolls_back
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "rollback-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("rollback-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "rollback original", owner.id)
+        .await
+        .unwrap();
     state.http_test_hooks.inject_failure_after_mutation();
     let failed = authed_json(
-        &client,
+        &reqwest::Client::new(),
         reqwest::Method::PATCH,
         addr,
-        &format!("/api/notes/{}", raced.id),
+        &format!("/api/notes/{}", note.id),
         &owner_token,
         json!({ "title": "must roll back" }),
     )
     .await;
     assert_eq!(failed.status(), 500);
     assert_eq!(
-        store.get_note(raced.id).await.unwrap().unwrap().title,
-        "raced move"
+        store.get_note(note.id).await.unwrap().unwrap().title,
+        "rollback original"
     );
+}
+```
 
+**What it does** — Injects a failure after the title mutation and proves the transaction leaves the explicitly created note unchanged.
+
+**Dependencies** — `HttpTestHooks::inject_failure_after_mutation`, `authed_json`, and `Store::get_note`; expects failure before commit to roll back the write.
+
+**Used by** — `cargo test --workspace`; ADR 0002 verification row 9.
+
+**Repeated context** — The baseline note is created explicitly in this test's fresh SQLx fixture.
+
+---
+
+## fn serializable_one_failure_replays_once
+
+**Identification** — ADR 0002 one-failure replay evidence; marker `// md:fn serializable_one_failure_replays_once`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_one_failure_replays_once
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_one_failure_replays_once(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "one-retry-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("one-retry-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "before one retry", owner.id)
+        .await
+        .unwrap();
     let before = state.http_test_hooks.observations();
     state.http_test_hooks.inject_serialization_failures(1);
     let replayed = authed_json(
-        &client,
+        &reqwest::Client::new(),
         reqwest::Method::PATCH,
         addr,
-        &format!("/api/notes/{}", raced.id),
+        &format!("/api/notes/{}", note.id),
         &owner_token,
         json!({ "title": "replayed once" }),
     )
@@ -2116,39 +2231,147 @@ async fn serializable_move_interleaving_and_failure_evidence(pool: PgPool) {
     let after = state.http_test_hooks.observations();
     assert_eq!((after.0 - before.0, after.1 - before.1), (2, 1));
     assert_eq!(
-        store.get_note(raced.id).await.unwrap().unwrap().title,
+        store.get_note(note.id).await.unwrap().unwrap().title,
         "replayed once"
     );
+}
+```
 
+**What it does** — Injects one real SQLSTATE `40001`, then proves two attempts produce one commit and the title is updated once.
+
+**Dependencies** — `HttpTestHooks` injection and counters, `authed_json`, and `Store::get_note`; expects the full handler operation to replay.
+
+**Used by** — `cargo test --workspace`; ADR 0002 verification row 10.
+
+**Repeated context** — The baseline note is created explicitly in this test's fresh SQLx fixture.
+
+---
+
+## fn serializable_two_failures_defer_revocation_notice_until_commit
+
+**Identification** — ADR 0002 retry-bound and deferred external-effect evidence; marker `// md:fn serializable_two_failures_defer_revocation_notice_until_commit`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_two_failures_defer_revocation_notice_until_commit
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_two_failures_defer_revocation_notice_until_commit(pool: PgPool) {
+    let (mail_addr, inbox) = spawn_notice_webhook().await;
+    let mut config = authorization_test_config();
+    config.mail_webhook_url = Some(format!("http://{mail_addr}/mail"));
+    let state = Arc::new(AppState::new(config, pool.clone()));
+    let app: Router = router(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let owner_token = register_and_login(addr, "two-retry-owner@example.com").await;
+    let _grantee_token = register_and_login(addr, "two-retry-grantee@example.com").await;
+    inbox.lock().await.clear();
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("two-retry-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let grantee = store
+        .get_user_by_email("two-retry-grantee@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("two-retry notebook");
+    assert!(store.upsert_notebook(owner.id, &notebook).await.unwrap());
+    let notebook_id = notebook.id;
+    let grantee_id = grantee.id;
+    store
+        .create_or_update_notebook_share(notebook_id, grantee_id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_notebook_share", "after_mutation")
+        .await;
     let before = state.http_test_hooks.observations();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notebooks/{notebook_id}/share/{grantee_id}"),
+            &owner_token,
+            json!({}),
+        )
+        .await
+    });
+    state.http_test_hooks.wait_until_reached().await;
+    assert!(inbox.lock().await.is_empty());
+    assert_eq!(state.http_test_hooks.observations().3 - before.3, 0);
     state.http_test_hooks.inject_serialization_failures(2);
-    let replayed = authed_json(
-        &client,
-        reqwest::Method::PATCH,
-        addr,
-        &format!("/api/notes/{}", raced.id),
-        &owner_token,
-        json!({ "title": "replayed twice" }),
-    )
-    .await;
+    state.http_test_hooks.resume();
+    let replayed = request.await.unwrap();
     assert_eq!(replayed.status(), 200);
     let after = state.http_test_hooks.observations();
     assert_eq!(
         (after.0 - before.0, after.1 - before.1, after.3 - before.3),
-        (3, 1, 0)
+        (3, 1, 1)
     );
-    assert_eq!(
-        store.get_note(raced.id).await.unwrap().unwrap().title,
-        "replayed twice"
-    );
+    assert_eq!(inbox.lock().await.len(), 1);
+    assert!(store
+        .get_notebook_share(notebook_id, grantee_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
 
+**What it does** — Deletes another user's notebook share, an operation that owes an access-revoked notice. It pauses the first attempt after mutation, proves both the hook counter and captured webhook inbox remain empty, injects two SQLSTATE `40001` failures, resumes, and requires three attempts, one commit, one external effect, one captured notice, and a committed deletion.
+
+**Dependencies** — `spawn_notice_webhook` captures delivered notices; expects one payload per notifier call. `HttpTestHooks` pauses and injects failures; expects the pause to occur before commit and notification. `delete_notebook_share` owes a notice when an owner deletes another principal's existing share.
+
+**Used by** — `cargo test --workspace`; ADR 0002 verification row 11.
+
+**Repeated context** — The users, notebook, and share are created explicitly in this test's fresh SQLx fixture; registration notices are cleared before evidence collection.
+
+---
+
+## fn serializable_three_failures_exhaust_retry_bound
+
+**Identification** — ADR 0002 retry exhaustion evidence; marker `// md:fn serializable_three_failures_exhaust_retry_bound`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_three_failures_exhaust_retry_bound
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_three_failures_exhaust_retry_bound(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "exhausted-owner@example.com").await;
+    let store = Store::new(pool);
+    let owner = store
+        .get_user_by_email("exhausted-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = store
+        .create_note(None, "before exhaustion", owner.id)
+        .await
+        .unwrap();
     let before = state.http_test_hooks.observations();
     state.http_test_hooks.inject_serialization_failures(3);
     let exhausted = authed_json(
-        &client,
+        &reqwest::Client::new(),
         reqwest::Method::PATCH,
         addr,
-        &format!("/api/notes/{}", raced.id),
+        &format!("/api/notes/{}", note.id),
         &owner_token,
         json!({ "title": "must not commit" }),
     )
@@ -2165,19 +2388,19 @@ async fn serializable_move_interleaving_and_failure_evidence(pool: PgPool) {
         (3, 0, 1, 0)
     );
     assert_eq!(
-        store.get_note(raced.id).await.unwrap().unwrap().title,
-        "replayed twice"
+        store.get_note(note.id).await.unwrap().unwrap().title,
+        "before exhaustion"
     );
 }
 ```
 
-**What it does** — Pauses a move after its early inherited-principal read, commits Carol's share, and proves transactional re-verification returns the ordinary byte-identical `403 MoveBlocked` body while retaining the source notebook. It then proves a stable move commits, a post-mutation failure rolls back, one and two real SQLSTATE `40001` injections replay completely and commit once, and three failures return generic `503` with exactly three attempts, no commit, no external effect, and an observable exhaustion record.
+**What it does** — Injects three real SQLSTATE `40001` failures and proves the handler returns generic `503` with exactly three attempts, no commit, no external effect, an exhaustion record, and no persisted title change.
 
-**Dependencies** — `HttpTestHooks` scheduling, injection, and counters; expects the seam to be scoped to this state. `authed_json` drives the real HTTP handler; expects ordinary status and JSON serialization. `Store` reads authoritative committed rows; expects dropped failed transactions to roll back. PostgreSQL `40001` raised by the helper exercises the real database-error classifier.
+**Dependencies** — `HttpTestHooks` injection and counters, `authed_json`, and `Store::get_note`; expects retry exhaustion to discard every attempt.
 
-**Used by** — `cargo test --workspace`; ADR 0002 verification rows 1, 2, 8, 9, 10, 11, and 12.
+**Used by** — `cargo test --workspace`; ADR 0002 verification row 12.
 
-**Repeated context** — The test compares counter deltas because one server state runs several scenarios. Existing notice-failure coverage supplies row 13 separately.
+**Repeated context** — The baseline note is created explicitly in this test's fresh SQLx fixture. Existing notice-failure coverage supplies row 13 separately.
 
 ---
 
@@ -4694,7 +4917,12 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 16 | `fn authed_json` | `// md:fn authed_json` |
 | 17 | `fn entity_snapshot` | `// md:fn entity_snapshot` |
 | 18 | `fn relation_snapshot` | `// md:fn relation_snapshot` |
-| 18a | `fn serializable_move_interleaving_and_failure_evidence` | `// md:fn serializable_move_interleaving_and_failure_evidence` |
+| 18a | `fn serializable_move_interleaving_and_byte_equivalent_refusal` | `// md:fn serializable_move_interleaving_and_byte_equivalent_refusal` |
+| 18b | `fn serializable_move_stable_success` | `// md:fn serializable_move_stable_success` |
+| 18c | `fn serializable_post_mutation_failure_rolls_back` | `// md:fn serializable_post_mutation_failure_rolls_back` |
+| 18d | `fn serializable_one_failure_replays_once` | `// md:fn serializable_one_failure_replays_once` |
+| 18e | `fn serializable_two_failures_defer_revocation_notice_until_commit` | `// md:fn serializable_two_failures_defer_revocation_notice_until_commit` |
+| 18f | `fn serializable_three_failures_exhaust_retry_bound` | `// md:fn serializable_three_failures_exhaust_retry_bound` |
 | 19 | `fn cross_tenant_http_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_http_mutations_leave_victim_unchanged` |
 | 20 | `fn denied_http_capabilities_leave_entities_unchanged` | `// md:fn denied_http_capabilities_leave_entities_unchanged` |
 | 21 | `fn cross_tenant_store_mutations_leave_victim_unchanged` | `// md:fn cross_tenant_store_mutations_leave_victim_unchanged` |
