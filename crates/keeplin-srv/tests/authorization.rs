@@ -380,7 +380,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
     HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
-    HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("the credential is verified before the operation snapshot and the exact verified password hash is revalidated inside it before authenticated-identity deletion"), case: None },
+    HandlerInterleaving { handler: "delete_account", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_delete_account") },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
     HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
@@ -400,6 +400,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
     HandlerInterleaving { handler: "verify_request", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
 ];
+
+const TARGET_PRINCIPAL_REREAD_HANDOFF: &str =
+    "target principal existence query (users SIREAD; include all four in #145 quota conflict matrix)";
 
 const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
     HandlerAuthorization {
@@ -434,12 +437,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "create_share",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "delete_account",
@@ -592,12 +600,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "transfer_ownership",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "update_note",
@@ -916,6 +929,52 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         delete_account.contains("stored.password_hash != verified_password_hash"),
         "delete_account must reject a password-hash change between verification and deletion"
     );
+}
+
+// md:fn changed_password_is_reverified_for_delete_account
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn changed_password_is_reverified_for_delete_account(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let token = register_and_login(addr, "delete-password-race@example.com").await;
+    state
+        .http_test_hooks
+        .pause_at("delete_account", "before_operation")
+        .await;
+    let delete_token = token.clone();
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::DELETE,
+            addr,
+            "/api/account",
+            &delete_token,
+            json!({ "password": "password123" }),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_account", "before_operation")
+        .await;
+    let changed = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        "/api/account/password",
+        &token,
+        json!({ "current_password": "password123", "new_password": "changed123" }),
+    )
+    .await;
+    assert_eq!(changed.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 401);
+    assert!(state
+        .store
+        .get_user_by_email("delete-password-race@example.com")
+        .await
+        .unwrap()
+        .is_some());
 }
 
 // md:fn sync_notebook_writers_retry_real_40001_within_the_bound
