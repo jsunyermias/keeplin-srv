@@ -56,6 +56,11 @@ where
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *transaction)
             .await?;
+        #[cfg(debug_assertions)]
+        state
+            .http_test_hooks
+            .checkpoint(_handler, "before_operation")
+            .await;
         let result = operation(state.clone(), &mut transaction).await;
         #[cfg(debug_assertions)]
         let mut result = result;

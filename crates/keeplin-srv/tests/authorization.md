@@ -11,9 +11,11 @@ Self-contained companion for `crates/keeplin-srv/tests/authorization.rs`.
 ```rust
 // md:Overview
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fs,
     io::Write,
     net::SocketAddr,
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -740,6 +742,123 @@ phase 1.
 
 ---
 
+## fn collect_writer_sources
+
+**Identification** — recursive source collector; marker `// md:fn collect_writer_sources`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn collect_writer_sources
+fn collect_writer_sources(path: &Path, files: &mut Vec<(String, String)>) {
+    for entry in fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_writer_sources(&path, files);
+        } else if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("rs" | "writer")
+        ) {
+            files.push((
+                path.display().to_string(),
+                fs::read_to_string(path).unwrap(),
+            ));
+        }
+    }
+}
+```
+
+**What it does** — Recursively collects Rust and SQL corpus files for the writer derivation.
+
+**Dependencies** — `fs::read_dir` and `fs::read_to_string` — traverse and read the bounded crate corpus; expects unreadable fixture/source files to fail the test.
+
+**Used by** — `guarded_writer_inventory_unions_source_and_catalog`.
+
+**Repeated context** — This recognizes literal SQL only.
+
+---
+
+## fn guarded_writer_inventory_unions_source_and_catalog
+
+**Identification** — source/catalog writer inventory; marker `// md:fn guarded_writer_inventory_unions_source_and_catalog`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn guarded_writer_inventory_unions_source_and_catalog
+#[sqlx::test(migrations = "../../migrations")]
+async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_writer_sources(&root.join("src"), &mut sources);
+    collect_writer_sources(&root.join("tests/fixtures"), &mut sources);
+    let guarded = ["notes", "note_shares", "notebooks", "notebook_shares"];
+    let mut source_writers = BTreeMap::new();
+    let mut decoy_detected = false;
+    for (path, source) in &sources {
+        let uppercase = source.to_ascii_uppercase();
+        for table in guarded {
+            let table_upper = table.to_ascii_uppercase();
+            for verb in ["INSERT INTO", "UPDATE", "DELETE FROM"] {
+                let occurrences = uppercase.matches(&format!("{verb} {table_upper}")).count();
+                *source_writers.entry(table).or_insert(0) += occurrences;
+                decoy_detected |= occurrences > 0
+                    && path.ends_with("writer_inventory_decoy.writer")
+                    && table == "notebook_shares";
+            }
+        }
+    }
+    assert_eq!(
+        source_writers,
+        [("note_shares", 2), ("notebook_shares", 3), ("notebooks", 4), ("notes", 4)]
+            .into_iter()
+            .collect(),
+        "literal writer occurrence inventory changed; classify every new site and make its Rust entry point join the serializable protocol"
+    );
+    assert!(decoy_detected, "the permanently planted direct-SQL decoy was not detected; this scanner sees literal INSERT, UPDATE, and DELETE statements only");
+
+    let guarded_names = guarded.into_iter().map(str::to_string).collect::<Vec<_>>();
+    let cascade_tables: BTreeSet<String> = sqlx::query_scalar(
+        "WITH RECURSIVE affected(table_oid) AS (SELECT value::regclass FROM unnest($1::text[]) value UNION SELECT constraint_row.confrelid FROM pg_constraint constraint_row JOIN affected ON constraint_row.conrelid = affected.table_oid WHERE constraint_row.contype = 'f' AND constraint_row.confdeltype = 'c') SELECT table_oid::regclass::text FROM affected",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect();
+    assert_eq!(
+        cascade_tables,
+        ["note_shares", "notebook_shares", "notebooks", "notes", "users"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "catalog cascade closure is table-level: it does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
+    );
+    let trigger_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT event_object_table FROM information_schema.triggers WHERE event_object_table = ANY($1)",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        trigger_tables.is_empty(),
+        "a trigger exists on guarded state; catalog discovery cannot prove what its body writes, so classify its Rust entry point explicitly"
+    );
+}
+```
+
+**What it does** — Unions literal source writers with PostgreSQL cascade and trigger metadata and proves the permanent decoy remains detectable.
+
+**Dependencies** — `collect_writer_sources` and PostgreSQL catalogs — derive the two inventory halves; expects the assertion messages to preserve the deliberately bounded completeness claim.
+
+**Used by** — repository test suite.
+
+**Repeated context** — Trigger bodies, dynamic SQL, writable views, rules, database functions, and Rust-entry-point mapping are outside this derivation.
+
+---
+
 ## fn handler_authorization_inventory_covers_router
 
 **Identification** — source-derived router inventory check; marker `// md:fn handler_authorization_inventory_covers_router`.
@@ -964,44 +1083,6 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
         );
     }
-    for handler in [
-        "create_share",
-        "transfer_ownership",
-        "create_notebook_share",
-        "transfer_notebook",
-    ] {
-        let body = source
-            .split(&format!("// {}fn {handler}", "md:"))
-            .nth(1)
-            .unwrap()
-            .split(concat!("// ", "md:"))
-            .next()
-            .unwrap();
-        let boundary = body
-            .split(&format!("serializable(state.clone(), \"{handler}\","))
-            .nth(1)
-            .unwrap();
-        assert!(
-            boundary.contains("get_user_by_id_on(conn, target_id)"),
-            "{handler} must re-read its target principal inside the SERIALIZABLE transaction"
-        );
-    }
-    let store = include_str!("../src/store.rs");
-    for writer in ["upsert_notebook", "delete_notebook"] {
-        let body = store
-            .split(&format!("// {}impl Store > fn {writer}\n", "md:"))
-            .nth(1)
-            .unwrap()
-            .split(concat!("// ", "md:"))
-            .next()
-            .unwrap();
-        assert!(
-            body.contains("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-                && body.contains("for attempt in 1..=3")
-                && body.contains(&format!("{writer}_on")),
-            "{writer} must replay its whole guarded notebook-write transaction at SERIALIZABLE"
-        );
-    }
 }
 ```
 
@@ -1017,6 +1098,318 @@ scope to remain stable. `http.rs` source — supplies handler bodies; expects ma
 
 **Repeated context** — Replacing any one boundary call with a weaker isolation helper is the
 killing mutation.
+
+---
+
+## fn sync_notebook_writers_retry_real_40001_within_the_bound
+
+**Identification** — sync writer retry integration test; marker `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_retry_real_40001_within_the_bound
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_retry_real_40001_within_the_bound(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-retry@example.com", "hash", "sync retry")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('sync_writer_failure_sequence') <= 1 THEN RAISE EXCEPTION USING ERRCODE = '40001'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("retry once");
+    assert!(store.upsert_notebook(user.id, &notebook).await.unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
+}
+```
+
+**What it does** — Makes PostgreSQL raise one real serialization failure and requires the complete notebook write to succeed on attempt two.
+
+**Dependencies** — PostgreSQL trigger and sequence — inject and count real `40001` failures; expects sequence increments to survive transaction rollback.
+
+**Used by** — ADR 0005 row 3 evidence.
+
+**Repeated context** — The trigger is local to the isolated sqlx test database.
+
+---
+
+## fn sync_notebook_writers_do_not_retry_a_fourth_time
+
+**Identification** — sync writer exhaustion integration test; marker `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_do_not_retry_a_fourth_time
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-exhaust@example.com", "hash", "sync exhaust")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('sync_writer_failure_sequence'); RAISE EXCEPTION USING ERRCODE = '40001'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("exhaust retries");
+    assert!(store.upsert_notebook(user.id, &notebook).await.is_err());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1)"
+    )
+    .bind(notebook.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+```
+
+**What it does** — Forces every notebook attempt to fail and proves exactly three attempts occur with no committed notebook.
+
+**Dependencies** — PostgreSQL trigger and sequence — provide rollback-independent attempt evidence; expects SQLSTATE `40001` to enter the production classifier.
+
+**Used by** — ADR 0005 retry-bound evidence.
+
+**Repeated context** — Exhaustion remains an error and never commits a partial write.
+
+---
+
+## fn serializable_participants_form_a_real_ssi_conflict
+
+**Identification** — controlled SSI integration test; marker `// md:fn serializable_participants_form_a_real_ssi_conflict`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn serializable_participants_form_a_real_ssi_conflict
+#[sqlx::test(migrations = "../../migrations")]
+async fn serializable_participants_form_a_real_ssi_conflict(pool: PgPool) {
+    sqlx::query("CREATE TABLE ssi_probe (id integer PRIMARY KEY, value integer NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO ssi_probe VALUES (1, 0), (2, 0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut left = pool.begin().await.unwrap();
+    let mut right = pool.begin().await.unwrap();
+    for transaction in [&mut left, &mut right] {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut **transaction)
+            .await
+            .unwrap();
+    }
+    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 1")
+        .fetch_one(&mut *left)
+        .await
+        .unwrap();
+    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 2")
+        .fetch_one(&mut *right)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 1")
+        .execute(&mut *right)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 2")
+        .execute(&mut *left)
+        .await
+        .unwrap();
+    let left_result = left.commit().await;
+    let right_result = right.commit().await;
+    let codes = [left_result, right_result]
+        .into_iter()
+        .filter_map(Result::err)
+        .filter_map(|error| {
+            error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(codes, ["40001"]);
+}
+```
+
+**What it does** — Constructs a two-transaction read/write dependency cycle and requires PostgreSQL to abort one commit with `40001`.
+
+**Dependencies** — PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
+
+**Used by** — ADR 0002 row 4 evidence.
+
+**Repeated context** — This is a real SSI conflict, not the application injection seam.
+
+---
+
+## fn target_principals_are_reverified_inside_every_mutating_transaction
+
+**Identification** — four-handler target re-read interleaving test; marker `// md:fn target_principals_are_reverified_inside_every_mutating_transaction`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn target_principals_are_reverified_inside_every_mutating_transaction
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principals_are_reverified_inside_every_mutating_transaction(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "target-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("target-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    for (handler, path, body) in [
+        {
+            let target = state
+                .store
+                .create_user("target-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "share target", owner.id)
+                .await
+                .unwrap();
+            (
+                "create_share",
+                format!("/api/notes/{}/share", note.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "transfer target", owner.id)
+                .await
+                .unwrap();
+            (
+                "transfer_ownership",
+                format!("/api/notes/{}/transfer", note.id),
+                json!({"user_id": target.id}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook share target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "create_notebook_share",
+                format!("/api/notebooks/{}/share", notebook.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook transfer target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "transfer_notebook",
+                format!("/api/notebooks/{}/transfer", notebook.id),
+                json!({"user_id": target.id}),
+            )
+        },
+    ] {
+        let target_id = Uuid::parse_str(body["user_id"].as_str().unwrap()).unwrap();
+        state
+            .http_test_hooks
+            .pause_at(handler, "before_operation")
+            .await;
+        let request_client = client.clone();
+        let request_token = owner_token.clone();
+        let request = tokio::spawn(async move {
+            authed_json(
+                &request_client,
+                reqwest::Method::POST,
+                addr,
+                &path,
+                &request_token,
+                body,
+            )
+            .await
+        });
+        state.http_test_hooks.wait_until_reached().await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(target_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        state.http_test_hooks.resume();
+        assert_eq!(
+            request.await.unwrap().status(),
+            404,
+            "{handler} accepted a target deleted after its preliminary lookup"
+        );
+    }
+}
+```
+
+**What it does** — Deletes each target after preliminary resolution but before the transaction operation and requires all four handlers to return `404`.
+
+**Dependencies** — `HttpTestHooks::pause_at` — controls the handler boundary; expects `before_operation` to precede every transaction-local guard read. PostgreSQL cascade deletion supplies the killing interleaving.
+
+**Used by** — ADR 0005 target-principal evidence.
+
+**Repeated context** — Removing a transaction-local target read changes the outcome to an accepted mutation or database error.
 
 ---
 
@@ -4944,10 +5337,16 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 7 | `fn authorization_inventory_is_complete` | `// md:fn authorization_inventory_is_complete` |
 | 8 | `fn inventory_classifications_are_disjoint_and_cases_are_tests` | `// md:fn inventory_classifications_are_disjoint_and_cases_are_tests` |
 | 9 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
+| 9a | `fn collect_writer_sources` | `// md:fn collect_writer_sources` |
+| 9b | `fn guarded_writer_inventory_unions_source_and_catalog` | `// md:fn guarded_writer_inventory_unions_source_and_catalog` |
 | 10 | `fn handler_authorization_inventory_covers_router` | `// md:fn handler_authorization_inventory_covers_router` |
 | 11 | `fn authorization_reads_never_fall_back_to_the_pool` | `// md:fn authorization_reads_never_fall_back_to_the_pool` |
 | 12 | `fn owner_note_access_does_not_acquire_a_connection` | `// md:fn owner_note_access_does_not_acquire_a_connection` |
 | 13 | `fn serializable_invariant_inventory_is_exact_and_enforced` | `// md:fn serializable_invariant_inventory_is_exact_and_enforced` |
+| 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
+| 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
+| 13c | `fn serializable_participants_form_a_real_ssi_conflict` | `// md:fn serializable_participants_form_a_real_ssi_conflict` |
+| 13d | `fn target_principals_are_reverified_inside_every_mutating_transaction` | `// md:fn target_principals_are_reverified_inside_every_mutating_transaction` |
 | 10 | `fn authorization_reads_observe_transaction_local_state` | `// md:fn authorization_reads_observe_transaction_local_state` |
 | 11 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
 | 11 | `fn relay_materialization_uses_authenticated_session_identity` | `// md:fn relay_materialization_uses_authenticated_session_identity` |

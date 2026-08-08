@@ -125,8 +125,8 @@ contention rather than only through error.
 The issue's own recommendation: "A para el volumen actual, salvo evidencia demostrable de que hace
 falta una cola."
 
-It is the simplest correct-looking answer, and **facts 5, 6 and 7 are that demonstrable evidence
-against it**:
+It is the simplest correct-looking answer, and **fact 6 is that demonstrable evidence against it**,
+with fact 5 compounding it:
 
 - A failure anywhere in the batch rolls the journal append back with it. The client has already
   advanced its watermark (fact 6) and will never re-send, so **the entire batch is lost** — including

@@ -1,0 +1,1 @@
+DELETE FROM notebook_shares WHERE notebook_id = $1;
