@@ -13,7 +13,11 @@
 
 ## Context and problem
 
-`Verified at`: `keeplin-srv@14640f6`.
+`Verified at`: `keeplin-srv@a86c588`. The two-session PostgreSQL experiment below and the writer
+census were run at `14640f6`; the absence of a foreign key on `notes.notebook_id` and the
+outside-the-transaction target resolution were verified at `a86c588`, after review refuted an earlier
+draft's claim. Both commits are named because a single `Verified at` predating half the facts is the
+kind of unchecked claim this document exists to avoid making.
 
 Accepted [ADR 0002](0002-authorization-mutation-atomicity.md) requires authorization and the
 operation it authorizes to be one transactionally consistent decision, and puts eight HTTP mutation
@@ -271,10 +275,15 @@ The invariants proposed are:
    executes its authorization re-verification and its write in one `SERIALIZABLE` transaction.
 2. No writer of note rows, note shares, notebook rows, notebook shares or ownership executes outside
    the protocol.
-3. Invariant 2 is established by a check that fails when a new writer appears, not by inspection.
-4. ADR 0002's re-verification rule, its `403`/`MoveBlocked` refusal shapes, its three-attempt bound,
+3. Invariant 2 is established by a check that fails when a new writer appears, not by inspection —
+   **up to the boundary stated in part three**, which the check cannot cross and which is written
+   there rather than implied away here.
+4. Every handler that resolves a target principal re-verifies that principal's existence inside its
+   transaction. Resolving outside and writing inside creates no serialization dependency, so
+   isolation alone does not make the schedule decidable.
+5. ADR 0002's re-verification rule, its `403`/`MoveBlocked` refusal shapes, its three-attempt bound,
    its `503` on exhaustion and its notice ordering are unchanged.
-5. Retry exhaustion on the synchronization path does not return `503`, because that path is not an
+6. Retry exhaustion on the synchronization path does not return `503`, because that path is not an
    HTTP request. What it *does* is keeplin-srv#75's to decide, and this ADR does not decide it.
 
 ### The synchronization path's exhaustion, which this ADR does not decide
@@ -349,6 +358,7 @@ Rollback returns to ADR 0002's eight and reopens the window this decision closes
 | 5 | Downgrading any one participant to `READ COMMITTED` fails a test | mutation | Fails if the protocol is asserted by spelling rather than by behaviour |
 | 6 | The synchronization path retries `40001` within the same bound and, on exhaustion, applies no notebook write, emits telemetry and returns no HTTP status | failure injection | Fails if ADR 0002's `503` is copied onto a path that is not a request, or if a partial write survives. The row deliberately says nothing about the journal row: what happens to it is keeplin-srv#75's, and an acceptance row requiring it to remain present would be unsatisfiable under that issue's option A |
 | 7 | `delete_account` under injected `40001` retries within the bound and returns `503` only on exhaustion, with the account not deleted | failure injection | Fails if the cascade partially commits or exhaustion is hidden |
+| 7b | Each of `transfer_ownership`, `transfer_notebook`, `create_share` and `create_notebook_share` re-reads its target principal inside its transaction, proven by a mutation that moves the read back outside and fails a test | mutation | Fails if invariant 4 is satisfied by resolving the target early and trusting it, which is the state of the tree today and which isolation alone does not repair |
 | 8 | ADR 0002's existing evidence — the move interleaving, byte-equivalent refusal, rollback, replay, retry bound and exhaustion tests — still passes unchanged | regression | Fails if widening the set changed the behaviour ADR 0002 established |
 | 9 | The synchronization path's throughput, latency and `40001` abort rate are measured before and after against a stated regression budget, and the budget is agreed before the measurement is taken | operational, budgeted | Fails if the measured regression exceeds the budget. A row that only requires a number to be recorded passes on a catastrophic result, which is why the budget precedes the measurement |
 | 10 | `./scripts/check-docs.sh` passes with every changed source companion synchronized | documentation | Fails if implementation and documentation diverge |
