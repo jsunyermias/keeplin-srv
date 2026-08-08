@@ -171,17 +171,18 @@ marker recording the inserted subset. The sweep never scans the journal, so the 
 against option 4 does not apply to it. A permanently failing change is bounded by the attempts counter
 rather than retried forever.
 
-**This is the smallest design that satisfies every force above**, and an earlier draft of this ADR
-omitted it entirely — comparing only the defect, the single transaction, a full queue and a full
-sweep, and then concluding a queue was needed. That conclusion did not follow, because the option that
-sits between them was never on the page.
+**This looked like the smallest design that satisfies every force**, and the first draft of this ADR
+omitted it entirely, which is why round 1 was right to block. It was then adopted, and round 2
+refuted it against the tree. It is kept here in full because a rejected option described only in
+summary cannot be re-evaluated, and because the reasons it fails are the reasons the queue's features
+are not optional.
 
-What it does not give, stated so the comparison is real: no lease semantics, so a sweep and the
-synchronous path can apply the same batch concurrently — safe by fact 4, but it means duplicated work
-rather than coordinated work; no per-change job identity, so observability is per batch; and no place
-to hold a change admitted but deliberately deferred, which is what a quota decision would want if
-keeplin-srv#145 chose deferral. That last one is #145's to decide and is not a reason to build the
-machinery now.
+**Why it is not adopted.** Without lease semantics a sweep and the synchronous path apply the same
+batch concurrently, and fact 4 does **not** make that safe: `put_resource_blob` is unguarded, so the
+interleaving in the decision section produces new metadata with old bytes. By fact 8 concurrent
+appliers are a documented deployment. And one state per batch cannot express a batch that is
+permanently invalid at one index and transiently failing at another; giving indices their own state
+and counters is the per-change lifecycle this option existed to avoid.
 
 ### Option 4 — Reconciliation sweep with no queue
 
@@ -298,28 +299,31 @@ The invariants proposed are:
 
 Until keeplin-srv#77 bounds a batch and keeplin-srv#145 decides quota on this path,
 **`max_user_storage_bytes` does not bound what synchronizing stores.** A 64 MB frame is journaled
-before any quota check exists on that path, and the marker adds a row referencing that batch rather
-than copying it — payloads are referenced, never duplicated into marker rows, which is stated here
-because an unstated policy makes the amplification uncomputable. This ADR does not make that worse and
+before any quota check exists on that path, and a job row **references** the journal change rather
+than copying it — payloads are never duplicated into job rows, which is stated because an unstated
+policy makes the amplification uncomputable, and because part four's retention interlock only makes
+sense for a job that points at something. This ADR does not make that worse and
 does not fix it.
 
 ### Costs, stated rather than implied
 
-**A migration and a marker table.** Smaller than the queue an earlier draft proposed, and still not
-free: a row per batch, a sweep to operate, and a failed state somebody has to watch. A marker whose
-failures nobody watches is the current defect with a table attached.
+**This is the largest amount of new machinery any decision in this repository has proposed.** A
+migration, a job table, claim and lease semantics, a dead-letter state, metrics, a retention interlock
+and a reconciliation command. The single transaction is a fraction of the work and the marker is less
+than half; neither is adopted, and the demonstration of why is in the decision section rather than
+asserted here.
 
-**Duplicated work rather than coordinated work.** There is no lease. A sweep and the synchronous path
-can apply the same batch at the same time. Fact 4 makes that safe and it is why no lease is proposed,
-but it is wasted work under load and it is a deliberate trade against the machinery a lease needs.
+**Projection becomes asynchronous on the failure path, and may become so on the common path.** If jobs
+are applied by a worker rather than inline, a device can write and immediately read its own change
+missing. Row 10 fixes the acceptable delay before it is measured rather than after.
 
-**Observability is per batch, not per change.** A metric says a batch is failing, not which change.
-The failed indices are recorded on the marker, so the information exists; nothing indexes it.
+**The dead-letter state is an operational obligation.** A queue whose failures nobody watches is the
+current defect with more steps, and this ADR says that plainly rather than trusting a metric to be
+looked at.
 
-**Failed projections become deferred, and only failed ones.** The common path stays synchronous, so
-read-your-writes through REST is unchanged when nothing fails. When something does fail, a device can
-read its own change and not see it until the sweep runs — bounded by the sweep interval and stated
-rather than assumed away.
+**The retention interlock ties two subsystems together.** Pruning must now consult job state. That is
+a coupling the current design does not have, and it is the price of a job that references its input
+instead of copying it.
 
 ### Not decided
 
@@ -335,22 +339,28 @@ rather than assumed away.
 - Projection latency becomes visible and must be monitored rather than assumed to be zero.
 - A new failure surface exists: the worker itself. It is observable, which the current failure is not.
 - Already-lost batches are repairable for the first time.
-- **A device joining during a failed-and-not-yet-swept window receives a snapshot missing journaled
-  changes, with no staleness signal.** That is true today and stays true; the window becomes bounded
-  by the sweep instead of unbounded, which is an improvement and not a fix.
+- **A device joining while a job is outstanding receives a snapshot missing journaled changes, with no
+  staleness signal.** True today and still true; the window becomes bounded by the retry schedule
+  instead of unbounded, which is an improvement and not a fix.
 - **Fan-out precedes durable projection.** Peer devices can hold a change the server's own projections
-  lack until the sweep repairs it. Accepted deliberately: fan-out is the mechanism that gets the change
-  to peers at all, and delaying it behind projection would trade a projection gap for a delivery gap.
+  lack until its job completes. Accepted deliberately: fan-out is what gets the change to peers at
+  all, and delaying it behind projection would trade a projection gap for a delivery gap.
 
 ## Compatibility, migration, and rollback
 
-A forward-only migration adds the job table. No wire or format change; `PROTOCOL_VERSION` does not
-move and `keeplin-core` is untouched. The migration must allow reconciling existing batches without
-re-executing non-idempotent effects — fact 4 says the projections are idempotent, and notices are not
-sent from this path, so there are none to repeat.
+A forward-only migration adds the job table, and pruning gains the interlock in part four. No wire or
+format change; `PROTOCOL_VERSION` does not move and `keeplin-core` is untouched.
 
-Rollback removes the worker and returns to synchronous projection, restoring the defect. It must not
-be silent, and any job left in the table at rollback must be reconciled by part six's command first.
+The migration must allow reconciling existing batches. Six of the seven projection kinds are
+last-writer guarded and safe to replay; **`put_resource_blob` is not** (fact 4), so reconciliation of
+a resource must apply metadata and bytes under the same exclusion the steady state uses rather than
+relying on replay being harmless. An earlier draft of this section said fact 4 makes the projections
+idempotent, which is what fact 4 used to claim and no longer does. Notices are not sent from this
+path, so there are none to repeat.
+
+Rollback removes the worker and returns to synchronous projection, restoring the defect, and must
+restore the previous pruning predicate with it. It must not be silent, and any job left in the table
+at rollback must be reconciled by part six's command first — after rollback nothing will.
 
 ## Verification plan
 
@@ -363,7 +373,7 @@ be silent, and any job left in the table at rollback must be reconciled by part 
 | 5 | Journal durability is unaffected by projection failure: the change is present in `changes` after every failure mode in rows 1 and 4 | recovery | Fails if the design made acceptance conditional on projection, which is option 2's regression |
 | 6 | A crash between journal commit and the first claim leaves the job claimable after restart, with no operator action | recovery, restart | Fails if the job is not inserted inside `append_changes` before its commit, which is the only placement that survives this crash |
 | 7 | Two appliers racing one `ResourceCreate` carrying data — metadata written by one interleaved with the blob written by the other — cannot produce new metadata with old bytes | concurrency | **Fails on the current tree.** This is the schedule that refuted the marker design, and a test using the client path that strips blobs would pass while the raw change stays unsafe |
-| 8 | A guarded notebook write runs `SERIALIZABLE`, retries `40001` within ADR 0005's bound, and on exhaustion leaves the marker outstanding rather than dropping the write; the exhaustion does not consume the marker's attempts counter | failure injection | Fails if ADR 0005's exhaustion is answered by silence, or if contention can drive a valid write into the failed state |
+| 8 | A guarded notebook write runs `SERIALIZABLE`, retries `40001` within ADR 0005's bound, and on exhaustion leaves the job claimable rather than dropping the write; the exhaustion does not consume the job's attempts counter | failure injection | Fails if ADR 0005's exhaustion is answered by silence, or if contention can drive a valid write into the failed state |
 | 9 | The reconciliation command rebuilds projections for a user from the journal on a database seeded with a batch lost before any of this existed, reaching invariant 1's end state — every change projected or its batch marked failed — and broadcasting nothing | recovery, operational | Fails if already-lost data stays lost, if an undeserializable payload makes the command loop rather than report, or if repair re-broadcasts to peers |
 | 10 | The worst-case delay between journal commit and projected state is fixed by the maintainer **before** the measurement is taken, and the measurement is compared against it | operational, budgeted | Fails if the delay exceeds what was agreed. A row that only requires a number to be recorded is satisfied by measuring and then choosing a budget to fit, which is no constraint at all |
 | 11 | Metrics expose outstanding jobs, failed jobs, dead-lettered jobs and the oldest outstanding age | operational | Fails if queue health is not observable, which would reproduce the current defect with more machinery |
