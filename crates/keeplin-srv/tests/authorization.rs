@@ -356,6 +356,47 @@ struct HandlerAuthorization {
     inputs: &'static [&'static str],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterleavingOutcome {
+    Refusal(u16),
+    Replay(u16),
+    Exempt(&'static str),
+}
+
+struct HandlerInterleaving {
+    handler: &'static str,
+    transition: &'static str,
+    outcome: InterleavingOutcome,
+    case: Option<&'static str>,
+}
+
+const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
+    HandlerInterleaving { handler: "change_password", transition: "none", outcome: InterleavingOutcome::Exempt("the credential is the mutation target and there is no separate resource authorization guard"), case: None },
+    HandlerInterleaving { handler: "crate::collab::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the collaboration session protocol is outside the HTTP operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "crate::sync::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the sync session protocol is outside the per-HTTP-operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
+    HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
+    HandlerInterleaving { handler: "delete_note", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guards_are_refused_per_handler") },
+    HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guards_are_refused_per_handler") },
+    HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
+    HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
+    HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
+    HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "verify_request", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+];
+
 const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
     HandlerAuthorization {
         handler: "change_password",
@@ -1097,6 +1138,94 @@ async fn target_principals_are_reverified_inside_every_mutating_transaction(pool
     }
 }
 
+// md:fn revoked_note_guards_are_refused_per_handler
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_note_guards_are_refused_per_handler(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let _owner_token = register_and_login(addr, "guard-owner@example.com").await;
+    let actor_token = register_and_login(addr, "guard-actor@example.com").await;
+    let _target_token = register_and_login(addr, "guard-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("guard-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let actor = state
+        .store
+        .get_user_by_email("guard-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("guard-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    for (handler, path) in [
+        {
+            let note = state
+                .store
+                .create_note(None, "delete-note guard", owner.id)
+                .await
+                .unwrap();
+            state
+                .store
+                .create_or_update_share(note.id, actor.id, Capabilities::ALL)
+                .await
+                .unwrap();
+            ("delete_note", format!("/api/notes/{}", note.id))
+        },
+        {
+            let note = state
+                .store
+                .create_note(None, "delete-share guard", owner.id)
+                .await
+                .unwrap();
+            state
+                .store
+                .create_or_update_share(note.id, actor.id, Capabilities::ALL)
+                .await
+                .unwrap();
+            state
+                .store
+                .create_or_update_share(note.id, target.id, Capabilities::READ)
+                .await
+                .unwrap();
+            (
+                "delete_share",
+                format!("/api/notes/{}/share/{}", note.id, target.id),
+            )
+        },
+    ] {
+        let note_id = Uuid::parse_str(path.split('/').nth(3).unwrap()).unwrap();
+        state
+            .http_test_hooks
+            .pause_at(handler, "before_operation")
+            .await;
+        let request_client = client.clone();
+        let request_token = actor_token.clone();
+        let request = tokio::spawn(async move {
+            authed_json(
+                &request_client,
+                reqwest::Method::DELETE,
+                addr,
+                &path,
+                &request_token,
+                json!({}),
+            )
+            .await
+        });
+        state.http_test_hooks.wait_until_reached().await;
+        assert!(state.store.delete_share(note_id, actor.id).await.unwrap());
+        state.http_test_hooks.resume();
+        assert_eq!(request.await.unwrap().status(), 403, "{handler}");
+    }
+}
+
 // md:fn authorization_reads_observe_transaction_local_state
 #[sqlx::test(migrations = "../../migrations")]
 async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
@@ -1463,6 +1592,41 @@ fn authorization_inventory_is_complete() {
         READ_ISOLATION_CASES,
         &["users_do_not_see_each_others_changes"]
     );
+}
+
+// md:fn mutating_handler_interleaving_harness_is_complete
+#[test]
+fn mutating_handler_interleaving_harness_is_complete() {
+    let inventory = HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .filter(|entry| entry.kind == HandlerKind::Mutating)
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    let harness = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inventory, harness);
+    assert_eq!(harness.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
+    let tests = include_str!("authorization.rs");
+    for entry in MUTATING_HANDLER_INTERLEAVINGS {
+        assert!(!entry.transition.is_empty());
+        match (entry.outcome, entry.case) {
+            (InterleavingOutcome::Refusal(status), Some(case)) => {
+                assert!((400..500).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Replay(status), Some(case)) => {
+                assert!((200..300).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Exempt(reason), None) => {
+                assert_eq!(entry.transition, "none");
+                assert!(!reason.is_empty());
+            }
+            _ => panic!("{} has an unpinned or contradictory outcome", entry.handler),
+        }
+    }
 }
 
 // md:fn inventory_classifications_are_disjoint_and_cases_are_tests
