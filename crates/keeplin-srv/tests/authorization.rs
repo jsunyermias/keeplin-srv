@@ -381,7 +381,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
-    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -1213,7 +1213,7 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
 async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool).await;
     let owner_token = register_and_login(addr, "delete-owner@example.com").await;
-    let _new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
     let owner = state
         .store
         .get_user_by_email("delete-owner@example.com")
@@ -1264,6 +1264,16 @@ async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
     )
     .await;
     assert_eq!(transfer_response.status(), 200);
+    let share_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &new_owner_token,
+        json!({"user_id": owner.id, "capabilities": Capabilities::READ}),
+    )
+    .await;
+    assert_eq!(share_response.status(), 200);
     state.http_test_hooks.resume();
     assert_eq!(delete_request.await.unwrap().status(), 403);
     assert_eq!(

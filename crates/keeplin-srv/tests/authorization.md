@@ -482,7 +482,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
-    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -1554,7 +1554,7 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
 async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool).await;
     let owner_token = register_and_login(addr, "delete-owner@example.com").await;
-    let _new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
     let owner = state
         .store
         .get_user_by_email("delete-owner@example.com")
@@ -1605,6 +1605,16 @@ async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
     )
     .await;
     assert_eq!(transfer_response.status(), 200);
+    let share_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &new_owner_token,
+        json!({"user_id": owner.id, "capabilities": Capabilities::READ}),
+    )
+    .await;
+    assert_eq!(share_response.status(), 200);
     state.http_test_hooks.resume();
     assert_eq!(delete_request.await.unwrap().status(), 403);
     assert_eq!(
@@ -1620,13 +1630,13 @@ async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
 }
 ```
 
-**What it does** — Starts an owner-authorized `delete_note`, pauses it at the serializable transaction's `before_operation` checkpoint, commits `transfer_ownership` to a second user, and resumes deletion. It pins the resumed endpoint to HTTP 403 and proves the transferred ownership remains committed, so the former owner cannot delete from a stale preliminary authorization result.
+**What it does** — Starts an owner-authorized `delete_note`, pauses it at the serializable transaction's `before_operation` checkpoint, commits `transfer_ownership` to a second user, grants the former owner READ access, and resumes deletion. The retained share makes transaction-local access resolution succeed while withholding delete capability, so the pinned HTTP 403 can come only from `delete_note`'s transaction-local `can_delete` guard. Removing that guard lets the endpoint delete the note and changes the response to 200.
 
-**Dependencies** — `spawn_authorization_state` exposes the production router plus deterministic debug checkpoints; expects `before_operation` to precede every transaction-local authorization read. `register_and_login` creates two authenticated principals; expects each token to preserve its user's identity. `Store::{get_user_by_email, create_note, get_note}` establishes and verifies ownership; expects `owner_id` to be authoritative. `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the two requests; expects transfer to commit while deletion is paused. `authed_json` invokes `delete_note` and `transfer_ownership`; expects both endpoints to exercise their complete production authorization transactions.
+**Dependencies** — `spawn_authorization_state` exposes the production router plus deterministic debug checkpoints; expects `before_operation` to precede every transaction-local authorization read. `register_and_login` creates two authenticated principals; expects each token to preserve its user's identity. `Store::{get_user_by_email, create_note, get_note}` establishes and verifies ownership; expects `owner_id` to be authoritative. `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the requests; expects transfer and the retained READ share to commit before deletion resumes. `authed_json` invokes `delete_note`, `transfer_ownership`, and `create_share`; expects the READ share to make `resolve_note_access_on` return access whose `can_delete` remains false.
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_note`; ADR 0002 verification row 3.
 
-**Repeated context** — ADR 0001 invariant 5 binds deletion to `notes.owner_id`; ADR 0002 invariants 1–4 require re-verification against transaction-local current state and the ordinary 403 refusal.
+**Repeated context** — ADR 0001 invariant 5 binds deletion to owner-only capability rather than mere access; ADR 0002 invariants 1–4 require re-verification against transaction-local current state and the ordinary 403 refusal. The retained READ grant is essential mutation evidence: without it, `resolve_note_access_on` itself returns 403 before the guard under test is reached.
 
 ---
 
