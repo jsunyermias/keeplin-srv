@@ -45,7 +45,7 @@ The server-specific decisions are registered below.
 |---|---|---|---|---|
 | [0001 — Note moves and the provenance of note shares](0001-note-moves-and-share-provenance.md) | accepted | note/notebook permission surface: who may move a note, whether a move may alter its grants, and the named deployment-selected permission scheme that fixes those policy points | [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110) | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) |
 | [0002 — Authorization and mutation atomicity](0002-authorization-mutation-atomicity.md) | accepted | server-wide rule joining each HTTP authorization check to the mutation it authorizes through transactional re-verification | [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/issues/123) | [keeplin-srv#132](https://github.com/jsunyermias/keeplin-srv/pull/132) |
-| [0003 — Making per-user quotas hold](0003-per-user-quota-serialization.md) | proposed | enforcement at every path that creates a counted object, plus a per-user advisory lock so the check and the write it authorizes are mutually exclusive | [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | none; proposed does not authorize implementation |
+| [0003 — Making per-user quotas hold](0003-per-user-quota-serialization.md) | accepted | enforcement at every path that creates a counted object, plus a per-user advisory lock so the check and the write it authorizes are mutually exclusive | [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | [keeplin-srv#143](https://github.com/jsunyermias/keeplin-srv/pull/143) |
 
 `0001` has no canonical or companion ADR in `keeplin`: the capability model, both share tables and
 every function it names are local to this repository, and it moves no shared wire or format
@@ -53,6 +53,10 @@ surface.
 
 `0002` has no canonical or companion ADR in `keeplin`: `keeplin` has neither this HTTP layer nor
 PostgreSQL, and the decision changes no shared wire, format or `keeplin-core` surface.
+
+`0003` has no canonical or companion ADR in `keeplin`: per-user quotas are a server concept with no
+equivalent write path in `keeplin`, and the decision moves no shared wire, format or `keeplin-core`
+surface.
 
 A second local decision is expected for
 [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75): it must decide between

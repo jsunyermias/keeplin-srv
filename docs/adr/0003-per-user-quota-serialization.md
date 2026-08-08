@@ -1,11 +1,11 @@
 # 0003 — Making per-user quotas hold
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-08
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145)
-- Acceptance PR: link once the ADR is accepted
+- Acceptance PR: [keeplin-srv#143](https://github.com/jsunyermias/keeplin-srv/pull/143)
 - Supersedes: none
 - Superseded by: none
 
@@ -160,10 +160,7 @@ test.
 
 ## Decision and justification
 
-> This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
-> the maintainer may accept or reject it.
-
-**Proposed decision: adopt Option 3, in two parts.** They are separable and each establishes
+**Adopt Option 3, in two parts.** They are separable and each establishes
 something on its own — enforcement alone removes the two unconditional bypasses and leaves a bounded
 race; the lock alone closes the race on the paths that already check and leaves the bypasses open.
 Only together do they establish the invariant this ADR advertises. They may therefore be implemented
@@ -208,7 +205,7 @@ advisory-lock call site in this repository derives its key through one shared co
 takes a named domain, and `lock_note_order` is migrated into it. Two call sites choosing their own
 derivation is how the space silently overlaps, and it is already how it is.
 
-The proposed invariants are:
+The invariants are:
 
 1. No path creates a counted object without consulting the limit that counts it.
 2. A quota-bearing write commits only if the total, read inside the same transaction and under the
