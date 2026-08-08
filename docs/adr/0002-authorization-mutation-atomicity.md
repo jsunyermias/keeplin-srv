@@ -80,8 +80,6 @@ the other authorization call sites and no rule by which future handlers can be r
   it, and notices are attempted only after commit.
 - The implementation must update every affected source companion and project document and provide
   mechanical tests that fail if an authorization/operation consistency window is reintroduced.
-- This `proposed` ADR does not authorize implementation. Only the maintainer may change it to
-  `accepted` or `rejected`.
 
 ## Threat model
 
@@ -216,10 +214,7 @@ failure.
 
 ## Decision and justification
 
-> This ADR is `proposed`. It records the maintainer's selected recommendation but does not authorize
-> implementation. Only the maintainer may accept or reject it.
-
-**Proposed decision: adopt Option 5 as the general rule for the whole server HTTP permission
+**Decision: adopt Option 5 as the general rule for the whole server HTTP permission
 surface, plus Option 4 for accepted-ADR mutation-invariant paths.** Inventory every HTTP handler and
 its authorization inputs. Whenever a resolver result, authenticated identity, credential check, or
 handler-specific policy guard authorizes an operation, the server performs the ordinary early
@@ -265,7 +260,7 @@ For a move, this means the source notebook is the note's `notebook_id` re-read b
 the proposed destination. The existing row-1 interleaving test would catch the naive behavior that
 mutates first and then derives the source from the moved note.
 
-The proposed invariants are:
+The invariants are:
 
 1. No authorization-gated HTTP operation completes solely on an authorization or policy fact read
    outside its operation transaction.
