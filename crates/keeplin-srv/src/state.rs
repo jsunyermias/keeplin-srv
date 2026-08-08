@@ -11,6 +11,7 @@ use crate::{
 #[derive(Default)]
 pub struct HttpTestHooks {
     pause: tokio::sync::Mutex<Option<(&'static str, &'static str)>>,
+    reached_checkpoint: tokio::sync::Mutex<Option<(&'static str, &'static str)>>,
     reached: tokio::sync::Notify,
     resume: tokio::sync::Notify,
     serialization_failures: std::sync::atomic::AtomicUsize,
@@ -25,11 +26,22 @@ pub struct HttpTestHooks {
 #[cfg(debug_assertions)]
 impl HttpTestHooks {
     pub async fn pause_at(&self, handler: &'static str, point: &'static str) {
+        *self.reached_checkpoint.lock().await = None;
         *self.pause.lock().await = Some((handler, point));
     }
 
-    pub async fn wait_until_reached(&self) {
-        self.reached.notified().await;
+    pub async fn wait_until_reached(&self, handler: &'static str, point: &'static str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = self.reached.notified();
+                if *self.reached_checkpoint.lock().await == Some((handler, point)) {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("handler {handler} did not reach checkpoint {point}"));
     }
 
     pub fn resume(&self) {
@@ -57,10 +69,15 @@ impl HttpTestHooks {
     }
 
     pub(crate) async fn checkpoint(&self, handler: &'static str, point: &'static str) {
-        if *self.pause.lock().await == Some((handler, point)) {
+        let should_pause = *self.pause.lock().await == Some((handler, point));
+        if should_pause {
+            *self.reached_checkpoint.lock().await = Some((handler, point));
             self.reached.notify_one();
             self.resume.notified().await;
-            *self.pause.lock().await = None;
+            let mut pause = self.pause.lock().await;
+            if *pause == Some((handler, point)) {
+                *pause = None;
+            }
         }
     }
 

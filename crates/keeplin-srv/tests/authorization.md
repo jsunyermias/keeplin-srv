@@ -482,9 +482,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
-    HandlerInterleaving { handler: "delete_note", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guards_are_refused_per_handler") },
+    HandlerInterleaving { handler: "delete_note", transition: "none", outcome: InterleavingOutcome::Exempt("note deletion is owner-only, so a delegated actor is refused by the preliminary guard before the operation checkpoint"), case: None },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
-    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guards_are_refused_per_handler") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
     HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
@@ -1428,7 +1428,10 @@ async fn target_principals_are_reverified_inside_every_mutating_transaction(pool
             )
             .await
         });
-        state.http_test_hooks.wait_until_reached().await;
+        state
+            .http_test_hooks
+            .wait_until_reached(handler, "before_operation")
+            .await;
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(target_id)
             .execute(&pool)
@@ -1454,17 +1457,17 @@ async fn target_principals_are_reverified_inside_every_mutating_transaction(pool
 
 ---
 
-## fn revoked_note_guards_are_refused_per_handler
+## fn revoked_note_guard_is_refused_for_delete_share
 
-**Identification** — per-handler delegated-authorization revocation interleaving; marker `// md:fn revoked_note_guards_are_refused_per_handler`.
+**Identification** — delegated-authorization revocation interleaving for note-share deletion; marker `// md:fn revoked_note_guard_is_refused_for_delete_share`.
 
 **Code** — complete and verbatim:
 
 ```rust
-// md:fn revoked_note_guards_are_refused_per_handler
+// md:fn revoked_note_guard_is_refused_for_delete_share
 #[cfg(debug_assertions)]
 #[sqlx::test(migrations = "../../migrations")]
-async fn revoked_note_guards_are_refused_per_handler(pool: PgPool) {
+async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let _owner_token = register_and_login(addr, "guard-owner@example.com").await;
     let actor_token = register_and_login(addr, "guard-actor@example.com").await;
@@ -1488,73 +1491,51 @@ async fn revoked_note_guards_are_refused_per_handler(pool: PgPool) {
         .unwrap()
         .unwrap();
     let client = reqwest::Client::new();
-    for (handler, path) in [
-        {
-            let note = state
-                .store
-                .create_note(None, "delete-note guard", owner.id)
-                .await
-                .unwrap();
-            state
-                .store
-                .create_or_update_share(note.id, actor.id, Capabilities::ALL)
-                .await
-                .unwrap();
-            ("delete_note", format!("/api/notes/{}", note.id))
-        },
-        {
-            let note = state
-                .store
-                .create_note(None, "delete-share guard", owner.id)
-                .await
-                .unwrap();
-            state
-                .store
-                .create_or_update_share(note.id, actor.id, Capabilities::ALL)
-                .await
-                .unwrap();
-            state
-                .store
-                .create_or_update_share(note.id, target.id, Capabilities::READ)
-                .await
-                .unwrap();
-            (
-                "delete_share",
-                format!("/api/notes/{}/share/{}", note.id, target.id),
-            )
-        },
-    ] {
-        let note_id = Uuid::parse_str(path.split('/').nth(3).unwrap()).unwrap();
-        state
-            .http_test_hooks
-            .pause_at(handler, "before_operation")
-            .await;
-        let request_client = client.clone();
-        let request_token = actor_token.clone();
-        let request = tokio::spawn(async move {
-            authed_json(
-                &request_client,
-                reqwest::Method::DELETE,
-                addr,
-                &path,
-                &request_token,
-                json!({}),
-            )
-            .await
-        });
-        state.http_test_hooks.wait_until_reached().await;
-        assert!(state.store.delete_share(note_id, actor.id).await.unwrap());
-        state.http_test_hooks.resume();
-        assert_eq!(request.await.unwrap().status(), 403, "{handler}");
-    }
+    let note = state
+        .store
+        .create_note(None, "delete-share guard", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_share", "before_operation")
+        .await;
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}/share/{}", note.id, target.id),
+            &actor_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_share", "before_operation")
+        .await;
+    assert!(state.store.delete_share(note.id, actor.id).await.unwrap());
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
 }
 ```
 
-**What it does** — Parameterizes direct-grant revocation over `delete_note` and `delete_share`, pinning each endpoint to refusal status 403 after revocation commits before its operation snapshot.
+**What it does** — Pauses `delete_share` before its operation snapshot, revokes the actor's direct grant, and pins the resumed endpoint to refusal status 403. `delete_note` is deliberately absent because deletion is owner-only and a delegated actor cannot pass its preliminary guard; the interleaving inventory records that structural exemption.
 
-**Dependencies** — `HttpTestHooks::pause_at` controls the pre-operation boundary; expects both handlers to re-read authorization after resumption. `Store::delete_share` commits the guard transition; expects the direct grant to disappear before the handler snapshot.
+**Dependencies** — `HttpTestHooks::pause_at` and `wait_until_reached` control and identify each handler's pre-operation boundary; expects a missing boundary to fail with that handler's name instead of hanging. `Store::delete_share` commits the guard transition; expects the direct grant to disappear before the handler snapshot.
 
-**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for both handlers.
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_share`.
 
 **Repeated context** — A status disjunction is deliberately forbidden: both entries are pinned to 403.
 
@@ -2674,7 +2655,10 @@ async fn serializable_move_interleaving_and_byte_equivalent_refusal(pool: PgPool
             .await
         })
     };
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("update_note", "after_early_move_guard")
+        .await;
     store
         .create_or_update_notebook_share(source.id, carol.id, Capabilities::READ)
         .await
@@ -2947,7 +2931,10 @@ async fn serializable_two_failures_defer_revocation_notice_until_commit(pool: Pg
         )
         .await
     });
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_notebook_share", "after_mutation")
+        .await;
     assert!(inbox.lock().await.is_empty());
     assert_eq!(state.http_test_hooks.observations().3 - before.3, 0);
     state.http_test_hooks.inject_serialization_failures(2);
@@ -5548,7 +5535,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
 | 13c | `fn serializable_participants_form_a_real_ssi_conflict` | `// md:fn serializable_participants_form_a_real_ssi_conflict` |
 | 13d | `fn target_principals_are_reverified_inside_every_mutating_transaction` | `// md:fn target_principals_are_reverified_inside_every_mutating_transaction` |
-| 13e | `fn revoked_note_guards_are_refused_per_handler` | `// md:fn revoked_note_guards_are_refused_per_handler` |
+| 13e | `fn revoked_note_guard_is_refused_for_delete_share` | `// md:fn revoked_note_guard_is_refused_for_delete_share` |
 | 10 | `fn authorization_reads_observe_transaction_local_state` | `// md:fn authorization_reads_observe_transaction_local_state` |
 | 11 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
 | 11 | `fn relay_materialization_uses_authenticated_session_identity` | `// md:fn relay_materialization_uses_authenticated_session_identity` |

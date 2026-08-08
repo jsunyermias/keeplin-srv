@@ -70,6 +70,7 @@ coordinated only by the Postgres `LISTEN/NOTIFY` bus (`bus.rs`, issue #45).
 #[derive(Default)]
 pub struct HttpTestHooks {
     pause: tokio::sync::Mutex<Option<(&'static str, &'static str)>>,
+    reached_checkpoint: tokio::sync::Mutex<Option<(&'static str, &'static str)>>,
     reached: tokio::sync::Notify,
     resume: tokio::sync::Notify,
     serialization_failures: std::sync::atomic::AtomicUsize,
@@ -81,9 +82,9 @@ pub struct HttpTestHooks {
 }
 ```
 
-**What it does** — Stores per-application pause coordination, injected failure counts, and observations for authorization mutation tests. `#[cfg(debug_assertions)]` excludes the type and every hook field from release builds mechanically. Its state belongs to one `AppState`, preventing unrelated test servers from sharing controls.
+**What it does** — Stores per-application pause coordination, the exact checkpoint most recently reached, injected failure counts, and observations for authorization mutation tests. `#[cfg(debug_assertions)]` excludes the type and every hook field from release builds mechanically. Its state belongs to one `AppState`, preventing unrelated test servers from sharing controls.
 
-**Dependencies** — `tokio::sync::Mutex` and `Notify` coordinate checkpoints; expects notifications to retain permits across deterministic test scheduling. Atomic values count attempts, commits, exhaustion, effects, and consume configured failures; expects sequentially consistent observations.
+**Dependencies** — `tokio::sync::Mutex` and `Notify` coordinate checkpoints; expects the recorded `(handler, point)` identity to distinguish a current arrival from a stale notification permit. Atomic values count attempts, commits, exhaustion, effects, and consume configured failures; expects sequentially consistent observations.
 
 **Used by** — `http.rs::serializable`, `http.rs::update_note`, `http.rs::notify_access_revoked`, and authorization integration tests.
 
@@ -102,11 +103,22 @@ pub struct HttpTestHooks {
 #[cfg(debug_assertions)]
 impl HttpTestHooks {
     pub async fn pause_at(&self, handler: &'static str, point: &'static str) {
+        *self.reached_checkpoint.lock().await = None;
         *self.pause.lock().await = Some((handler, point));
     }
 
-    pub async fn wait_until_reached(&self) {
-        self.reached.notified().await;
+    pub async fn wait_until_reached(&self, handler: &'static str, point: &'static str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = self.reached.notified();
+                if *self.reached_checkpoint.lock().await == Some((handler, point)) {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("handler {handler} did not reach checkpoint {point}"));
     }
 
     pub fn resume(&self) {
@@ -134,10 +146,15 @@ impl HttpTestHooks {
     }
 
     pub(crate) async fn checkpoint(&self, handler: &'static str, point: &'static str) {
-        if *self.pause.lock().await == Some((handler, point)) {
+        let should_pause = *self.pause.lock().await == Some((handler, point));
+        if should_pause {
+            *self.reached_checkpoint.lock().await = Some((handler, point));
             self.reached.notify_one();
             self.resume.notified().await;
-            *self.pause.lock().await = None;
+            let mut pause = self.pause.lock().await;
+            if *pause == Some((handler, point)) {
+                *pause = None;
+            }
         }
     }
 
@@ -178,9 +195,9 @@ impl HttpTestHooks {
 }
 ```
 
-**What it does** — Arms and releases one named checkpoint, consumes configured post-mutation and serialization failures, and exposes exact attempt, commit, exhaustion, and external-effect counts. Production code can invoke the crate-private half only in debug builds; integration tests use the public configuration and observation half.
+**What it does** — Arms and releases one named checkpoint, records its exact identity before notifying the waiter, and fails a wait after five seconds with the missing handler and point. It drops the pause-mutex guard before awaiting resume and conditionally clears only the checkpoint it paused, preventing self-deadlock and cross-iteration notification confusion. It also consumes configured post-mutation and serialization failures and exposes exact attempt, commit, exhaustion, and external-effect counts. Production code can invoke the crate-private half only in debug builds; integration tests use the public configuration and observation half.
 
-**Dependencies** — `Notify::notified` and `notify_one` provide deterministic handoff; expects one armed checkpoint at a time. Atomic `fetch_update`, `swap`, `fetch_add`, `load`, and `store` consume injections and preserve exact counters; expects tests to compare deltas when reusing a state.
+**Dependencies** — `tokio::time::timeout` bounds a missing checkpoint to five seconds; expects expiration to panic with the requested handler and point. `Notify::notified` and `notify_one` provide handoff while the recorded checkpoint identity rejects stale permits; expects one armed checkpoint at a time. `Mutex::lock` protects pause and arrival state; expects guards to be dropped before any resume wait. Atomic `fetch_update`, `swap`, `fetch_add`, `load`, and `store` consume injections and preserve exact counters; expects tests to compare deltas when reusing a state.
 
 **Used by** — the eight serializable mutation handlers through `serializable`, the move seam, and `serializable_move_interleaving_and_failure_evidence`.
 
