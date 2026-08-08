@@ -1334,15 +1334,24 @@ async fn delete_account(
     user: AuthedUser,
     Json(body): Json<DeleteAccountBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    let verified_password_hash = stored.password_hash;
     serializable(state.clone(), "delete_account", |state, conn| {
-        let password = body.password.clone();
+        let verified_password_hash = verified_password_hash.clone();
         Box::pin(async move {
             let stored = state
                 .store
                 .get_user_by_id_on(conn, user.user_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if !auth::verify_password(&password, &stored.password_hash)? {
+            if stored.password_hash != verified_password_hash {
                 return Err(AppError::InvalidToken);
             }
             state.store.delete_user_on(conn, user.user_id).await
@@ -1353,13 +1362,17 @@ async fn delete_account(
 }
 ```
 
-**What it does** — `DELETE /api/account` (issue #31): re-verifies the password inside the same
-three-attempt SERIALIZABLE transaction that deletes the user row; every owned entity (devices, notes, notebooks, tags,
-resources, shares, journal) **cascades away in the database** — irreversible. This
-is the one deliberate exception to soft-delete: account deletion is a privacy
-action, not a replicated edit.
+**What it does** — `DELETE /api/account` (issue #31): verifies the password before opening a
+transaction, then re-reads the user in the three-attempt SERIALIZABLE transaction and requires the
+stored hash to equal the exact hash that was verified before deleting the row. A concurrent password
+change therefore refuses deletion without repeating Argon2 while holding a pool connection. Every
+owned entity (devices, notes, notebooks, tags, resources, shares, journal) **cascades away in the
+database** — irreversible. This is the one deliberate exception to soft-delete: account deletion is
+a privacy action, not a replicated edit.
 
-**Dependencies** — `serializable`; `auth::verify_password`; `Store::{get_user_by_id_on, delete_user_on}`.
+**Dependencies** — `serializable`; `auth::verify_password`; `Store::{get_user_by_id,
+get_user_by_id_on, delete_user_on}`; expects the in-transaction hash equality check to reject any
+credential change between the expensive verification and deletion.
 **Used by** — routed in `router`.
 
 **Repeated context** — none.

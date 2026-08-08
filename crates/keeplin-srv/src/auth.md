@@ -198,8 +198,8 @@ Argon2 verification is constant-time-ish with respect to the password content.
 (`error.rs`).
 
 **Used by** — `http.rs`: `login` (real hash, and the dummy hash for absent users),
-`change_password`, `delete_account` (both re-verify the current password before the
-sensitive action).
+`change_password`; `delete_account` verifies before opening its serializable transaction and
+revalidates the exact verified hash inside it before the sensitive action.
 
 **Repeated context** — Sensitive account mutations re-verify the password even on an
 authenticated request, so a stolen token alone cannot change credentials or delete

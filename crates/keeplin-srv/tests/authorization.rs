@@ -380,7 +380,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
     HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
     HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
-    HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
+    HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("the credential is verified before the operation snapshot and the exact verified password hash is revalidated inside it before authenticated-identity deletion"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
     HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
@@ -900,6 +900,22 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
         );
     }
+    let delete_account = source
+        .split(concat!("// ", "md:fn delete_account"))
+        .nth(1)
+        .unwrap()
+        .split(concat!("// ", "md:"))
+        .next()
+        .unwrap();
+    assert!(
+        delete_account.find("auth::verify_password").unwrap()
+            < delete_account.find("serializable(state.clone()").unwrap(),
+        "delete_account must not hold a transaction or pool connection across Argon2 verification"
+    );
+    assert!(
+        delete_account.contains("stored.password_hash != verified_password_hash"),
+        "delete_account must reject a password-hash change between verification and deletion"
+    );
 }
 
 // md:fn sync_notebook_writers_retry_real_40001_within_the_bound
