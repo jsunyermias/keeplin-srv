@@ -961,9 +961,18 @@ credential verification and transfer-target resolution; the hash is never serial
 ```rust
     // md:impl Store > fn delete_user
     pub async fn delete_user(&self, id: Uuid) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.delete_user_on(&mut conn, id).await
+    }
+
+    pub async fn delete_user_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<bool, AppError> {
         let result = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(conn)
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -3502,7 +3511,39 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
         nb: &keeplin_core::models::Notebook,
     ) -> Result<bool, AppError> {
-        let mut tx = self.pool.begin().await?;
+        for attempt in 1..=3 {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .execute(&mut *tx)
+                .await?;
+            let result = self.upsert_notebook_on(&mut tx, user_id, nb).await;
+            match result {
+                Ok(value) => match tx.commit().await {
+                    Ok(()) => return Ok(value),
+                    Err(error)
+                        if error.as_database_error().and_then(|e| e.code()).as_deref()
+                            == Some("40001") => {}
+                    Err(error) => return Err(error.into()),
+                },
+                Err(AppError::Database(sqlx::Error::Database(database)))
+                    if database.code().as_deref() == Some("40001") => {}
+                Err(error) => return Err(error),
+            }
+            if attempt == 3 {
+                return Err(AppError::Internal(
+                    "serializable notebook write retry exhausted".into(),
+                ));
+            }
+        }
+        unreachable!()
+    }
+
+    pub async fn upsert_notebook_on(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        nb: &keeplin_core::models::Notebook,
+    ) -> Result<bool, AppError> {
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
@@ -3544,12 +3585,16 @@ the server-side hook where the note delete is applied.
         .bind(&nb.last_writer)
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
         Ok(true)
     }
 ```
 
-**What it does** — Creates or updates a notebook only inside `user_id`. Conflict-state reads and writes both carry the tenant predicate. A colliding foreign ID is a no-op reported as `true`, matching a fresh insert and preventing an existence oracle; a losing same-tenant version still returns `false` before the insert.
+**What it does** — Creates or updates a notebook only inside `user_id`. The pool-backed entry point
+replays the complete transaction at `SERIALIZABLE` up to three times on SQLSTATE `40001`; the `_on`
+form expresses the guarded write as part of whichever larger transaction owns it. Conflict-state
+reads and writes both carry the tenant predicate. A colliding foreign ID is a no-op reported as
+`true`, matching a fresh insert and preventing an existence oracle; a losing same-tenant version
+still returns `false` before the insert.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -3573,7 +3618,44 @@ the server-side hook where the note delete is applied.
         vv: &VersionVector,
         last_writer: &str,
     ) -> Result<bool, AppError> {
-        let mut tx = self.pool.begin().await?;
+        for attempt in 1..=3 {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .execute(&mut *tx)
+                .await?;
+            let result = self
+                .delete_notebook_on(&mut tx, user_id, id, deleted_at, vv, last_writer)
+                .await;
+            match result {
+                Ok(value) => match tx.commit().await {
+                    Ok(()) => return Ok(value),
+                    Err(error)
+                        if error.as_database_error().and_then(|e| e.code()).as_deref()
+                            == Some("40001") => {}
+                    Err(error) => return Err(error.into()),
+                },
+                Err(AppError::Database(sqlx::Error::Database(database)))
+                    if database.code().as_deref() == Some("40001") => {}
+                Err(error) => return Err(error),
+            }
+            if attempt == 3 {
+                return Err(AppError::Internal(
+                    "serializable notebook write retry exhausted".into(),
+                ));
+            }
+        }
+        unreachable!()
+    }
+
+    pub async fn delete_notebook_on(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        id: Uuid,
+        deleted_at: DateTime<Utc>,
+        vv: &VersionVector,
+        last_writer: &str,
+    ) -> Result<bool, AppError> {
         let existed = if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM notebooks WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
@@ -3612,12 +3694,16 @@ the server-side hook where the note delete is applied.
             .bind(id).bind(user_id).bind(deleted_at).bind(Json(vv)).bind(last_writer)
             .execute(&mut *tx).await?;
         }
-        tx.commit().await?;
         Ok(true)
     }
 ```
 
-**What it does** — Tombstones a notebook only inside `user_id` if the incoming version wins; an **unknown or foreign** notebook gets the indistinguishable minimal-insert attempt, whose global-ID conflict is a no-op, so a later stale same-tenant create/update cannot resurrect a genuinely unknown ID.
+**What it does** — Tombstones a notebook only inside `user_id` if the incoming version wins. The
+pool-backed entry point replays the complete transaction at `SERIALIZABLE` up to three times on
+SQLSTATE `40001`; the `_on` form keeps the guarded write composable inside a future larger
+transaction. An **unknown or foreign** notebook gets the indistinguishable minimal-insert attempt,
+whose global-ID conflict is a no-op, so a later stale same-tenant create/update cannot resurrect a
+genuinely unknown ID.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 

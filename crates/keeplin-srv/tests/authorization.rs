@@ -588,6 +588,7 @@ const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
     "create_notebook_share",
     "delete_notebook_share",
     "transfer_notebook",
+    "delete_account",
 ];
 
 fn routed_handlers(source: &str) -> Vec<String> {
@@ -734,6 +735,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_notebook_share",
         "delete_notebook_share",
         "transfer_notebook",
+        "delete_account",
     ]
     .into_iter()
     .collect();
@@ -754,19 +756,58 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_or_update_notebook_share_on",
         "delete_notebook_share_on",
         "set_notebook_owner_on",
+        "delete_user_on",
     ];
     for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
             .split(&format!("// {}fn {handler}", "md:"))
             .nth(1)
             .unwrap()
-            .split("// md:")
+            .split(concat!("// ", "md:"))
             .next()
             .unwrap();
         assert!(
             body.contains(&format!("serializable(state.clone(), \"{handler}\","))
                 && body.contains(mutation),
             "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
+        );
+    }
+    for handler in [
+        "create_share",
+        "transfer_ownership",
+        "create_notebook_share",
+        "transfer_notebook",
+    ] {
+        let body = source
+            .split(&format!("// {}fn {handler}", "md:"))
+            .nth(1)
+            .unwrap()
+            .split(concat!("// ", "md:"))
+            .next()
+            .unwrap();
+        let boundary = body
+            .split(&format!("serializable(state.clone(), \"{handler}\","))
+            .nth(1)
+            .unwrap();
+        assert!(
+            boundary.contains("get_user_by_id_on(conn, target_id)"),
+            "{handler} must re-read its target principal inside the SERIALIZABLE transaction"
+        );
+    }
+    let store = include_str!("../src/store.rs");
+    for writer in ["upsert_notebook", "delete_notebook"] {
+        let body = store
+            .split(&format!("// {}impl Store > fn {writer}\n", "md:"))
+            .nth(1)
+            .unwrap()
+            .split(concat!("// ", "md:"))
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                && body.contains("for attempt in 1..=3")
+                && body.contains(&format!("{writer}_on")),
+            "{writer} must replay its whole guarded notebook-write transaction at SERIALIZABLE"
         );
     }
 }
