@@ -16,7 +16,9 @@ use keeplin_core::{
 use keeplin_srv::{
     config::{Config, PermissionScheme},
     http::router,
-    permissions::{resolve_note_access, Capabilities},
+    permissions::{
+        resolve_note_access, resolve_note_access_on, resolve_notebook_access_on, Capabilities,
+    },
     state::AppState,
     store::{NotePatch, Store},
 };
@@ -325,6 +327,486 @@ const RELAY_CHANGE_CAPABILITY_UNCOVERED: &[(&str, &str)] = &[
 ];
 
 const READ_ISOLATION_CASES: &[&str] = &["users_do_not_see_each_others_changes"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandlerKind {
+    ReadOnly,
+    Mutating,
+}
+
+struct HandlerAuthorization {
+    handler: &'static str,
+    kind: HandlerKind,
+    inputs: &'static [&'static str],
+}
+
+const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
+    HandlerAuthorization {
+        handler: "change_password",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "credential check"],
+    },
+    HandlerAuthorization {
+        handler: "crate::collab::handler",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "collaboration session policy"],
+    },
+    HandlerAuthorization {
+        handler: "crate::sync::handler",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "device identity"],
+    },
+    HandlerAuthorization {
+        handler: "create_device",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "create_note",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "quota"],
+    },
+    HandlerAuthorization {
+        handler: "create_notebook_share",
+        kind: HandlerKind::Mutating,
+        inputs: &[
+            "notebook resolver",
+            "authenticated identity",
+            "ownership query",
+        ],
+    },
+    HandlerAuthorization {
+        handler: "create_share",
+        kind: HandlerKind::Mutating,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "delete_account",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "credential check"],
+    },
+    HandlerAuthorization {
+        handler: "delete_all_devices",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "delete_device",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "ownership query"],
+    },
+    HandlerAuthorization {
+        handler: "delete_note",
+        kind: HandlerKind::Mutating,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "delete_notebook_share",
+        kind: HandlerKind::Mutating,
+        inputs: &["notebook resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "delete_share",
+        kind: HandlerKind::Mutating,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "export_note",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "get_note",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "get_resource_data",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity", "ownership query"],
+    },
+    HandlerAuthorization {
+        handler: "health",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["public endpoint policy"],
+    },
+    HandlerAuthorization {
+        handler: "import_note",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "quota"],
+    },
+    HandlerAuthorization {
+        handler: "list_devices",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "list_note_tags",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity", "ownership query"],
+    },
+    HandlerAuthorization {
+        handler: "list_notebook_shares",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["notebook resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "list_notebooks",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "list_notes",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "list_resources",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity", "ownership query"],
+    },
+    HandlerAuthorization {
+        handler: "list_shares",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "list_tags",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "login",
+        kind: HandlerKind::Mutating,
+        inputs: &["credential check", "rate limit"],
+    },
+    HandlerAuthorization {
+        handler: "metrics",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "note_history",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["note resolver", "authenticated identity", "history policy"],
+    },
+    HandlerAuthorization {
+        handler: "notebook_history",
+        kind: HandlerKind::ReadOnly,
+        inputs: &[
+            "notebook resolver",
+            "authenticated identity",
+            "history policy",
+        ],
+    },
+    HandlerAuthorization {
+        handler: "put_resource_data",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity", "ownership query", "quota"],
+    },
+    HandlerAuthorization {
+        handler: "ready",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["public endpoint policy", "database readiness"],
+    },
+    HandlerAuthorization {
+        handler: "register",
+        kind: HandlerKind::Mutating,
+        inputs: &["public endpoint policy", "rate limit"],
+    },
+    HandlerAuthorization {
+        handler: "reset_confirm",
+        kind: HandlerKind::Mutating,
+        inputs: &["credential token"],
+    },
+    HandlerAuthorization {
+        handler: "reset_request",
+        kind: HandlerKind::Mutating,
+        inputs: &["public endpoint policy", "rate limit"],
+    },
+    HandlerAuthorization {
+        handler: "transfer_notebook",
+        kind: HandlerKind::Mutating,
+        inputs: &[
+            "notebook resolver",
+            "authenticated identity",
+            "ownership query",
+        ],
+    },
+    HandlerAuthorization {
+        handler: "transfer_ownership",
+        kind: HandlerKind::Mutating,
+        inputs: &["note resolver", "authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "update_note",
+        kind: HandlerKind::Mutating,
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            "move policy",
+            "quota",
+        ],
+    },
+    HandlerAuthorization {
+        handler: "verify_confirm",
+        kind: HandlerKind::Mutating,
+        inputs: &["credential token"],
+    },
+    HandlerAuthorization {
+        handler: "verify_request",
+        kind: HandlerKind::Mutating,
+        inputs: &["authenticated identity"],
+    },
+    HandlerAuthorization {
+        handler: "version",
+        kind: HandlerKind::ReadOnly,
+        inputs: &["public endpoint policy"],
+    },
+];
+
+const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
+    "update_note",
+    "delete_note",
+    "create_share",
+    "delete_share",
+    "transfer_ownership",
+    "create_notebook_share",
+    "delete_notebook_share",
+    "transfer_notebook",
+];
+
+fn routed_handlers(source: &str) -> Vec<String> {
+    let router = source
+        .split(concat!("// ", "md:fn router"))
+        .nth(1)
+        .unwrap()
+        .split(concat!("// ", "md:", "PROTOCOL_VERSION"))
+        .next()
+        .unwrap();
+    ["get(", "post(", "put(", "patch(", "delete("]
+        .into_iter()
+        .flat_map(|method| {
+            router.match_indices(method).filter_map(move |(offset, _)| {
+                if offset > 0
+                    && (router.as_bytes()[offset - 1].is_ascii_alphanumeric()
+                        || router.as_bytes()[offset - 1] == b'_')
+                {
+                    return None;
+                }
+                let tail = &router[offset + method.len()..];
+                let handler = tail
+                    .trim_start()
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                    .next()?;
+                (!handler.is_empty()).then(|| handler.to_string())
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn handler_authorization_inventory_covers_router() {
+    let routed = routed_handlers(include_str!("../src/http.rs"));
+    let classified: Vec<_> = HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .map(|entry| entry.handler.to_string())
+        .collect();
+    assert_eq!(routed.len(), routed.iter().collect::<BTreeSet<_>>().len());
+    assert_eq!(
+        classified.len(),
+        classified.iter().collect::<BTreeSet<_>>().len()
+    );
+    assert_eq!(
+        routed.into_iter().collect::<BTreeSet<_>>(),
+        classified.into_iter().collect()
+    );
+    assert!(HTTP_HANDLER_AUTHORIZATION.iter().all(|entry| {
+        !entry.inputs.is_empty() && entry.inputs.iter().all(|input| !input.is_empty())
+    }));
+    assert!(HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .any(|entry| entry.kind == HandlerKind::ReadOnly));
+    assert!(HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .any(|entry| entry.kind == HandlerKind::Mutating));
+    let expanded_source = include_str!("../src/http.rs").replace(
+        concat!("// ", "md:", "PROTOCOL_VERSION"),
+        concat!(
+            ".route(\"/api/test-only\", post(test_only_handler));\n",
+            "// ",
+            "md:",
+            "PROTOCOL_VERSION"
+        ),
+    );
+    let expanded: BTreeSet<_> = routed_handlers(&expanded_source).into_iter().collect();
+    let classified: BTreeSet<_> = HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .map(|entry| entry.handler.to_string())
+        .collect();
+    assert!(expanded.contains("test_only_handler"));
+    assert_ne!(expanded, classified);
+}
+
+#[test]
+fn serializable_invariant_inventory_is_exact_and_deferred() {
+    let expected: BTreeSet<_> = [
+        "update_note",
+        "delete_note",
+        "create_share",
+        "delete_share",
+        "transfer_ownership",
+        "create_notebook_share",
+        "delete_notebook_share",
+        "transfer_notebook",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        SERIALIZABLE_INVARIANT_HANDLERS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        expected
+    );
+    let source = include_str!("../src/http.rs");
+    for handler in SERIALIZABLE_INVARIANT_HANDLERS {
+        let body = source
+            .split(&format!("// {}fn {handler}", "md:"))
+            .nth(1)
+            .unwrap()
+            .split("// md:")
+            .next()
+            .unwrap();
+        assert!(
+            !body.contains("SERIALIZABLE"),
+            "{handler} starts SERIALIZABLE in phase 1"
+        );
+    }
+}
+
+// md:fn authorization_reads_observe_transaction_local_state
+#[sqlx::test(migrations = "../../migrations")]
+async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("seam-owner@example.com", "hash", "Owner")
+        .await
+        .unwrap();
+    let member = store
+        .create_user("seam-member@example.com", "hash", "Member")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "transaction seam", owner.id)
+        .await
+        .unwrap();
+    let notebook_id = Uuid::new_v4();
+    let resource_id = Uuid::new_v4();
+    let transaction_user_id = Uuid::new_v4();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO notebooks (id, user_id, title, created_at, updated_at, vv, last_writer)
+         VALUES ($1, $2, 'notebook', now(), now(), '{}', 'test')",
+    )
+    .bind(notebook_id)
+    .bind(owner.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO notebook_shares (notebook_id, user_id, capabilities) VALUES ($1, $2, $3)",
+    )
+    .bind(notebook_id)
+    .bind(member.id)
+    .bind(Capabilities::READ)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE notes SET notebook_id = $2 WHERE id = $1")
+        .bind(note.id)
+        .bind(notebook_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let mut transaction_note = note.clone();
+    transaction_note.notebook_id = Some(notebook_id);
+    assert!(resolve_note_access_on(
+        &store,
+        &mut tx,
+        &transaction_note,
+        member.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap()
+    .can_read());
+    assert!(
+        resolve_notebook_access_on(&store, &mut tx, notebook_id, member.id)
+            .await
+            .unwrap()
+            .can_read()
+    );
+    assert_eq!(
+        store
+            .inherited_note_principals_on(&mut tx, notebook_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        [
+            (owner.id, Capabilities::ALL),
+            (member.id, Capabilities::READ)
+        ]
+        .into_iter()
+        .collect()
+    );
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name)
+         VALUES ($1, 'transaction-user@example.com', 'hash', 'Transaction User')",
+    )
+    .bind(transaction_user_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .get_user_by_id_on(&mut tx, transaction_user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        transaction_user_id
+    );
+    sqlx::query(
+        "INSERT INTO resources
+         (id, user_id, title, mime_type, file_name, size, created_at, vv, last_writer)
+         VALUES ($1, $2, 'resource', 'application/octet-stream', 'resource.bin', 4, now(), '{}', 'test')",
+    )
+    .bind(resource_id)
+    .bind(owner.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2)")
+        .bind(resource_id)
+        .bind(vec![1_u8, 2, 3, 4])
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(store
+        .resource_owned_by_on(&mut tx, resource_id, owner.id)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .user_blob_bytes_excluding_on(&mut tx, owner.id, Uuid::nil())
+            .await
+            .unwrap(),
+        4
+    );
+    tx.rollback().await.unwrap();
+}
 
 // md:fn mutating_handlers
 fn mutating_handlers(source: &str) -> BTreeSet<String> {

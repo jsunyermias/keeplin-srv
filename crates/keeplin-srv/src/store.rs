@@ -336,12 +336,21 @@ impl Store {
 
     // md:impl Store > fn get_user_by_id
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_user_by_id_on(&mut conn, id).await
+    }
+
+    pub async fn get_user_by_id_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE id = $1"#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(user)
     }
@@ -1032,13 +1041,23 @@ impl Store {
         note_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<NoteShare>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_share_on(&mut conn, note_id, user_id).await
+    }
+
+    pub async fn get_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        note_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NoteShare>, AppError> {
         let share = sqlx::query_as::<_, NoteShare>(
             r#"SELECT note_id, user_id, capabilities, created_at
                FROM note_shares WHERE note_id = $1 AND user_id = $2"#,
         )
         .bind(note_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(share)
     }
@@ -1069,10 +1088,19 @@ impl Store {
 
     // md:impl Store > fn notebook_owner
     pub async fn notebook_owner(&self, notebook_id: Uuid) -> Result<Option<Uuid>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.notebook_owner_on(&mut conn, notebook_id).await
+    }
+
+    pub async fn notebook_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
         let owner: Option<(Uuid,)> =
             sqlx::query_as("SELECT user_id FROM notebooks WHERE id = $1 AND deleted_at IS NULL")
                 .bind(notebook_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(conn)
                 .await?;
         Ok(owner.map(|r| r.0))
     }
@@ -1100,6 +1128,17 @@ impl Store {
         notebook_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_notebook_share_on(&mut conn, notebook_id, user_id)
+            .await
+    }
+
+    pub async fn get_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NotebookShare>, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
             r#"SELECT ns.notebook_id, ns.user_id, ns.capabilities, ns.created_at
                FROM notebook_shares ns
@@ -1108,7 +1147,7 @@ impl Store {
         )
         .bind(notebook_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(share)
     }
@@ -1170,6 +1209,16 @@ impl Store {
         &self,
         notebook_id: Uuid,
     ) -> Result<Vec<(Uuid, i32)>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.inherited_note_principals_on(&mut conn, notebook_id)
+            .await
+    }
+
+    pub async fn inherited_note_principals_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<Vec<(Uuid, i32)>, AppError> {
         let rows = sqlx::query_as::<_, (Uuid, i32)>(
             r#"SELECT ns.user_id, ns.capabilities
                FROM notebook_shares ns
@@ -1180,7 +1229,7 @@ impl Store {
         )
         .bind(notebook_id)
         .bind(crate::permissions::Capabilities::ALL)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await?;
         Ok(rows)
     }
@@ -2015,10 +2064,21 @@ impl Store {
         resource_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.resource_owned_by_on(&mut conn, resource_id, user_id)
+            .await
+    }
+
+    pub async fn resource_owned_by_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        resource_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let row = sqlx::query("SELECT 1 FROM resources WHERE id = $1 AND user_id = $2")
             .bind(resource_id)
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(conn)
             .await?;
         Ok(row.is_some())
     }
@@ -2188,6 +2248,17 @@ impl Store {
         user_id: Uuid,
         exclude: Uuid,
     ) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.user_blob_bytes_excluding_on(&mut conn, user_id, exclude)
+            .await
+    }
+
+    pub async fn user_blob_bytes_excluding_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        exclude: Uuid,
+    ) -> Result<i64, AppError> {
         let bytes: i64 = sqlx::query_scalar(
             r#"SELECT COALESCE(SUM(octet_length(rb.data)), 0)::bigint
                FROM resource_blobs rb
@@ -2196,7 +2267,7 @@ impl Store {
         )
         .bind(user_id)
         .bind(exclude)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(bytes)
     }
