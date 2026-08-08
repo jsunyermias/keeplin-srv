@@ -1,14 +1,23 @@
 # 0004 — How the synchronization path refuses an over-quota change
 
-- Status: proposed
+- Status: rejected
 - Date: 2026-08-08
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145)
-- Acceptance PR: link once the ADR is accepted
-- Supersedes: [ADR 0003](0003-per-user-quota-serialization.md) **in part** — its invariants 2 and 3 as
-  they apply to the synchronization path. See *What this supersedes, and why it must say so*.
+- Acceptance PR: none — rejected in [keeplin-srv#146](https://github.com/jsunyermias/keeplin-srv/pull/146)
+- Supersedes: none
 - Superseded by: none
+
+> **Rejected, and kept as a record rather than withdrawn.** The maintainer chose option 6 below:
+> the synchronization path's quota refusal is decided by
+> [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75)'s ADR, together with the
+> choice between transactional materialization and a durable projection queue, rather than ahead of
+> it. The reasons are in *Disposition* at the end.
+>
+> Everything above that section stands as verified analysis. The eleven facts, the four-mechanism
+> argument and the six options are what #75's ADR inherits, and re-deriving them is the cost this
+> record exists to avoid.
 
 ## Context and problem
 
@@ -22,9 +31,9 @@ Its *Not decided* section leaves one thing open and requires it to be settled be
 > is not its natural refusal, and rejecting a synchronized change has consequences for convergence
 > that the HTTP path does not have.
 
-This ADR settles that, and in doing so it partially supersedes the decision that asked for it. That
-is stated in the header rather than buried, because two review rounds established that the two cannot
-both hold.
+This document was written to settle it and does not. Two review rounds established that the option it
+proposed could not hold ADR 0003's invariants 2 and 3 on this path, and the maintainer moved the
+question to keeplin-srv#75's ADR instead. What remains here is the analysis that decision rests on.
 
 ### What the protocol actually does
 
@@ -151,23 +160,23 @@ reserves that choice for the maintainer.
 and #75's own sketch already names a stable `NACK`. Any refusal frame here is a fragment of that
 design arriving early.
 
-### What this supersedes, and why it must say so
+### The supersession this would have required, which is part of why it was rejected
 
 ADR 0003's invariant 2 requires that a quota-bearing write commit only if the total was read inside
 the same transaction and under the lock, and its invariant 3 requires lock, read and write to be one
 transaction. On the synchronization path the write is at materialization and the decision is at
-ingress, so **neither can hold**, and this ADR does not take the lock.
+ingress, so **neither can hold** under the option this document proposed.
 
-ADR 0003 is accepted and its body is immutable historical record. The registry's mechanism for this
-situation is supersession by a later accepted decision, not amendment, so the header records that
-this ADR supersedes ADR 0003 in part: invariants 2 and 3, on the synchronization path only. ADR
-0003's invariant 1 — that no path creates a counted object without consulting the limit — is
-**strengthened** rather than weakened, since this is the decision that makes it true on the fourth
-path.
+ADR 0003 is accepted and its body is immutable historical record. The registry's mechanism is
+supersession by a later accepted decision, not amendment, so accepting option 3 would have meant
+recording that ADR 0003's invariants 2 and 3 stop governing one of the four paths they were accepted
+to govern, on the same day they were accepted.
 
-Accepting this ADR therefore means accepting that an invariant accepted earlier today does not hold
-on one of its four paths. That is stated plainly because the alternative is a registry in which two
-accepted decisions disagree and nothing records which one governs.
+ADR 0003's invariant 1 — that no path creates a counted object without consulting the limit — would
+have been strengthened rather than weakened. The trade was a stronger invariant 1 on the fourth path
+against a weakened invariant 2 and 3 on it. The maintainer declined that trade in favour of a
+decision that can satisfy all three at once, which is what a #75 that places the write in the
+deciding transaction makes possible.
 
 ## Forces and requirements
 
@@ -263,12 +272,13 @@ in lockstep with a protocol bump.
 
 ## Decision and justification
 
-> This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
-> the maintainer may accept or reject it.
+> **This section records the decision that was proposed and rejected.** It is preserved unaltered
+> because it is the concrete shape #75's ADR must either adopt, improve on, or explicitly refuse, and
+> because a rejected option described only in summary cannot be re-evaluated. The decision that
+> governs is in *Disposition*.
 
-**Proposed decision: adopt Option 3 — refuse at ingress, say so on the wire, and claim only the
-sequential bound.** The maintainer is asked to weigh it against option 6 with the costs above
-explicit, because those costs were not visible when the direction was chosen.
+**Proposed decision, not adopted: Option 3 — refuse at ingress, say so on the wire, and claim only
+the sequential bound.**
 
 **Part zero — a prerequisite that is not about quota.** By fact 1, `handle_incoming` materializes and
 fans out the submitted slice rather than the journaled subset, and `append_changes` derives
@@ -328,7 +338,7 @@ The invariants proposed are:
 
 ### Costs, stated rather than implied
 
-**It supersedes part of a decision accepted the same day.** Recorded in the header and argued above.
+**It would supersede part of a decision accepted the same day.** Argued above.
 
 **It requires a fix to `handle_incoming` that quota did not cause**, and that fix is inside the area
 #75 must reason about.
@@ -428,3 +438,65 @@ The moment `keeplin` is required to *act* on the refusal, the protocol stops bei
 that becomes a canonical decision in `keeplin`, versioned there. It belongs with keeplin#150 and
 keeplin#151 rather than with this ADR, and this paragraph exists so that boundary is crossed
 deliberately rather than by accretion.
+
+## Disposition
+
+**Rejected in favour of option 6.** The synchronization path's quota refusal is decided by
+keeplin-srv#75's ADR, alongside the choice between transactional materialization and a durable
+projection queue, rather than ahead of it.
+
+The direction this document proposed was chosen before either review round had run. Two rounds
+changed what it would cost, and the maintainer re-decided with those costs visible rather than
+holding to a choice made on worse information. The costs are:
+
+- it would supersede, in part, an ADR accepted the same day, leaving the registry with two decisions
+  that must be read together to know which governs one path;
+- it depends on a fix to `handle_incoming` that quota did not cause and that sits inside the code
+  #75 must reason about, so #75 would revisit the same function anyway;
+- its measurement is no longer a length but a read of every affected resource's current state, and
+  fact 9 shows that getting that measurement wrong is silent — a zero-byte change adds arbitrary
+  counted bytes;
+- and after all of it the bound is sequential only, because the concurrent bound is obtainable in
+  exactly two ways: #75's own option A, or a session-scoped lock whose stranded-lock failure mode
+  ADR 0003 already rejected for a different option.
+
+Every one of those is an argument that the decision belongs with #75 rather than before it. Doing it
+once, later, reaches a state where ADR 0003's invariants 1, 2 and 3 all hold on this path; doing it
+now reaches a state where invariant 1 holds and 2 and 3 are formally withdrawn from it.
+
+### What this costs, stated because it is not free
+
+The storage quota stays bypassable with a single connection, no concurrency and no privilege, until
+#75's ADR is written and accepted. #75 is inside a critical epic and is tied to a protocol bump, so
+that is not a short wait. This record exists partly so that the wait is a decision on the register
+rather than an oversight.
+
+### What keeplin-srv#75's ADR inherits
+
+It is not obliged to reach the same conclusion. It is obliged not to re-derive these:
+
+1. **The eleven facts** in *What the protocol actually does*, each read out of the tree at
+   `keeplin-srv@7863d23` and `keeplin@1b92f5d`. Facts 1, 2, 3, 9 and 10 were each wrong or missing in
+   an earlier draft of this document and were corrected by review; they are the ones most likely to
+   be assumed rather than checked.
+2. **The prerequisite in part zero.** `handle_incoming` materializes and fans out the submitted slice
+   rather than the inserted subset, and `batch_index` is positional. Any design that filters,
+   reorders or defers a change within a batch is unsound until that is fixed, and the defect is
+   visible today without any quota work: a partially duplicated batch is re-materialized and
+   re-broadcast.
+3. **The four mechanisms** for closing the concurrent race, and why three of them are #75's own
+   options A and B while the fourth trades the race for a stranded session lock.
+4. **The measurement.** The quantity a quota check must compare against the limit is the net change
+   in counted bytes — including resurrection of a tombstoned resource whose blob was retained, and
+   replacement of an existing blob, which may be negative. `data.len()` is that quantity only for a
+   new resource, and `Resource.size` is client-declared and never usable.
+5. **The six options and their costs**, including option 5, which this document rejected only on
+   ownership grounds and which #75 owns. Under a durable projection queue, admitting a change and
+   completing its write when the user frees space is expressible, and it is the best behaviour for a
+   real user. #75 should evaluate it on merit rather than inherit this document's rejection of it.
+6. **The verification plan**, whose rows 2, 3, 7 and 8 pin defects found by review rather than
+   properties assumed by design, and whose row 13 pins a non-guarantee deliberately.
+
+The obligation in *Part four* stands as a request to #75 rather than as a constraint this document
+imposes: the decision that places the blob write should place it in the transaction that decided it,
+so that the quota holds under concurrency rather than only sequentially.
