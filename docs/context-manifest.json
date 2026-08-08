@@ -1851,6 +1851,7 @@
           "fn serializable_participants_form_a_real_ssi_conflict",
           "fn target_principals_are_reverified_inside_every_mutating_transaction",
           "fn revoked_note_guard_is_refused_for_delete_share",
+          "fn transferred_ownership_is_reverified_for_delete_note",
           "fn authorization_reads_observe_transaction_local_state",
           "fn mutating_handlers",
           "fn source_handlers",

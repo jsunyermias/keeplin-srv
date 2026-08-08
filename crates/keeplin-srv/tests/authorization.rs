@@ -381,7 +381,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
-    HandlerInterleaving { handler: "delete_note", transition: "none", outcome: InterleavingOutcome::Exempt("note deletion is owner-only, so a delegated actor is refused by the preliminary guard before the operation checkpoint"), case: None },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -1205,6 +1205,77 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
     assert!(state.store.delete_share(note.id, actor.id).await.unwrap());
     state.http_test_hooks.resume();
     assert_eq!(request.await.unwrap().status(), 403);
+}
+
+// md:fn transferred_ownership_is_reverified_for_delete_note
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "delete-owner@example.com").await;
+    let _new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("delete-new-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete ownership guard", owner.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_note", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let delete_client = client.clone();
+    let delete_token = owner_token.clone();
+    let note_id = note.id;
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &delete_client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{note_id}"),
+            &delete_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_note", "before_operation")
+        .await;
+    let transfer_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(transfer_response.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
 }
 
 // md:fn authorization_reads_observe_transaction_local_state

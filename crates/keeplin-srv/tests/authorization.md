@@ -482,7 +482,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_account", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification and authenticated-identity deletion both occur inside the same operation snapshot"), case: None },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
-    HandlerInterleaving { handler: "delete_note", transition: "none", outcome: InterleavingOutcome::Exempt("note deletion is owner-only, so a delegated actor is refused by the preliminary guard before the operation checkpoint"), case: None },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -1531,13 +1531,102 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
 }
 ```
 
-**What it does** — Pauses `delete_share` before its operation snapshot, revokes the actor's direct grant, and pins the resumed endpoint to refusal status 403. `delete_note` is deliberately absent because deletion is owner-only and a delegated actor cannot pass its preliminary guard; the interleaving inventory records that structural exemption.
+**What it does** — Pauses `delete_share` before its operation snapshot, revokes the actor's direct grant, and pins the resumed endpoint to refusal status 403.
 
 **Dependencies** — `HttpTestHooks::pause_at` and `wait_until_reached` control and identify each handler's pre-operation boundary; expects a missing boundary to fail with that handler's name instead of hanging. `Store::delete_share` commits the guard transition; expects the direct grant to disappear before the handler snapshot.
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_share`.
 
 **Repeated context** — A status disjunction is deliberately forbidden: both entries are pinned to 403.
+
+---
+
+## fn transferred_ownership_is_reverified_for_delete_note
+
+**Identification** — ownership-transition interleaving for note deletion; marker `// md:fn transferred_ownership_is_reverified_for_delete_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transferred_ownership_is_reverified_for_delete_note
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "delete-owner@example.com").await;
+    let _new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("delete-new-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete ownership guard", owner.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_note", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let delete_client = client.clone();
+    let delete_token = owner_token.clone();
+    let note_id = note.id;
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &delete_client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{note_id}"),
+            &delete_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_note", "before_operation")
+        .await;
+    let transfer_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(transfer_response.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+```
+
+**What it does** — Starts an owner-authorized `delete_note`, pauses it at the serializable transaction's `before_operation` checkpoint, commits `transfer_ownership` to a second user, and resumes deletion. It pins the resumed endpoint to HTTP 403 and proves the transferred ownership remains committed, so the former owner cannot delete from a stale preliminary authorization result.
+
+**Dependencies** — `spawn_authorization_state` exposes the production router plus deterministic debug checkpoints; expects `before_operation` to precede every transaction-local authorization read. `register_and_login` creates two authenticated principals; expects each token to preserve its user's identity. `Store::{get_user_by_email, create_note, get_note}` establishes and verifies ownership; expects `owner_id` to be authoritative. `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the two requests; expects transfer to commit while deletion is paused. `authed_json` invokes `delete_note` and `transfer_ownership`; expects both endpoints to exercise their complete production authorization transactions.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_note`; ADR 0002 verification row 3.
+
+**Repeated context** — ADR 0001 invariant 5 binds deletion to `notes.owner_id`; ADR 0002 invariants 1–4 require re-verification against transaction-local current state and the ordinary 403 refusal.
 
 ---
 
@@ -5536,6 +5625,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13c | `fn serializable_participants_form_a_real_ssi_conflict` | `// md:fn serializable_participants_form_a_real_ssi_conflict` |
 | 13d | `fn target_principals_are_reverified_inside_every_mutating_transaction` | `// md:fn target_principals_are_reverified_inside_every_mutating_transaction` |
 | 13e | `fn revoked_note_guard_is_refused_for_delete_share` | `// md:fn revoked_note_guard_is_refused_for_delete_share` |
+| 13f | `fn transferred_ownership_is_reverified_for_delete_note` | `// md:fn transferred_ownership_is_reverified_for_delete_note` |
 | 10 | `fn authorization_reads_observe_transaction_local_state` | `// md:fn authorization_reads_observe_transaction_local_state` |
 | 11 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
 | 11 | `fn relay_materialization_uses_authenticated_session_identity` | `// md:fn relay_materialization_uses_authenticated_session_identity` |
