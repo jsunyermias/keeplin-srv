@@ -324,24 +324,42 @@ impl Store {
 
     // md:impl Store > fn get_user_by_email
     pub async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_user_by_email_on(&mut conn, email).await
+    }
+
+    pub async fn get_user_by_email_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        email: &str,
+    ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE email = $1"#,
         )
         .bind(email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(user)
     }
 
     // md:impl Store > fn get_user_by_id
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_user_by_id_on(&mut conn, id).await
+    }
+
+    pub async fn get_user_by_id_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
                FROM users WHERE id = $1"#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(user)
     }
@@ -868,11 +886,20 @@ impl Store {
 
     // md:impl Store > fn get_note
     pub async fn get_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_note_on(&mut conn, id).await
+    }
+
+    pub async fn get_note_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let mut note = sqlx::query_as::<_, Note>(&format!(
             "SELECT {NOTE_COLS} FROM notes WHERE id = $1 AND deleted_at IS NULL"
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         if let Some(note) = note.as_mut() {
             note.title = self.cipher.decrypt(&note.title)?;
@@ -928,6 +955,16 @@ impl Store {
         id: Uuid,
         patch: &NotePatch,
     ) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.update_note_meta_on(&mut conn, id, patch).await
+    }
+
+    pub async fn update_note_meta_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+        patch: &NotePatch,
+    ) -> Result<Option<Note>, AppError> {
         let enc_title = patch
             .title
             .as_deref()
@@ -953,7 +990,7 @@ impl Store {
         .bind(patch.todo_due.flatten())
         .bind(patch.todo_completed.is_some())
         .bind(patch.todo_completed.flatten())
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         self.decrypt_note_title(note)
     }
@@ -972,24 +1009,44 @@ impl Store {
     // md:impl Store > fn soft_delete_note
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
         let mut tx = self.pool.begin().await?;
+        let note = self.soft_delete_note_on(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    #[doc = "The caller must supply a transaction so the note tombstone and resource cascade commit atomically."]
+    pub async fn soft_delete_note_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
                RETURNING {NOTE_COLS}"#
         ))
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
         if let Some(deleted_at) = note.as_ref().and_then(|n| n.deleted_at) {
-            Self::cascade_resources_note_deleted(&mut *tx, id, deleted_at).await?;
+            Self::cascade_resources_note_deleted(&mut *conn, id, deleted_at).await?;
         }
-        tx.commit().await?;
         self.decrypt_note_title(note)
     }
 
     // md:impl Store > fn set_note_owner
     pub async fn set_note_owner(
         &self,
+        id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.set_note_owner_on(&mut conn, id, new_owner).await
+    }
+
+    pub async fn set_note_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
         id: Uuid,
         new_owner: Uuid,
     ) -> Result<Option<Note>, AppError> {
@@ -1000,7 +1057,7 @@ impl Store {
         ))
         .bind(id)
         .bind(new_owner)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         self.decrypt_note_title(note)
     }
@@ -1008,6 +1065,18 @@ impl Store {
     // md:impl Store > fn create_or_update_share
     pub async fn create_or_update_share(
         &self,
+        note_id: Uuid,
+        user_id: Uuid,
+        capabilities: i32,
+    ) -> Result<NoteShare, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.create_or_update_share_on(&mut conn, note_id, user_id, capabilities)
+            .await
+    }
+
+    pub async fn create_or_update_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
         note_id: Uuid,
         user_id: Uuid,
         capabilities: i32,
@@ -1021,7 +1090,7 @@ impl Store {
         .bind(note_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(share)
     }
@@ -1032,13 +1101,23 @@ impl Store {
         note_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<NoteShare>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_share_on(&mut conn, note_id, user_id).await
+    }
+
+    pub async fn get_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        note_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NoteShare>, AppError> {
         let share = sqlx::query_as::<_, NoteShare>(
             r#"SELECT note_id, user_id, capabilities, created_at
                FROM note_shares WHERE note_id = $1 AND user_id = $2"#,
         )
         .bind(note_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(share)
     }
@@ -1057,22 +1136,41 @@ impl Store {
 
     // md:impl Store > fn delete_share
     pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.delete_share_on(&mut conn, note_id, user_id).await
+    }
+
+    pub async fn delete_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        note_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let deleted: Option<(Uuid,)> = sqlx::query_as(
             "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
         )
         .bind(note_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(deleted.is_some())
     }
 
     // md:impl Store > fn notebook_owner
     pub async fn notebook_owner(&self, notebook_id: Uuid) -> Result<Option<Uuid>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.notebook_owner_on(&mut conn, notebook_id).await
+    }
+
+    pub async fn notebook_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
         let owner: Option<(Uuid,)> =
             sqlx::query_as("SELECT user_id FROM notebooks WHERE id = $1 AND deleted_at IS NULL")
                 .bind(notebook_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(conn)
                 .await?;
         Ok(owner.map(|r| r.0))
     }
@@ -1083,13 +1181,24 @@ impl Store {
         notebook_id: Uuid,
         new_owner: Uuid,
     ) -> Result<Option<Uuid>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.set_notebook_owner_on(&mut conn, notebook_id, new_owner)
+            .await
+    }
+
+    pub async fn set_notebook_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
         let row: Option<(Uuid,)> = sqlx::query_as(
             "UPDATE notebooks SET user_id = $2, updated_at = now()
              WHERE id = $1 AND deleted_at IS NULL RETURNING id",
         )
         .bind(notebook_id)
         .bind(new_owner)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(row.map(|r| r.0))
     }
@@ -1097,6 +1206,17 @@ impl Store {
     // md:impl Store > fn get_notebook_share
     pub async fn get_notebook_share(
         &self,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NotebookShare>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.get_notebook_share_on(&mut conn, notebook_id, user_id)
+            .await
+    }
+
+    pub async fn get_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
         notebook_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<NotebookShare>, AppError> {
@@ -1108,7 +1228,7 @@ impl Store {
         )
         .bind(notebook_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(share)
     }
@@ -1135,6 +1255,18 @@ impl Store {
         user_id: Uuid,
         capabilities: i32,
     ) -> Result<NotebookShare, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.create_or_update_notebook_share_on(&mut conn, notebook_id, user_id, capabilities)
+            .await
+    }
+
+    pub async fn create_or_update_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        user_id: Uuid,
+        capabilities: i32,
+    ) -> Result<NotebookShare, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
             r#"INSERT INTO notebook_shares (notebook_id, user_id, capabilities)
                VALUES ($1, $2, $3)
@@ -1144,7 +1276,7 @@ impl Store {
         .bind(notebook_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(share)
     }
@@ -1155,12 +1287,23 @@ impl Store {
         notebook_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.delete_notebook_share_on(&mut conn, notebook_id, user_id)
+            .await
+    }
+
+    pub async fn delete_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let deleted: Option<(Uuid,)> = sqlx::query_as(
             "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
         )
             .bind(notebook_id)
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(conn)
             .await?;
         Ok(deleted.is_some())
     }
@@ -1168,6 +1311,16 @@ impl Store {
     // md:impl Store > fn inherited_note_principals
     pub async fn inherited_note_principals(
         &self,
+        notebook_id: Uuid,
+    ) -> Result<Vec<(Uuid, i32)>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.inherited_note_principals_on(&mut conn, notebook_id)
+            .await
+    }
+
+    pub async fn inherited_note_principals_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
         notebook_id: Uuid,
     ) -> Result<Vec<(Uuid, i32)>, AppError> {
         let rows = sqlx::query_as::<_, (Uuid, i32)>(
@@ -1180,7 +1333,7 @@ impl Store {
         )
         .bind(notebook_id)
         .bind(crate::permissions::Capabilities::ALL)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await?;
         Ok(rows)
     }
@@ -2015,10 +2168,21 @@ impl Store {
         resource_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.resource_owned_by_on(&mut conn, resource_id, user_id)
+            .await
+    }
+
+    pub async fn resource_owned_by_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        resource_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let row = sqlx::query("SELECT 1 FROM resources WHERE id = $1 AND user_id = $2")
             .bind(resource_id)
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(conn)
             .await?;
         Ok(row.is_some())
     }
@@ -2054,6 +2218,17 @@ impl Store {
         limit: Option<i64>,
         cursor: Option<PageCursor>,
     ) -> Result<Vec<Tag>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.list_tags_on(&mut conn, user_id, limit, cursor).await
+    }
+
+    pub async fn list_tags_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        limit: Option<i64>,
+        cursor: Option<PageCursor>,
+    ) -> Result<Vec<Tag>, AppError> {
         let (cur_ts, cur_id) = split_cursor(cursor);
         Ok(sqlx::query_as::<_, Tag>(
             "SELECT id, title, created_at, updated_at, deleted_at, system
@@ -2067,7 +2242,7 @@ impl Store {
         .bind(limit.unwrap_or(i64::MAX))
         .bind(cur_ts)
         .bind(cur_id)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await?)
     }
 
@@ -2188,6 +2363,17 @@ impl Store {
         user_id: Uuid,
         exclude: Uuid,
     ) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.user_blob_bytes_excluding_on(&mut conn, user_id, exclude)
+            .await
+    }
+
+    pub async fn user_blob_bytes_excluding_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        exclude: Uuid,
+    ) -> Result<i64, AppError> {
         let bytes: i64 = sqlx::query_scalar(
             r#"SELECT COALESCE(SUM(octet_length(rb.data)), 0)::bigint
                FROM resource_blobs rb
@@ -2196,7 +2382,7 @@ impl Store {
         )
         .bind(user_id)
         .bind(exclude)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(bytes)
     }
@@ -2214,11 +2400,21 @@ impl Store {
 
     // md:impl Store > fn count_live_notes_in_notebook
     pub async fn count_live_notes_in_notebook(&self, notebook_id: Uuid) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.count_live_notes_in_notebook_on(&mut conn, notebook_id)
+            .await
+    }
+
+    pub async fn count_live_notes_in_notebook_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+    ) -> Result<i64, AppError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes WHERE notebook_id = $1 AND deleted_at IS NULL",
         )
         .bind(notebook_id)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(count)
     }

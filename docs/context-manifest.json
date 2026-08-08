@@ -1807,6 +1807,21 @@
             "basis": "authored-invariant",
             "origin": "INFERRED",
             "value": "Existing foreign and absent IDs produce indistinguishable mutation outcomes."
+          },
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "every resolver query remains on that connection."
+          },
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "no implementation silently falls back to the pool."
+          },
+          {
+            "basis": "dependency-expectation",
+            "origin": "INFERRED",
+            "value": "rollback removes all fixture writes."
           }
         ]
       },
@@ -1819,6 +1834,11 @@
           "impl CapturedLogs",
           "fn capturing_subscriber",
           "authorization_case_inventory",
+          "fn handler_authorization_inventory_covers_router",
+          "fn authorization_reads_never_fall_back_to_the_pool",
+          "fn owner_note_access_does_not_acquire_a_connection",
+          "fn serializable_invariant_inventory_is_exact_and_deferred",
+          "fn authorization_reads_observe_transaction_local_state",
           "fn mutating_handlers",
           "fn source_handlers",
           "fn route_registration_is_confined_to_router",
