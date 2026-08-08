@@ -81,7 +81,7 @@ pub struct Note {
 }
 
 // md:NotePatch
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NotePatch {
     pub title: Option<String>,
     pub notebook_id: Option<Option<Uuid>>,

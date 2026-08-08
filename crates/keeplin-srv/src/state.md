@@ -58,6 +58,136 @@ coordinated only by the Postgres `LISTEN/NOTIFY` bus (`bus.rs`, issue #45).
 
 ---
 
+## HttpTestHooks
+
+**Identification** — debug-build-only deterministic HTTP mutation test controls; marker `// md:HttpTestHooks`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:HttpTestHooks
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub struct HttpTestHooks {
+    pause: tokio::sync::Mutex<Option<(&'static str, &'static str)>>,
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    serialization_failures: std::sync::atomic::AtomicUsize,
+    fail_after_mutation: std::sync::atomic::AtomicBool,
+    attempts: std::sync::atomic::AtomicUsize,
+    commits: std::sync::atomic::AtomicUsize,
+    exhausted: std::sync::atomic::AtomicUsize,
+    external_effects: std::sync::atomic::AtomicUsize,
+}
+```
+
+**What it does** — Stores per-application pause coordination, injected failure counts, and observations for authorization mutation tests. `#[cfg(debug_assertions)]` excludes the type and every hook field from release builds mechanically. Its state belongs to one `AppState`, preventing unrelated test servers from sharing controls.
+
+**Dependencies** — `tokio::sync::Mutex` and `Notify` coordinate checkpoints; expects notifications to retain permits across deterministic test scheduling. Atomic values count attempts, commits, exhaustion, effects, and consume configured failures; expects sequentially consistent observations.
+
+**Used by** — `http.rs::serializable`, `http.rs::update_note`, `http.rs::notify_access_revoked`, and authorization integration tests.
+
+**Repeated context** — This seam can schedule server code and inject real PostgreSQL SQLSTATE `40001`; it cannot emulate an operating-system crash, network partition, or organic SSI dependency graph.
+
+---
+
+## impl HttpTestHooks
+
+**Identification** — cohesive control and observation API for `HttpTestHooks`; marker `// md:impl HttpTestHooks`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:impl HttpTestHooks
+#[cfg(debug_assertions)]
+impl HttpTestHooks {
+    pub async fn pause_at(&self, handler: &'static str, point: &'static str) {
+        *self.pause.lock().await = Some((handler, point));
+    }
+
+    pub async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    pub fn inject_serialization_failures(&self, count: usize) {
+        self.serialization_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn inject_failure_after_mutation(&self) {
+        self.fail_after_mutation
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn observations(&self) -> (usize, usize, usize, usize) {
+        (
+            self.attempts.load(std::sync::atomic::Ordering::SeqCst),
+            self.commits.load(std::sync::atomic::Ordering::SeqCst),
+            self.exhausted.load(std::sync::atomic::Ordering::SeqCst),
+            self.external_effects
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    pub(crate) async fn checkpoint(&self, handler: &'static str, point: &'static str) {
+        if *self.pause.lock().await == Some((handler, point)) {
+            self.reached.notify_one();
+            self.resume.notified().await;
+            *self.pause.lock().await = None;
+        }
+    }
+
+    pub(crate) fn begin_attempt(&self) {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn should_inject_serialization_failure(&self) -> bool {
+        self.serialization_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn should_fail_after_mutation(&self) -> bool {
+        self.fail_after_mutation
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn committed(&self) {
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn exhausted(&self) {
+        self.exhausted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn external_effect(&self) {
+        self.external_effects
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+```
+
+**What it does** — Arms and releases one named checkpoint, consumes configured post-mutation and serialization failures, and exposes exact attempt, commit, exhaustion, and external-effect counts. Production code can invoke the crate-private half only in debug builds; integration tests use the public configuration and observation half.
+
+**Dependencies** — `Notify::notified` and `notify_one` provide deterministic handoff; expects one armed checkpoint at a time. Atomic `fetch_update`, `swap`, `fetch_add`, `load`, and `store` consume injections and preserve exact counters; expects tests to compare deltas when reusing a state.
+
+**Used by** — the eight serializable mutation handlers through `serializable`, the move seam, and `serializable_move_interleaving_and_failure_evidence`.
+
+**Repeated context** — Release-build exclusion is an enforced compilation boundary, not a naming convention or runtime setting.
+
+---
+
 ## AppState
 
 **Identification** — struct; marker `// md:AppState`.
@@ -74,10 +204,12 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub instance_id: Uuid,
     pub mailer: crate::mail::Mailer,
+    #[cfg(debug_assertions)]
+    pub http_test_hooks: HttpTestHooks,
 }
 ```
 
-**What it does** — The shared handler context. Field by field:
+**What it does** — The shared handler context. Release builds contain the seven ordinary fields below; debug builds add the mechanically conditional `http_test_hooks` evidence seam. Field by field:
 
 - `config: Config` — the process settings loaded from environment variables at startup
   (`config.rs`); read-only after boot.
@@ -99,6 +231,7 @@ pub struct AppState {
 - `mailer: crate::mail::Mailer` — delegated email delivery via the operator's mail
   webhook (issue #49); when `MAIL_WEBHOOK_URL` is unset the mailer is disabled and the
   email flows answer `501` (explicit deferral, never silent mail loss).
+- `http_test_hooks: HttpTestHooks` — debug-build-only, per-state deterministic mutation scheduling, failure injection, and observation. The field does not exist when `debug_assertions` is disabled.
 
 **Dependencies** — the types of its seven fields: `Config` (`config.rs`), `Store`
 (`store.rs`), `SyncHub` (`sync.rs`), `CollabRegistry` (`collab.rs`), `RateLimiter`
@@ -160,6 +293,8 @@ behaviour lives in the subsystems it holds.
             rate_limiter,
             instance_id: Uuid::new_v4(),
             mailer,
+            #[cfg(debug_assertions)]
+            http_test_hooks: HttpTestHooks::default(),
         }
     }
 ```
@@ -242,6 +377,8 @@ carrying its marker in the code:
 | # | Block (source order) | Marker in code | Documented in section |
 |---|----------------------|----------------|-----------------------|
 | 1 | imports (`use …`) | `// md:Overview` | Overview |
-| 2 | `struct AppState` | `// md:AppState` | AppState |
-| 3 | `impl AppState` | `// md:impl AppState` | impl AppState |
-| 4 | `fn new` | `// md:impl AppState > fn new` | impl AppState › fn new |
+| 2 | `struct HttpTestHooks` | `// md:HttpTestHooks` | HttpTestHooks |
+| 3 | `impl HttpTestHooks` | `// md:impl HttpTestHooks` | impl HttpTestHooks |
+| 4 | `struct AppState` | `// md:AppState` | AppState |
+| 5 | `impl AppState` | `// md:impl AppState` | impl AppState |
+| 6 | `fn new` | `// md:impl AppState > fn new` | impl AppState › fn new |

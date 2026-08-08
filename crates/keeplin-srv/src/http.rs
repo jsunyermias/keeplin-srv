@@ -10,19 +10,104 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     auth::{self, AuthedUser},
     error::{AppError, MoveBlockedCount},
-    permissions::{resolve_note_access, resolve_notebook_access, Capabilities},
+    permissions::{
+        resolve_note_access, resolve_note_access_on, resolve_notebook_access,
+        resolve_notebook_access_on, Capabilities,
+    },
     state::AppState,
     store::{Note, NoteShare, NotebookShare, PageCursor, User, UserDevice},
 };
 
 // md:MAX_PAGE_LIMIT
 const MAX_PAGE_LIMIT: i64 = 500;
+
+// md:SERIALIZABLE_MAX_ATTEMPTS
+const SERIALIZABLE_MAX_ATTEMPTS: usize = 3;
+
+// md:fn is_serialization_failure
+fn is_serialization_failure(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Database(sqlx::Error::Database(database))
+            if database.code().as_deref() == Some("40001")
+    )
+}
+
+// md:fn serializable
+async fn serializable<T, F>(
+    state: Arc<AppState>,
+    _handler: &'static str,
+    operation: F,
+) -> Result<T, AppError>
+where
+    F: for<'a> Fn(Arc<AppState>, &'a mut sqlx::PgConnection) -> BoxFuture<'a, Result<T, AppError>>,
+{
+    for attempt in 1..=SERIALIZABLE_MAX_ATTEMPTS {
+        #[cfg(debug_assertions)]
+        state.http_test_hooks.begin_attempt();
+        let mut transaction = state.store.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *transaction)
+            .await?;
+        let result = operation(state.clone(), &mut transaction).await;
+        #[cfg(debug_assertions)]
+        let mut result = result;
+        #[cfg(debug_assertions)]
+        if result.is_ok() {
+            state
+                .http_test_hooks
+                .checkpoint(_handler, "after_mutation")
+                .await;
+            if state.http_test_hooks.should_fail_after_mutation() {
+                result = Err(AppError::Internal("injected post-mutation failure".into()));
+            } else if state.http_test_hooks.should_inject_serialization_failure() {
+                result = sqlx::query("DO $$ BEGIN RAISE EXCEPTION USING ERRCODE = '40001'; END $$")
+                    .execute(&mut *transaction)
+                    .await
+                    .map(|_| unreachable!())
+                    .map_err(AppError::from);
+            }
+        }
+        match result {
+            Ok(value) => match transaction.commit().await {
+                Ok(()) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        state.http_test_hooks.committed();
+                        state
+                            .http_test_hooks
+                            .checkpoint(_handler, "after_commit")
+                            .await;
+                    }
+                    return Ok(value);
+                }
+                Err(error)
+                    if error.as_database_error().and_then(|e| e.code()).as_deref()
+                        == Some("40001") => {}
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if is_serialization_failure(&error) => {}
+            Err(error) => return Err(error),
+        }
+        if attempt == SERIALIZABLE_MAX_ATTEMPTS {
+            #[cfg(debug_assertions)]
+            state.http_test_hooks.exhausted();
+            tracing::error!(
+                attempts = attempt,
+                "serializable transaction retry exhausted"
+            );
+            return Err(AppError::ServiceUnavailable);
+        }
+    }
+    unreachable!()
+}
 
 // md:ListQuery
 #[derive(Debug, Deserialize)]
@@ -908,6 +993,32 @@ async fn inherited_capabilities(
     )
 }
 
+// md:fn inherited_capabilities_on
+async fn inherited_capabilities_on(
+    state: &AppState,
+    conn: &mut sqlx::PgConnection,
+    notebook_id: Option<Uuid>,
+    principal: Uuid,
+) -> Result<i32, AppError> {
+    let Some(notebook_id) = notebook_id else {
+        return Ok(0);
+    };
+    let bits = if state.store.notebook_owner_on(conn, notebook_id).await? == Some(principal) {
+        Capabilities::ALL
+    } else {
+        state
+            .store
+            .get_notebook_share_on(conn, notebook_id, principal)
+            .await?
+            .map(|share| share.capabilities)
+            .unwrap_or(0)
+    };
+    Ok(
+        Capabilities::from_bits(bits).bits()
+            & state.config.permission_scheme.notebook_inheritance(),
+    )
+}
+
 // md:fn notify_access_revoked
 async fn notify_access_revoked(
     state: &AppState,
@@ -915,6 +1026,8 @@ async fn notify_access_revoked(
     resource_kind: &str,
     resource_id: Uuid,
 ) {
+    #[cfg(debug_assertions)]
+    state.http_test_hooks.external_effect();
     let user = match state.store.get_user_by_id(principal).await {
         Ok(Some(user)) => user,
         Ok(None) => {
@@ -1002,11 +1115,16 @@ async fn update_note(
             let destination = patch.notebook_id.flatten();
             let mut named_principals = Vec::new();
             let mut unenumerable_count = 0;
-            for (principal, inherited_bits) in state
+            let inherited_principals = state
                 .store
                 .inherited_note_principals(source_notebook)
-                .await?
-            {
+                .await?;
+            #[cfg(debug_assertions)]
+            state
+                .http_test_hooks
+                .checkpoint("update_note", "after_early_move_guard")
+                .await;
+            for (principal, inherited_bits) in inherited_principals {
                 if principal == user.user_id {
                     continue;
                 }
@@ -1064,14 +1182,149 @@ async fn update_note(
             )));
         }
     }
-    let note = state
-        .store
-        .update_note_meta(id, &patch)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    if ejection && note.owner_id != user.user_id {
-        notify_after_move.push(note.owner_id);
-    }
+    let (note, transactional_notices) =
+        serializable(state.clone(), "update_note", |state, conn| {
+            let patch = patch.clone();
+            Box::pin(async move {
+                let note = state
+                    .store
+                    .get_note_on(conn, id)
+                    .await?
+                    .ok_or(AppError::NotFound)?;
+                let access = resolve_note_access_on(
+                    &state.store,
+                    conn,
+                    &note,
+                    user.user_id,
+                    state.config.permission_scheme,
+                )
+                .await?;
+                if !access.can_write() {
+                    return Err(AppError::Forbidden);
+                }
+                let moved_into = match &patch.notebook_id {
+                    Some(Some(notebook_id)) if note.notebook_id != Some(*notebook_id) => {
+                        Some(*notebook_id)
+                    }
+                    _ => None,
+                };
+                let moved =
+                    patch.notebook_id.is_some() && patch.notebook_id != Some(note.notebook_id);
+                let source_notebook = note.notebook_id;
+                let source_notebook_owner = match source_notebook {
+                    Some(notebook_id) => state.store.notebook_owner_on(conn, notebook_id).await?,
+                    None => None,
+                };
+                let ejection = moved
+                    && patch.notebook_id == Some(None)
+                    && source_notebook_owner == Some(user.user_id);
+                if moved
+                    && note.owner_id != user.user_id
+                    && !(ejection && state.config.permission_scheme.foreign_note_ejection())
+                {
+                    return Err(AppError::Forbidden);
+                }
+                let mut notices = Vec::new();
+                if moved && state.config.permission_scheme.move_out_guard() {
+                    if let Some(source_notebook) = source_notebook {
+                        let controls_source = source_notebook_owner == Some(user.user_id);
+                        let can_enumerate_source = if controls_source {
+                            true
+                        } else {
+                            resolve_notebook_access_on(
+                                &state.store,
+                                conn,
+                                source_notebook,
+                                user.user_id,
+                            )
+                            .await
+                            .map(|access| access.caps.can_share_read())
+                            .unwrap_or(false)
+                        };
+                        let destination = patch.notebook_id.flatten();
+                        let mut named_principals = Vec::new();
+                        let mut unenumerable_count = 0;
+                        for (principal, inherited_bits) in state
+                            .store
+                            .inherited_note_principals_on(conn, source_notebook)
+                            .await?
+                        {
+                            if principal == user.user_id {
+                                continue;
+                            }
+                            let direct_bits = state
+                                .store
+                                .get_share_on(conn, note.id, principal)
+                                .await?
+                                .map(|share| share.capabilities)
+                                .unwrap_or(0);
+                            let source_bits = Capabilities::from_bits(inherited_bits).bits()
+                                & state.config.permission_scheme.notebook_inheritance();
+                            let destination_bits =
+                                inherited_capabilities_on(&state, conn, destination, principal)
+                                    .await?;
+                            let before = Capabilities::from_bits(direct_bits | source_bits);
+                            let after = Capabilities::from_bits(direct_bits | destination_bits);
+                            if before.bits() != after.bits() && (before.bits() & !after.bits()) != 0
+                            {
+                                if controls_source {
+                                    if can_enumerate_source {
+                                        named_principals.push(principal);
+                                    } else {
+                                        unenumerable_count += 1;
+                                    }
+                                } else {
+                                    notices.push(principal);
+                                }
+                            }
+                        }
+                        if !named_principals.is_empty() {
+                            named_principals.sort_unstable();
+                            named_principals.dedup();
+                            return Err(AppError::MoveBlocked {
+                                named_principals,
+                                counted_principals: (unenumerable_count > 0)
+                                    .then_some(MoveBlockedCount {
+                                        notebook_id: source_notebook,
+                                        count: unenumerable_count,
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+                if let Some(notebook_id) = moved_into {
+                    let destination_access =
+                        resolve_notebook_access_on(&state.store, conn, notebook_id, user.user_id)
+                            .await?;
+                    if !destination_access.can_write() {
+                        return Err(AppError::Forbidden);
+                    }
+                    let live = state
+                        .store
+                        .count_live_notes_in_notebook_on(conn, notebook_id)
+                        .await?;
+                    if live >= keeplin_core::format::MAX_NOTES_PER_NOTEBOOK as i64 {
+                        return Err(AppError::PayloadTooLarge(format!(
+                            "notebook already holds the format limit of {} notes",
+                            keeplin_core::format::MAX_NOTES_PER_NOTEBOOK
+                        )));
+                    }
+                }
+                let updated = state
+                    .store
+                    .update_note_meta_on(conn, id, &patch)
+                    .await?
+                    .ok_or(AppError::NotFound)?;
+                if ejection && updated.owner_id != user.user_id {
+                    notices.push(updated.owner_id);
+                }
+                Ok((updated, notices))
+            })
+        })
+        .await?;
+    notify_after_move = transactional_notices;
     notify_after_move.sort_unstable();
     notify_after_move.dedup();
     for principal in notify_after_move {
@@ -1097,11 +1350,32 @@ async fn delete_note(
     if !access.can_delete() {
         return Err(AppError::Forbidden);
     }
-    let note = state
-        .store
-        .soft_delete_note(id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let note = serializable(state.clone(), "delete_note", |state, conn| {
+        Box::pin(async move {
+            let note = state
+                .store
+                .get_note_on(conn, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let access = resolve_note_access_on(
+                &state.store,
+                conn,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
+            if !access.can_delete() {
+                return Err(AppError::Forbidden);
+            }
+            state
+                .store
+                .soft_delete_note_on(conn, id)
+                .await?
+                .ok_or(AppError::NotFound)
+        })
+    })
+    .await?;
     Ok(Json(note))
 }
 
@@ -1158,10 +1432,37 @@ async fn create_share(
     if target.id == note.owner_id {
         return Err(AppError::BadRequest("owner already has access".into()));
     }
-    let share = state
-        .store
-        .create_or_update_share(id, target.id, requested.bits())
-        .await?;
+    let target_id = target.id;
+    let share = serializable(state.clone(), "create_share", |state, conn| {
+        Box::pin(async move {
+            let note = state
+                .store
+                .get_note_on(conn, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let access = resolve_note_access_on(
+                &state.store,
+                conn,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
+            if !access.can_share_write()
+                || requested.bits() & access.caps.bits() != requested.bits()
+            {
+                return Err(AppError::Forbidden);
+            }
+            if target_id == note.owner_id {
+                return Err(AppError::BadRequest("owner already has access".into()));
+            }
+            state
+                .store
+                .create_or_update_share_on(conn, id, target_id, requested.bits())
+                .await
+        })
+    })
+    .await?;
     Ok(Json(share))
 }
 
@@ -1206,7 +1507,28 @@ async fn delete_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    let deleted = state.store.delete_share(note_id, target_id).await?;
+    let deleted = serializable(state.clone(), "delete_share", |state, conn| {
+        Box::pin(async move {
+            let note = state
+                .store
+                .get_note_on(conn, note_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let access = resolve_note_access_on(
+                &state.store,
+                conn,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
+            if !access.can_share_write() && target_id != user.user_id {
+                return Err(AppError::Forbidden);
+            }
+            state.store.delete_share_on(conn, note_id, target_id).await
+        })
+    })
+    .await?;
     if deleted && target_id != user.user_id {
         notify_access_revoked(&state, target_id, "note", note_id).await;
     }
@@ -1253,12 +1575,34 @@ async fn transfer_ownership(
         }
     }
     .ok_or(AppError::NotFound)?;
-    state.store.delete_share(id, target.id).await?;
-    let note = state
-        .store
-        .set_note_owner(id, target.id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let target_id = target.id;
+    let note = serializable(state.clone(), "transfer_ownership", |state, conn| {
+        Box::pin(async move {
+            let note = state
+                .store
+                .get_note_on(conn, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let access = resolve_note_access_on(
+                &state.store,
+                conn,
+                &note,
+                user.user_id,
+                state.config.permission_scheme,
+            )
+            .await?;
+            if !access.can_transfer_ownership() {
+                return Err(AppError::Forbidden);
+            }
+            state.store.delete_share_on(conn, id, target_id).await?;
+            state
+                .store
+                .set_note_owner_on(conn, id, target_id)
+                .await?
+                .ok_or(AppError::NotFound)
+        })
+    })
+    .await?;
     Ok(Json(note))
 }
 
@@ -1314,10 +1658,30 @@ async fn create_notebook_share(
     if target.id == owner {
         return Err(AppError::BadRequest("owner already has access".into()));
     }
-    let share = state
-        .store
-        .create_or_update_notebook_share(id, target.id, requested.bits())
-        .await?;
+    let target_id = target.id;
+    let share = serializable(state.clone(), "create_notebook_share", |state, conn| {
+        Box::pin(async move {
+            let access = resolve_notebook_access_on(&state.store, conn, id, user.user_id).await?;
+            if !access.can_share_write()
+                || requested.bits() & access.caps.bits() != requested.bits()
+            {
+                return Err(AppError::Forbidden);
+            }
+            let owner = state
+                .store
+                .notebook_owner_on(conn, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if target_id == owner {
+                return Err(AppError::BadRequest("owner already has access".into()));
+            }
+            state
+                .store
+                .create_or_update_notebook_share_on(conn, id, target_id, requested.bits())
+                .await
+        })
+    })
+    .await?;
     Ok(Json(share))
 }
 
@@ -1344,10 +1708,20 @@ async fn delete_notebook_share(
     if !access.can_share_write() && target_id != user.user_id {
         return Err(AppError::Forbidden);
     }
-    let deleted = state
-        .store
-        .delete_notebook_share(notebook_id, target_id)
-        .await?;
+    let deleted = serializable(state.clone(), "delete_notebook_share", |state, conn| {
+        Box::pin(async move {
+            let access =
+                resolve_notebook_access_on(&state.store, conn, notebook_id, user.user_id).await?;
+            if !access.can_share_write() && target_id != user.user_id {
+                return Err(AppError::Forbidden);
+            }
+            state
+                .store
+                .delete_notebook_share_on(conn, notebook_id, target_id)
+                .await
+        })
+    })
+    .await?;
     if deleted && target_id != user.user_id {
         notify_access_revoked(&state, target_id, "notebook", notebook_id).await;
     }
@@ -1366,12 +1740,26 @@ async fn transfer_notebook(
         return Err(AppError::Forbidden);
     }
     let target = resolve_target(&state, body.user_id, &body.user_email).await?;
-    state
-        .store
-        .set_notebook_owner(id, target.id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    state.store.delete_notebook_share(id, target.id).await?;
+    let target_id = target.id;
+    serializable(state.clone(), "transfer_notebook", |state, conn| {
+        Box::pin(async move {
+            let access = resolve_notebook_access_on(&state.store, conn, id, user.user_id).await?;
+            if !access.can_transfer_ownership() {
+                return Err(AppError::Forbidden);
+            }
+            state
+                .store
+                .set_notebook_owner_on(conn, id, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            state
+                .store
+                .delete_notebook_share_on(conn, id, target_id)
+                .await?;
+            Ok(())
+        })
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({ "ok": true, "owner_id": target.id }),
     ))

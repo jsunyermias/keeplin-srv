@@ -51,6 +51,9 @@ pub enum AppError {
     #[error("too many attempts; try again later")]
     TooManyAttempts,
 
+    #[error("service temporarily unavailable")]
+    ServiceUnavailable,
+
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
@@ -74,6 +77,7 @@ impl AppError {
             AppError::QuotaExceeded(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::TooManyAttempts => StatusCode::TOO_MANY_REQUESTS,
+            AppError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             AppError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
