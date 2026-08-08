@@ -260,7 +260,7 @@ For a move, this means the source notebook is the note's `notebook_id` re-read b
 the proposed destination. The existing row-1 interleaving test would catch the naive behavior that
 mutates first and then derives the source from the moved note.
 
-The proposed invariants are:
+The invariants are:
 
 1. No authorization-gated HTTP operation completes solely on an authorization or policy fact read
    outside its operation transaction.
