@@ -1968,6 +1968,16 @@ pub struct Store {
         id: Uuid,
         patch: &NotePatch,
     ) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.update_note_meta_on(&mut conn, id, patch).await
+    }
+
+    pub async fn update_note_meta_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+        patch: &NotePatch,
+    ) -> Result<Option<Note>, AppError> {
         let enc_title = patch
             .title
             .as_deref()
@@ -1993,13 +2003,13 @@ pub struct Store {
         .bind(patch.todo_due.flatten())
         .bind(patch.todo_completed.is_some())
         .bind(patch.todo_completed.flatten())
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         self.decrypt_note_title(note)
     }
 ```
 
-**What it does** — apply a `NotePatch`: `COALESCE`/`CASE` binds so an absent field is untouched while an explicit null clears a nullable column; bumps `updated_at`; title encrypted on the way in.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form, which applies a `NotePatch` with one copy of the query. `COALESCE`/`CASE` binds leave absent fields untouched while explicit null clears a nullable column; the write bumps `updated_at` and encrypts the title on the way in.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2044,23 +2054,32 @@ pub struct Store {
     // md:impl Store > fn soft_delete_note
     pub async fn soft_delete_note(&self, id: Uuid) -> Result<Option<Note>, AppError> {
         let mut tx = self.pool.begin().await?;
+        let note = self.soft_delete_note_on(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    pub async fn soft_delete_note_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET deleted_at = now(), updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
                RETURNING {NOTE_COLS}"#
         ))
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
         if let Some(deleted_at) = note.as_ref().and_then(|n| n.deleted_at) {
-            Self::cascade_resources_note_deleted(&mut *tx, id, deleted_at).await?;
+            Self::cascade_resources_note_deleted(&mut *conn, id, deleted_at).await?;
         }
-        tx.commit().await?;
         self.decrypt_note_title(note)
     }
 ```
 
-**What it does** — tombstone (sets `deleted_at`, bumps `updated_at`). **Delete cascade (issue
+**What it does** — The pool-backed form retains its existing transaction boundary: begin, invoke the executor-aware form for both statements, then commit. The `_on` form tombstones the note (sets `deleted_at`, bumps `updated_at`) and cascades on the supplied connection; callers of `_on` supply the transaction when those statements must be atomic. **Delete cascade (issue
 #125, D5):** in the same transaction, if a live note was tombstoned, every live attachment of
 that note is stamped with the note's `deleted_at` via `cascade_resources_note_deleted` — this is
 the server-side hook where the note delete is applied.
@@ -2084,6 +2103,16 @@ the server-side hook where the note delete is applied.
         id: Uuid,
         new_owner: Uuid,
     ) -> Result<Option<Note>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.set_note_owner_on(&mut conn, id, new_owner).await
+    }
+
+    pub async fn set_note_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Note>, AppError> {
         let note = sqlx::query_as::<_, Note>(&format!(
             r#"UPDATE notes SET owner_id = $2, updated_at = now()
                WHERE id = $1 AND deleted_at IS NULL
@@ -2091,13 +2120,13 @@ the server-side hook where the note delete is applied.
         ))
         .bind(id)
         .bind(new_owner)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         self.decrypt_note_title(note)
     }
 ```
 
-**What it does** — ownership transfer (owner-only, enforced at the HTTP layer); ownership is separate from grants.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form for the same single ownership-update query. Ownership transfer remains owner-only at the HTTP layer and ownership stays separate from grants.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2119,6 +2148,18 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
         capabilities: i32,
     ) -> Result<NoteShare, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.create_or_update_share_on(&mut conn, note_id, user_id, capabilities)
+            .await
+    }
+
+    pub async fn create_or_update_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        note_id: Uuid,
+        user_id: Uuid,
+        capabilities: i32,
+    ) -> Result<NoteShare, AppError> {
         let share = sqlx::query_as::<_, NoteShare>(
             r#"INSERT INTO note_shares (note_id, user_id, capabilities)
                VALUES ($1, $2, $3)
@@ -2128,13 +2169,13 @@ the server-side hook where the note delete is applied.
         .bind(note_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(share)
     }
 ```
 
-**What it does** — upsert a grant (bitmask arrives normalised and capped from `http.rs`).
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form, which performs the single grant-upsert query. The bitmask arrives normalised and capped from `http.rs`.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2222,18 +2263,28 @@ the server-side hook where the note delete is applied.
 ```rust
     // md:impl Store > fn delete_share
     pub async fn delete_share(&self, note_id: Uuid, user_id: Uuid) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.delete_share_on(&mut conn, note_id, user_id).await
+    }
+
+    pub async fn delete_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        note_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let deleted: Option<(Uuid,)> = sqlx::query_as(
             "DELETE FROM note_shares WHERE note_id = $1 AND user_id = $2 RETURNING note_id",
         )
         .bind(note_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(deleted.is_some())
     }
 ```
 
-**What it does** — Deletes one direct note share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form. The shared query deletes one direct note share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2289,19 +2340,30 @@ the server-side hook where the note delete is applied.
         notebook_id: Uuid,
         new_owner: Uuid,
     ) -> Result<Option<Uuid>, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.set_notebook_owner_on(&mut conn, notebook_id, new_owner)
+            .await
+    }
+
+    pub async fn set_notebook_owner_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        new_owner: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
         let row: Option<(Uuid,)> = sqlx::query_as(
             "UPDATE notebooks SET user_id = $2, updated_at = now()
              WHERE id = $1 AND deleted_at IS NULL RETURNING id",
         )
         .bind(notebook_id)
         .bind(new_owner)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await?;
         Ok(row.map(|r| r.0))
     }
 ```
 
-**What it does** — transfer; the caller re-cascades separately.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form for the same single ownership update; related caller operations remain separate.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2400,6 +2462,18 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
         capabilities: i32,
     ) -> Result<NotebookShare, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.create_or_update_notebook_share_on(&mut conn, notebook_id, user_id, capabilities)
+            .await
+    }
+
+    pub async fn create_or_update_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        user_id: Uuid,
+        capabilities: i32,
+    ) -> Result<NotebookShare, AppError> {
         let share = sqlx::query_as::<_, NotebookShare>(
             r#"INSERT INTO notebook_shares (notebook_id, user_id, capabilities)
                VALUES ($1, $2, $3)
@@ -2409,13 +2483,13 @@ the server-side hook where the note delete is applied.
         .bind(notebook_id)
         .bind(user_id)
         .bind(capabilities)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(share)
     }
 ```
 
-**What it does** — upsert the grant **and** run the destructive cascade onto every child note, in one transaction.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form, which performs the same single notebook-grant upsert. No transaction boundary is added in this phase.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
@@ -2436,18 +2510,29 @@ the server-side hook where the note delete is applied.
         notebook_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.delete_notebook_share_on(&mut conn, notebook_id, user_id)
+            .await
+    }
+
+    pub async fn delete_notebook_share_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        notebook_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
         let deleted: Option<(Uuid,)> = sqlx::query_as(
             "DELETE FROM notebook_shares WHERE notebook_id = $1 AND user_id = $2 RETURNING notebook_id",
         )
             .bind(notebook_id)
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(conn)
             .await?;
         Ok(deleted.is_some())
     }
 ```
 
-**What it does** — Deletes one notebook share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
+**What it does** — The pool-backed form acquires a connection and forwards to the executor-aware form. The shared query deletes one notebook share and returns `true` only when a row was actually removed, allowing callers to suppress phantom revocation notices.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 

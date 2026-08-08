@@ -701,10 +701,31 @@ async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
         .create_note(None, "transaction seam", owner.id)
         .await
         .unwrap();
+    let direct_note = store
+        .create_note(None, "direct transaction seam", owner.id)
+        .await
+        .unwrap();
     let notebook_id = Uuid::new_v4();
     let resource_id = Uuid::new_v4();
     let transaction_user_id = Uuid::new_v4();
     let mut tx = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO note_shares (note_id, user_id, capabilities) VALUES ($1, $2, $3)")
+        .bind(direct_note.id)
+        .bind(member.id)
+        .bind(Capabilities::WRITE)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(resolve_note_access_on(
+        &store,
+        &mut tx,
+        &direct_note,
+        member.id,
+        PermissionScheme::Strict,
+    )
+    .await
+    .unwrap()
+    .can_write());
     sqlx::query(
         "INSERT INTO notebooks (id, user_id, title, created_at, updated_at, vv, last_writer)
          VALUES ($1, $2, 'notebook', now(), now(), '{}', 'test')",
@@ -908,13 +929,21 @@ fn authorization_inventory_is_complete() {
         .chain(MUTATING_HANDLER_TENANT_UNCOVERED)
         .map(|(entry, _)| (*entry).to_string())
         .collect();
-    assert_eq!(source_handlers(), handler_tenant_inventory);
+    assert_eq!(
+        source_handlers(),
+        handler_tenant_inventory,
+        "mutation inventory recognizes only literal .route( registrations inside http::router; helpers, macros, or table-driven registrations without that token are undetected"
+    );
     let handler_capability_inventory = MUTATING_HANDLER_CAPABILITY_CASES
         .iter()
         .chain(MUTATING_HANDLER_CAPABILITY_UNCOVERED)
         .map(|(entry, _)| (*entry).to_string())
         .collect();
-    assert_eq!(source_handlers(), handler_capability_inventory);
+    assert_eq!(
+        source_handlers(),
+        handler_capability_inventory,
+        "mutation inventory recognizes only literal .route( registrations inside http::router; helpers, macros, or table-driven registrations without that token are undetected"
+    );
 
     let relay_tenant_inventory = RELAY_CHANGE_TENANT_CASES
         .iter()
