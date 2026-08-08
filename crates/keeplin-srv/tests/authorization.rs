@@ -383,7 +383,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
     HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
-    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
     HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
@@ -1168,10 +1168,33 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
         .unwrap()
         .unwrap();
     let client = reqwest::Client::new();
+    let notebook = Notebook::new("delete-share guard");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
     let note = state
         .store
         .create_note(None, "delete-share guard", owner.id)
         .await
+        .unwrap();
+    let note = state
+        .store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
         .unwrap();
     state
         .store

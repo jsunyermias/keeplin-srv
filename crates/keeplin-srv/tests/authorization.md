@@ -484,7 +484,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
     HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
-    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
     HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
@@ -1491,10 +1491,33 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
         .unwrap()
         .unwrap();
     let client = reqwest::Client::new();
+    let notebook = Notebook::new("delete-share guard");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
     let note = state
         .store
         .create_note(None, "delete-share guard", owner.id)
         .await
+        .unwrap();
+    let note = state
+        .store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
         .unwrap();
     state
         .store
@@ -1531,13 +1554,13 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
 }
 ```
 
-**What it does** — Pauses `delete_share` before its operation snapshot, revokes the actor's direct grant, and pins the resumed endpoint to refusal status 403.
+**What it does** — Gives the actor both a direct `ALL` note grant and inherited `WRITE` access from the note's notebook, pauses `delete_share` before its operation snapshot, then revokes only the direct grant. Strict inheritance leaves enough access for transaction-local resolution to succeed but no `SHARE_WRITE` capability, while the requested target is a different user. The pinned 403 therefore exercises the transaction-local `can_share_write` guard; removing that guard allows the target share deletion and changes the response to 200.
 
-**Dependencies** — `HttpTestHooks::pause_at` and `wait_until_reached` control and identify each handler's pre-operation boundary; expects a missing boundary to fail with that handler's name instead of hanging. `Store::delete_share` commits the guard transition; expects the direct grant to disappear before the handler snapshot.
+**Dependencies** — `HttpTestHooks::pause_at` and `wait_until_reached` control and identify the handler's pre-operation boundary; expects `before_operation` to precede transaction-local access resolution. `Store::create_or_update_notebook_share` supplies inherited `WRITE`; expects the strict permission scheme to preserve read/write while excluding `SHARE_WRITE`. `Store::update_note_meta` places the note in that notebook; expects access resolution to combine direct and inherited grants. `Store::delete_share` commits the guard transition; expects only the actor's direct grant to disappear, leaving inherited access resolvable.
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_share`.
 
-**Repeated context** — A status disjunction is deliberately forbidden: both entries are pinned to 403.
+**Repeated context** — The actor deletes another user's share, so self-removal cannot bypass the guard. The assertion remains pinned to 403.
 
 ---
 
