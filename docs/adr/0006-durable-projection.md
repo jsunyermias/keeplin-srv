@@ -41,12 +41,18 @@ quickly:
    given, and deduplication is keyed `(user_id, batch_id, batch_index)`. Any design that filters,
    reorders or defers a change inside a batch breaks that identity unless it carries the original
    index.
-3. **Each projection opens its own transaction.** `upsert_notebook` (`store.rs:1775`), `upsert_tag`
-   (`store.rs:1879`) and `upsert_resource_meta` (`store.rs:2036`) each call `self.pool.begin()`. So a
-   batch of *n* changes commits in *n* independent transactions today, none of them tied to the
-   journal append.
-4. **Projections are idempotent by construction.** Nine `incoming_wins` last-writer comparisons guard
-   the upserts, so replaying a change is safe. This is the property every option below depends on.
+3. **Each projection opens its own transaction, and the count is not *n*.** `upsert_notebook`
+   (`store.rs:1775`), `upsert_tag` (`store.rs:1879`) and `upsert_resource_meta` (`store.rs:2036`) each
+   call `self.pool.begin()`. A `ResourceCreate` carrying data uses **two** — metadata then blob, in
+   separate transactions. A note change uses **none**, because those arms are no-ops (`sync.rs:388`).
+   None of them is tied to the journal append.
+4. **Projections are idempotent by construction — except the one that matters most.** Seven
+   `incoming_wins` last-writer comparisons guard the upserts. **`put_resource_blob` has none**: it is
+   `INSERT … ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data`, unconditional. An earlier
+   draft of this ADR said nine guards and called replay safe; nine was a count of every occurrence of
+   the symbol including its own definition, and the safety claim was false for exactly the projection
+   where two appliers can interleave. Both errors are recorded because the design that followed from
+   them was wrong.
 5. **Nothing bounds a batch.** `handle_incoming` accepts whatever array arrives; the only limit is the
    WebSocket frame, `max_message_size(64 MB)` (`sync.rs:85`). A single batch can carry many changes and
    tens of megabytes of resource bytes. Bounding it is
@@ -60,6 +66,12 @@ quickly:
 7. **A repeated `batch_id` returns empty.** If every index is a duplicate, `inserted` is empty and
    `handle_incoming` returns before projecting (`sync.rs:266`), so a retry of a batch whose projection
    failed re-projects nothing.
+
+8. **Multiple replicas are a documented deployment.** `README.md` describes running several
+   instances behind a load balancer against one database, and every process starts its own
+   maintenance loop (`main.rs:54`). `instance_id` (`state.rs:133`) is a notification-origin
+   identifier and provides no exclusion. So anything periodic runs concurrently by design, not by
+   accident.
 
 Facts 5 and 6 are the ones that decide this ADR. Fact 7 is what makes today's defect unrepairable by
 retry and is why invariant 5 exists; it does no work against the alternatives, and an earlier draft
@@ -189,75 +201,98 @@ exactly this sweep, and it is required by whichever option wins.
 > This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
 > the maintainer may accept or reject it.
 
-**Proposed decision: adopt Option 5, plus Option 4 as a bounded repair tool.**
+**Proposed decision: adopt Option 3 — the durable projection queue — with the retention interlock
+below.**
 
-An earlier draft proposed the full queue. Independent review established that the option between the
-single transaction and the queue had never been evaluated, and that issue keeplin-srv#75's bar — a
-queue only if a queue is *demonstrably* needed — is therefore not met by an argument that never put
-the smaller design on the page. Nothing in the forces above requires per-change job identity, lease
-semantics or a worker process. What they require is that projection state be **durable**, and a marker
-is durable.
+This document has now proposed the queue, been argued down to the marker, and come back. That is not
+indecision; it is the bar issue keeplin-srv#75 sets being met. The issue says a queue only if a queue
+is **demonstrably** needed. Round 1 was right that the first draft had not demonstrated it, because
+the marker was never evaluated. Round 2 then evaluated the marker against the tree and produced the
+demonstration, in three independent ways:
 
-**Part one — the marker is written in the journal transaction.** `append_changes` and the marker for
-that batch commit together, so no crash can leave a journaled batch with no record that its
-projections are outstanding. The marker carries the batch identity and the inserted indices, which
-fact 2 requires and which fact 1's slice mismatch currently loses.
+- **Resource projection is not idempotent, so concurrent appliers are not merely wasteful.** By fact
+  4, `put_resource_blob` is unguarded. Two appliers of the same batch interleave like this: applier 1
+  writes old metadata; applier 2 writes new metadata and new bytes; applier 1 resumes and overwrites
+  the bytes with the old ones; applier 1 then rejects the new metadata because it is already present.
+  The result is **new metadata with old bytes** — a state neither complete application produces. By
+  fact 8 concurrent appliers are a documented deployment. A marker without a lease is therefore
+  unsound, and a lease is the queue's principal feature.
+- **One per-batch state cannot express a mixed batch.** With index 0 permanently invalid and index 1
+  failing transiently, marking the batch failed stops retrying index 1, and leaving it outstanding
+  retries index 0 forever and never reaches the distinct failed state invariant 6 promises. Giving
+  indices their own state and attempt counters resolves it — and that is per-change lifecycle, the
+  one capability the marker was chosen to avoid.
+- **Nothing else changes the arithmetic.** Once a lease and per-change state are required, what
+  remains of the marker's advantage is that its rows live in one table instead of two.
 
-**Part two — `handle_incoming` stops working from the submitted slice.** Projections and the fan-out
-frame both derive from what `append_changes` actually inserted. This is a correctness fix independent
-of everything else here, and a prerequisite for the marker to mean anything.
+So the decision is the queue, and the reason is on the page rather than assumed.
 
-**Part three — projection stays synchronous, and the sweep is the safety net.** The batch is projected
-immediately after journaling, as today. On success the marker clears. On failure it stays, with an
-attempts counter and the indices that failed, and a bounded sweep in the existing maintenance loop
-re-drives marked batches. **This is why the asynchrony cost of a queue does not apply**: the common
-path is unchanged and only failures become deferred.
+**Part one — the job is created in the journal transaction.** One job per newly inserted change,
+committed with `append_changes` itself. **It must be inserted inside that function before its existing
+commit** (`store.rs:625`); a separate call after `append_changes` returns would not survive the crash
+window this part exists to close. Jobs carry `(user_id, batch_id, batch_index)`, which fact 2 requires
+and which fact 1's slice mismatch currently loses.
 
-**Part four — a change is projected, or it is marked and visible.** After a bounded number of attempts
-a marker moves to a failed state that is counted in metrics rather than logged and dropped. Two things
-that an earlier draft asserted without defining, and that this decision must define because invariant
-6 rests on them:
+**Part two — `handle_incoming` stops working from the submitted slice.** Jobs and the fan-out frame
+both derive from what `append_changes` actually inserted. A correctness fix independent of everything
+else here, and a prerequisite.
 
-- **The classification.** A payload that cannot deserialize is permanent. A store error is transient
-  unless it is a constraint violation, which is permanent. A serialization failure under ADR 0005's
-  protocol is **retried under that ADR's own bound and does not consume the attempts counter** — a
-  contended write must not be failed as though it were invalid.
-- **The exit.** A failed marker is re-drivable by part five's command, which is what keeps the failed
-  state from being the current silence with a metric attached. A payload that can never deserialize
-  will fail identically forever and correctly, and the command reports it rather than looping on it.
+**Part three — claim, lease and completion are specified, not assumed.** A worker claims jobs
+atomically (`FOR UPDATE SKIP LOCKED` or equivalent) and holds a lease. **A lease that expires while a
+slow worker is still applying must not permit a second applier**, because fact 4 makes double
+application unsafe for resources; the design must either make the lease renewable or make the
+resource metadata-and-blob projection atomic in one transaction. Whichever is chosen, it is chosen
+explicitly and verified, rather than resting on an idempotency claim that is false.
 
-**Part five — a reconciliation command.** An operator command re-drives marked and failed batches, and
-re-derives projections from the journal for a user or a range, for batches lost before any of this
-existed. **It does not re-broadcast.** Fan-out already happened when the batch was accepted, and
-re-sending repaired changes would depend on a client-side duplicate tolerance this ADR has not
-established; peers learn repaired state on their next sync, and that is stated rather than assumed.
+**Part four — retention must not erase a job's input.** `prune_delivered_changes` today deletes on age
+and device cursors alone (`store.rs:744`), and fan-out still happens after a projection failure, so
+every cursor can advance past a change whose job is outstanding and retention can then delete the
+payload the job needs. **Pruning must exclude every journal row referenced by an unfinished job**, or
+the job must carry its own replay input. Without this, invariant 1 is unachievable and part six's
+command cannot repair what it is for.
 
-**Part six — what this ADR does not decide, having twice been drafted as though it did.** ADR 0005's
-exhaustion sentence is answered — a guarded notebook write that exhausts its retries leaves the marker
-outstanding, so the write is re-driven rather than dropped. Everything else stays where it belongs:
+**Part five — a change is projected, or it is visibly failed.** After a bounded number of attempts a
+job moves to a dead-letter state counted in metrics. The classification: a payload that cannot
+deserialize is permanent; a serialization failure under ADR 0005 is retried under that ADR's bound and
+**does not consume the attempts counter**, because contention must not fail a valid write as though it
+were invalid. Constraint violations are **not** classified wholesale — `AppError` keeps every SQLx
+failure in one variant (`error.rs:17`) and an ordering-dependent violation can be transient, so the
+implementation must enumerate the SQLSTATEs it treats as permanent rather than inheriting a category.
+A dead-lettered job is re-drivable by part six.
 
-- **Quota.** keeplin-srv#145 owns it. This decision **forecloses no option of ADR 0004**: a check
-  inside the journal transaction at ingress satisfies ADR 0003's invariant 3 just as a check in the
-  re-drive path would. An earlier draft asserted the deferred form was the one that becomes possible,
-  which pre-selected #145's answer.
-- **What the server tells a client about a duplicate batch.** Invariant 5 below says only that
-  outstanding work completes and that no silent empty return hides it. The *shape* of any report is
-  acknowledgement vocabulary and belongs to keeplin#150.
+**Part six — a reconciliation command.** An operator command re-drives outstanding and dead-lettered
+jobs and re-derives projections from the journal for a user or a range, for batches lost before any of
+this existed. **It does not re-broadcast**: fan-out already happened, and re-sending would depend on a
+client-side duplicate tolerance this ADR has not established. Peers learn repaired state on their next
+sync.
+
+**Part seven — what this ADR does not decide.** ADR 0005's exhaustion sentence is answered: a guarded
+notebook write that exhausts its retries leaves its job claimable rather than dropping the write.
+Everything else stays where it belongs:
+
+- **Quota.** keeplin-srv#145 owns it. An earlier draft claimed a check inside the journal transaction
+  at ingress would satisfy ADR 0003's invariant 3. **It would not** — the resource write happens later
+  in a different transaction, and invariant 3 requires the lock, the deciding read and the write to be
+  one. Only a check in the transaction that performs the projection can satisfy it. That is a fact
+  about ADR 0003, not a preference of this one, and #145 remains the owner of what to do about it.
+- **What the server reports about a duplicate batch.** Invariant 5 requires only that outstanding work
+  complete and that no silent empty hide it; the shape of any report is keeplin#150's.
 
 The invariants proposed are:
 
-1. A change that is journaled is projected, or its batch carries a marker that is outstanding or
-   failed. There is no third outcome.
+1. A change that is journaled is projected, or carries a job that is outstanding or dead-lettered.
+   There is no third outcome.
 2. Journal durability is not conditional on projection success.
-3. Projections and fan-out derive from the inserted subset, never from the submitted slice.
-4. Re-driving a marker is safe; idempotency is a requirement of the sweep, not an accident of the
-   upserts.
+3. Jobs and fan-out derive from the inserted subset, never from the submitted slice.
+4. No two appliers apply the same job concurrently, and this is established by the claim mechanism
+   rather than by an idempotency assumption.
 5. A repeated `batch_id` completes outstanding work and never returns a silent empty while work is
    outstanding. What it reports is keeplin#150's to define.
-6. A permanently invalid payload and a transient failure reach different, observable states, by the
-   classification in part four.
-7. Guarded notebook writes are serializable and retried as one whole unit, per ADR 0005; exhausting
-   that bound leaves the marker outstanding rather than dropping the write.
+6. A permanently invalid payload and a transient failure reach different, observable states, by an
+   enumerated classification.
+7. A journal row referenced by an unfinished job is not pruned.
+8. Guarded notebook writes are serializable and retried as one whole unit, per ADR 0005; exhausting
+   that bound leaves the job claimable rather than dropping the write.
 
 ### The cost this decision does not remove, and must not be read as removing
 
@@ -321,17 +356,19 @@ be silent, and any job left in the table at rollback must be reconciled by part 
 
 | # | Evidence | Kind | What fails if the decision is violated |
 |---|---|---|---|
-| 1 | Failure injected during each entity's projection leaves the batch marker outstanding and the change projected after the sweep runs | failure injection | **Fails on the current tree**, where the error is logged and dropped |
+| 1 | Failure injected during each entity's projection leaves the job claimable and the change projected after retry | failure injection | **Fails on the current tree**, where the error is logged and dropped |
 | 2 | A batch that partially duplicates an earlier one projects and fans out only the newly inserted changes | negative | Fails if either still derives from the submitted slice, which is today's behaviour |
 | 3 | A repeated `batch_id` whose projection was outstanding completes that work rather than returning early | negative, recovery | Fails if fact 7's silent empty hides outstanding work. The row deliberately asserts nothing about what is reported to the client, which is keeplin#150's |
 | 4 | An invalid payload reaches the dead-letter state and is counted, while a transient error is retried; the two are distinguishable in metrics | negative | Fails if both remain a `continue` or a `warn!` |
 | 5 | Journal durability is unaffected by projection failure: the change is present in `changes` after every failure mode in rows 1 and 4 | recovery | Fails if the design made acceptance conditional on projection, which is option 2's regression |
-| 6 | A crash between journal commit and projection leaves the marker outstanding after restart, and the sweep completes it with no operator action | recovery, restart | Fails if the marker is not written in the journal transaction, which is the only placement that survives this crash |
-| 7 | The sweep and the synchronous path applying the same batch concurrently produce the same state as either alone | idempotency, concurrency | Fails if the absence of a lease is unsafe rather than merely wasteful, which is the trade this decision makes |
+| 6 | A crash between journal commit and the first claim leaves the job claimable after restart, with no operator action | recovery, restart | Fails if the job is not inserted inside `append_changes` before its commit, which is the only placement that survives this crash |
+| 7 | Two appliers racing one `ResourceCreate` carrying data — metadata written by one interleaved with the blob written by the other — cannot produce new metadata with old bytes | concurrency | **Fails on the current tree.** This is the schedule that refuted the marker design, and a test using the client path that strips blobs would pass while the raw change stays unsafe |
 | 8 | A guarded notebook write runs `SERIALIZABLE`, retries `40001` within ADR 0005's bound, and on exhaustion leaves the marker outstanding rather than dropping the write; the exhaustion does not consume the marker's attempts counter | failure injection | Fails if ADR 0005's exhaustion is answered by silence, or if contention can drive a valid write into the failed state |
 | 9 | The reconciliation command rebuilds projections for a user from the journal on a database seeded with a batch lost before any of this existed, reaching invariant 1's end state — every change projected or its batch marked failed — and broadcasting nothing | recovery, operational | Fails if already-lost data stays lost, if an undeserializable payload makes the command loop rather than report, or if repair re-broadcasts to peers |
-| 10 | The sweep interval and the resulting worst-case delay between a failed projection and its repair are fixed by the maintainer **before** the measurement is taken, and the measurement is compared against them | operational, budgeted | Fails if the delay exceeds what was agreed. A row that only requires a number to be recorded is satisfied by measuring and then choosing a budget to fit, which is no constraint at all |
-| 11 | Metrics expose outstanding markers, failed markers and the oldest outstanding age | operational | Fails if marker health is not observable, which would reproduce the current defect with a table attached |
+| 10 | The worst-case delay between journal commit and projected state is fixed by the maintainer **before** the measurement is taken, and the measurement is compared against it | operational, budgeted | Fails if the delay exceeds what was agreed. A row that only requires a number to be recorded is satisfied by measuring and then choosing a budget to fit, which is no constraint at all |
+| 11 | Metrics expose outstanding jobs, failed jobs, dead-lettered jobs and the oldest outstanding age | operational | Fails if queue health is not observable, which would reproduce the current defect with more machinery |
+| 11b | A batch with one permanently invalid index and one transiently failing index reaches the dead-letter state for the first and completes the second | negative, mixed | Fails if one state per batch is used, which cannot express this and which is why the marker design was rejected |
+| 11c | Retention does not delete a journal row referenced by an unfinished job, proven with every device cursor advanced past it | recovery | Fails if pruning considers only age and cursors, which is today's predicate and which would erase a job's own input |
 | 12 | `./scripts/check-docs.sh` passes with every changed source companion synchronized | documentation | Fails if implementation and documentation diverge |
 | 13 | `cargo test --workspace` against PostgreSQL, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all --check` pass | repository | Fails on behavioral regressions, warnings, or formatting drift |
 
