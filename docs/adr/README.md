@@ -46,6 +46,7 @@ The server-specific decisions are registered below.
 | [0001 — Note moves and the provenance of note shares](0001-note-moves-and-share-provenance.md) | accepted | note/notebook permission surface: who may move a note, whether a move may alter its grants, and the named deployment-selected permission scheme that fixes those policy points | [keeplin-srv#110](https://github.com/jsunyermias/keeplin-srv/issues/110) | [keeplin-srv#121](https://github.com/jsunyermias/keeplin-srv/pull/121) |
 | [0002 — Authorization and mutation atomicity](0002-authorization-mutation-atomicity.md) | accepted | server-wide rule joining each HTTP authorization check to the mutation it authorizes through transactional re-verification | [keeplin-srv#123](https://github.com/jsunyermias/keeplin-srv/issues/123) | [keeplin-srv#132](https://github.com/jsunyermias/keeplin-srv/pull/132) |
 | [0003 — Making per-user quotas hold](0003-per-user-quota-serialization.md) | accepted | enforcement at every path that creates a counted object, plus a per-user advisory lock so the check and the write it authorizes are mutually exclusive | [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | [keeplin-srv#143](https://github.com/jsunyermias/keeplin-srv/pull/143) |
+| [0004 — How the synchronization path refuses an over-quota change](0004-sync-quota-refusal.md) | proposed | the one thing ADR 0003 left undecided: admission control before the journal insert, and a refusal frame a client may ignore, without deciding where materialization happens | [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145) | none; proposed does not authorize implementation |
 
 `0001` has no canonical or companion ADR in `keeplin`: the capability model, both share tables and
 every function it names are local to this repository, and it moves no shared wire or format
@@ -58,9 +59,16 @@ PostgreSQL, and the decision changes no shared wire, format or `keeplin-core` su
 equivalent write path in `keeplin`, and the decision moves no shared wire, format or `keeplin-core`
 surface.
 
-A second local decision is expected for
+`0004` has no canonical or companion ADR in `keeplin`: the frame it adds is additive and
+server-to-client, `PROTOCOL_VERSION` does not move, and a client that does not recognize it discards
+it. If `keeplin` is ever required to act on that frame, the decision becomes canonical and is
+versioned in `keeplin` instead.
+
+A further local decision is still expected for
 [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75): it must decide between
-transactional materialization and a durable projection queue before implementation begins.
+transactional materialization and a durable projection queue before implementation begins. `0004`
+deliberately stops short of that choice and attaches one obligation to it — whichever option `#75`
+accepts must carry the quota decision into the transaction that performs the projection.
 
 When adding a local ADR, register it here with status, scope, issue, acceptance PR, and any
 canonical or companion ADR in `keeplin`.
