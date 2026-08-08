@@ -801,6 +801,21 @@ async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
     .await
     .unwrap()
     .can_write());
+    assert!(store
+        .get_share_on(&mut tx, direct_note.id, member.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_share_on(&mut tx, direct_note.id, owner.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .get_share_on(&mut tx, Uuid::new_v4(), member.id)
+        .await
+        .unwrap()
+        .is_none());
     sqlx::query(
         "INSERT INTO notebooks (id, user_id, title, created_at, updated_at, vv, last_writer)
          VALUES ($1, $2, 'notebook', now(), now(), '{}', 'test')",
@@ -899,6 +914,13 @@ async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
             .unwrap(),
         1
     );
+    assert_eq!(
+        store
+            .count_live_notes_in_notebook_on(&mut tx, Uuid::new_v4())
+            .await
+            .unwrap(),
+        0
+    );
     let tag_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO tags
@@ -940,12 +962,34 @@ async fn authorization_reads_observe_transaction_local_state(pool: PgPool) {
         .resource_owned_by_on(&mut tx, resource_id, owner.id)
         .await
         .unwrap());
+    assert!(!store
+        .resource_owned_by_on(&mut tx, resource_id, member.id)
+        .await
+        .unwrap());
+    assert!(!store
+        .resource_owned_by_on(&mut tx, Uuid::new_v4(), owner.id)
+        .await
+        .unwrap());
     assert_eq!(
         store
             .user_blob_bytes_excluding_on(&mut tx, owner.id, Uuid::nil())
             .await
             .unwrap(),
         4
+    );
+    assert_eq!(
+        store
+            .user_blob_bytes_excluding_on(&mut tx, owner.id, resource_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .user_blob_bytes_excluding_on(&mut tx, member.id, Uuid::nil())
+            .await
+            .unwrap(),
+        0
     );
     tx.rollback().await.unwrap();
 }
