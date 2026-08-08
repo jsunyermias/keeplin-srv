@@ -1,11 +1,11 @@
 # 0005 — Who must join the serializable protocol
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-08
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#147](https://github.com/jsunyermias/keeplin-srv/issues/147)
-- Acceptance PR: link once the ADR is accepted
+- Acceptance PR: [keeplin-srv#148](https://github.com/jsunyermias/keeplin-srv/pull/148)
 - Supersedes: [ADR 0002](0002-authorization-mutation-atomicity.md) in part — its eight-handler
   enumeration and its deferral of non-HTTP entry points, both only as they concern the serializable
   participant set. Everything else in ADR 0002 stands.
@@ -156,8 +156,8 @@ Narrow what phase 2 claims, document the two writers as a known limit, open an i
 
 Not adopted. The maintainer's input on being shown the two writers was that the gap is not an edge:
 it is reachable by syncing a notebook deletion, which is ordinary use, so a documented limit would be
-a documented defect. That input is recorded as input — this ADR is `proposed`, and nothing in it
-predetermines the decision the maintainer has yet to take on the document as a whole.
+a documented defect. That input was recorded as input while this ADR was still `proposed`, so that
+nothing in it predetermined the decision the maintainer later took on the document as a whole.
 
 ### Option 2 — Bring both writers into the serializable protocol, and enumerate participants
 
@@ -189,10 +189,7 @@ about what the guard transaction observes.
 
 ## Decision and justification
 
-> This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
-> the maintainer may accept or reject it.
-
-**Proposed decision: adopt Option 2.**
+**Adopt Option 2.**
 
 **Part one — the enumerated set becomes nine.** `delete_account` joins `update_note`, `delete_note`,
 `create_share`, `delete_share`, `transfer_ownership`, `create_notebook_share`,
@@ -269,7 +266,7 @@ discovered the cascade.
 against any writer outside the set. That is a property of PostgreSQL, not of this decision, and part
 three is what keeps the set honest rather than a claim that the set is permanently complete.
 
-The invariants proposed are:
+The invariants are:
 
 1. Every enumerated participant — the nine handlers and the synchronization path's notebook writes —
    executes its authorization re-verification and its write in one `SERIALIZABLE` transaction.

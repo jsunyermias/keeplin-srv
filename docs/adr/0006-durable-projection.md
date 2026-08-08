@@ -1,11 +1,11 @@
 # 0006 — Making a journaled change reach its projection
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-08
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#75](https://github.com/jsunyermias/keeplin-srv/issues/75)
-- Acceptance PR: link once the ADR is accepted
+- Acceptance PR: [keeplin-srv#148](https://github.com/jsunyermias/keeplin-srv/pull/148)
 - Supersedes: none
 - Superseded by: none
 
@@ -199,11 +199,7 @@ exactly this sweep, and it is required by whichever option wins.
 
 ## Decision and justification
 
-> This ADR is `proposed`. It records a recommendation and does not authorize implementation. Only
-> the maintainer may accept or reject it.
-
-**Proposed decision: adopt Option 3 — the durable projection queue — with the retention interlock
-below.**
+**Adopt Option 3 — the durable projection queue — with the retention interlock below.**
 
 This document has now proposed the queue, been argued down to the marker, and come back. That is not
 indecision; it is the bar issue keeplin-srv#75 sets being met. The issue says a queue only if a queue
@@ -279,7 +275,7 @@ Everything else stays where it belongs:
 - **What the server reports about a duplicate batch.** Invariant 5 requires only that outstanding work
   complete and that no silent empty hide it; the shape of any report is keeplin#150's.
 
-The invariants proposed are:
+The invariants are:
 
 1. A change that is journaled is projected, or carries a job that is outstanding or dead-lettered.
    There is no third outcome.
