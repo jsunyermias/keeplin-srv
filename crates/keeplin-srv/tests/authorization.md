@@ -1630,6 +1630,24 @@ async fn sync_notebook_writers_do_not_retry_non_serialization_failures(pool: PgP
             .unwrap(),
         1
     );
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23503'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let foreign_key_failure = Notebook::new("non-retryable foreign key");
+    assert!(store
+        .upsert_notebook(user.id, &foreign_key_failure)
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
     sqlx::query("ALTER TABLE notebooks DISABLE TRIGGER fail_notebook_constraint")
         .execute(&pool)
         .await
@@ -1656,7 +1674,7 @@ async fn sync_notebook_writers_do_not_retry_non_serialization_failures(pool: PgP
             .fetch_one(&pool)
             .await
             .unwrap(),
-        2
+        3
     );
 }
 ```
@@ -1847,7 +1865,7 @@ async fn target_principal_recheck_locks_the_user_until_transaction_end(pool: PgP
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query = 'UPDATE users SET password_hash = $2 WHERE id = $1' AND wait_event_type = 'Lock')",
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query LIKE 'UPDATE users SET password_hash%' AND wait_event_type = 'Lock')",
             )
             .fetch_one(&pool)
             .await
@@ -1860,12 +1878,20 @@ async fn target_principal_recheck_locks_the_user_until_transaction_end(pool: PgP
     })
     .await
     .unwrap();
-    assert!(!update.is_finished());
-    transaction.rollback().await.unwrap();
+    transaction.commit().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), update)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        store
+            .get_user_by_id(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .password_hash,
+        "new hash"
+    );
 }
 ```
 
@@ -1897,6 +1923,7 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool).await;
     let owner_token = register_and_login(addr, "transfer-cleanup-owner@example.com").await;
     let _target_token = register_and_login(addr, "transfer-cleanup-target@example.com").await;
+    let _third_token = register_and_login(addr, "transfer-cleanup-third@example.com").await;
     let owner = state
         .store
         .get_user_by_email("transfer-cleanup-owner@example.com")
@@ -1906,6 +1933,12 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
     let target = state
         .store
         .get_user_by_email("transfer-cleanup-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third = state
+        .store
+        .get_user_by_email("transfer-cleanup-third@example.com")
         .await
         .unwrap()
         .unwrap();
@@ -1919,6 +1952,17 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
         .create_or_update_share(note.id, target.id, Capabilities::READ)
         .await
         .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
     let client = reqwest::Client::new();
     let response = authed_json(
         &client,
@@ -1936,6 +1980,22 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        target.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
 
     let notebook = Notebook::new("transfer cleanup notebook");
     assert!(state
@@ -1948,6 +2008,17 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
         .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
         .await
         .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
     let response = authed_json(
         &client,
         reqwest::Method::POST,
@@ -1964,6 +2035,16 @@ async fn successful_transfers_remove_target_shares(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(target.id)
+    );
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
 }
 ```
 
@@ -1977,6 +2058,108 @@ get_notebook_share}`; expects ownership transfer and target-share cleanup to com
 
 **Repeated context** — Failure-path snapshot equality cannot detect a deleted cleanup call; this
 success assertion makes that no-op mutation observable.
+
+---
+
+## fn transfer_and_target_account_deletion_resolve_coherently
+
+**Identification** — end-to-end transfer/account-deletion interleaving test; marker `// md:fn transfer_and_target_account_deletion_resolve_coherently`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transfer_and_target_account_deletion_resolve_coherently
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-delete-owner@example.com").await;
+    let target_token = register_and_login(addr, "transfer-delete-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-delete-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer deletion race", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let transfer = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &owner_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    let deletion = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &target_token,
+        json!({"password": "password123"}),
+    )
+    .await;
+    assert_eq!(deletion.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(transfer.await.unwrap().status(), 404);
+    assert!(state
+        .store
+        .get_user_by_id(target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        owner.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts a note ownership transfer and pauses its serializable transaction before the target-principal gate, deletes the target through the real account-deletion handler on another connection, then requires deletion alone to succeed. The transfer must return `404`, the target user and their pre-existing share must be absent, and the note must remain owned by the live original owner.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` controls the real handler interleaving; expects `before_operation` to occur after the transfer transaction begins and before its target lock. `transfer_ownership` and `delete_account` supply the competing serializable requests; expects their user-row locking and foreign-key cascades to produce a coherent winner.
+
+**Used by** — ADR 0005 end-to-end target-principal race evidence.
+
+**Repeated context** — A raw SQL delete is insufficient evidence here: both competitors intentionally traverse their HTTP handlers and transaction boundaries.
 
 ---
 
@@ -6716,6 +6899,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13d | `fn target_principals_are_reverified_in_share_and_transfer_transactions` | `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions` |
 | 13dz | `fn target_principal_recheck_locks_the_user_until_transaction_end` | `// md:fn target_principal_recheck_locks_the_user_until_transaction_end` |
 | 13d0 | `fn successful_transfers_remove_target_shares` | `// md:fn successful_transfers_remove_target_shares` |
+| 13d0a | `fn transfer_and_target_account_deletion_resolve_coherently` | `// md:fn transfer_and_target_account_deletion_resolve_coherently` |
 | 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
 | 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |
 | 13d3 | `fn revoked_share_authority_is_reverified_for_create_notebook_share` | `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share` |
