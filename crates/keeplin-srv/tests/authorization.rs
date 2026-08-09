@@ -2519,24 +2519,148 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    let note = store
+    let target = store
+        .create_user("rollback-target@example.com", "hash", "rollback target")
+        .await
+        .unwrap();
+    let update_note = store
         .create_note(None, "rollback original", owner.id)
         .await
         .unwrap();
+    let delete_note = store
+        .create_note(None, "rollback delete", owner.id)
+        .await
+        .unwrap();
+    let create_share_note = store
+        .create_note(None, "rollback create share", owner.id)
+        .await
+        .unwrap();
+    let delete_share_note = store
+        .create_note(None, "rollback delete share", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(delete_share_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note = store
+        .create_note(None, "rollback transfer", owner.id)
+        .await
+        .unwrap();
+    let create_share_notebook = Notebook::new("rollback create notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &create_share_notebook)
+        .await
+        .unwrap());
+    let delete_share_notebook = Notebook::new("rollback delete notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &delete_share_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(delete_share_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_notebook = Notebook::new("rollback notebook transfer");
+    assert!(store
+        .upsert_notebook(owner.id, &transfer_notebook)
+        .await
+        .unwrap());
+    let client = reqwest::Client::new();
+    let cases = [
+        (
+            reqwest::Method::PATCH,
+            format!("/api/notes/{}", update_note.id),
+            json!({ "title": "must roll back" }),
+            "notes",
+            "id",
+            update_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}", delete_note.id),
+            json!({}),
+            "notes",
+            "id",
+            delete_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/share", create_share_note.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "note_shares",
+            "note_id",
+            create_share_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}/share/{}", delete_share_note.id, target.id),
+            json!({}),
+            "note_shares",
+            "note_id",
+            delete_share_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/transfer", transfer_note.id),
+            json!({ "user_id": target.id }),
+            "notes",
+            "id",
+            transfer_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/share", create_share_notebook.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "notebook_shares",
+            "notebook_id",
+            create_share_notebook.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!(
+                "/api/notebooks/{}/share/{}",
+                delete_share_notebook.id, target.id
+            ),
+            json!({}),
+            "notebook_shares",
+            "notebook_id",
+            delete_share_notebook.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/transfer", transfer_notebook.id),
+            json!({ "user_id": target.id }),
+            "notebooks",
+            "id",
+            transfer_notebook.id,
+        ),
+    ];
+    for (method, path, body, table, key, id) in cases {
+        let before = relation_snapshot(store.pool(), table, key, id).await;
+        state.http_test_hooks.inject_failure_after_mutation();
+        let failed = authed_json(&client, method, addr, &path, &owner_token, body).await;
+        assert_eq!(failed.status(), 500, "{path}");
+        assert_eq!(
+            relation_snapshot(store.pool(), table, key, id).await,
+            before
+        );
+    }
+    let owner_before = entity_snapshot(store.pool(), "users", owner.id).await;
     state.http_test_hooks.inject_failure_after_mutation();
     let failed = authed_json(
-        &reqwest::Client::new(),
-        reqwest::Method::PATCH,
+        &client,
+        reqwest::Method::DELETE,
         addr,
-        &format!("/api/notes/{}", note.id),
+        "/api/account",
         &owner_token,
-        json!({ "title": "must roll back" }),
+        json!({ "password": "password123" }),
     )
     .await;
-    assert_eq!(failed.status(), 500);
+    assert_eq!(failed.status(), 500, "/api/account");
     assert_eq!(
-        store.get_note(note.id).await.unwrap().unwrap().title,
-        "rollback original"
+        entity_snapshot(store.pool(), "users", owner.id).await,
+        owner_before
     );
 }
 
