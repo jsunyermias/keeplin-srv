@@ -77,6 +77,102 @@ async fn prometheus_metrics_expose_projection_queue_series(pool: PgPool) {
     }
 }
 
+// md:fn note_tag_projection_failure_retries_and_remains_claimable
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_tag_projection_failure_retries_and_remains_claimable(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("note-tag-retry@example.com", "hash", "note tag retry")
+        .await
+        .unwrap();
+    let device = store
+        .create_device(user.id, "note tag retry")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "note tag retry", user.id)
+        .await
+        .unwrap();
+    let mut tag = Tag::new("note tag retry");
+    tag.vv = VersionVector::from([("note-tag-retry".to_string(), 1)]);
+    tag.last_writer = "note-tag-retry".into();
+    store.upsert_tag(user.id, &tag).await.unwrap();
+    sqlx::query("CREATE SEQUENCE note_tag_projection_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_first_note_tag_projection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('note_tag_projection_attempts') = 1 THEN RAISE EXCEPTION 'transient note-tag projection failure'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_first_note_tag_projection BEFORE INSERT OR UPDATE ON note_tags FOR EACH ROW EXECUTE FUNCTION fail_first_note_tag_projection()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let batch_id = Uuid::new_v4();
+    let updated_at = Utc::now();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "note tag retry",
+            batch_id,
+            &[serde_json::to_value(Change::NoteTagAdd {
+                note_id: note.id,
+                tag_id: tag.id,
+                updated_at,
+                vv: VersionVector::from([("note-tag-retry".to_string(), 2)]),
+                last_writer: "note-tag-retry".into(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_batch(&state, user.id, batch_id).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 AND batch_index = 0",
+        )
+        .bind(user.id)
+        .bind(batch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "retry"
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM changes WHERE user_id = $1 AND batch_id = $2 AND batch_index = 0)",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    projection::drain_batch(&state, user.id, batch_id).await;
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM note_tags WHERE user_id = $1 AND note_id = $2 AND tag_id = $3 AND deleted_at IS NULL)",
+    )
+    .bind(user.id)
+    .bind(note.id)
+    .bind(tag.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
 // md:impl CapturedLogs
 impl CapturedLogs {
     fn text(&self) -> String {
@@ -1271,6 +1367,24 @@ async fn cross_tenant_newer_resource_projection_is_permanently_rejected(pool: Pg
     assert!(last_error.unwrap().starts_with(
         "internal error: invalid projection payload: resource id belongs to another user"
     ));
+    let stats = projection::stats(&store).await.unwrap();
+    assert_eq!(stats.dead_lettered, 1);
+    assert_eq!(stats.outstanding, 0);
+    assert_eq!(stats.retrying, 0);
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let token = register_and_login(addr, "dead-letter-metrics@example.com").await;
+    let body = reqwest::Client::new()
+        .get(format!("http://{addr}/api/metrics?format=prometheus"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("keeplin_projection_jobs_dead_lettered 1"));
+    assert!(body.contains("keeplin_projection_jobs_outstanding 0"));
+    assert!(body.contains("keeplin_projection_jobs_retrying 0"));
 }
 
 // md:fn reconcile_enqueues_materializing_resource_change
@@ -1297,7 +1411,7 @@ async fn reconcile_enqueues_materializing_resource_change(pool: PgPool) {
         0,
     );
     let payload = serde_json::to_value(Change::ResourceCreate {
-        resource,
+        resource: resource.clone(),
         data: None,
     })
     .unwrap();
@@ -1336,6 +1450,292 @@ async fn reconcile_enqueues_materializing_resource_change(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap());
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_batch(&state, user.id, batch_id).await;
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM resources WHERE user_id = $1 AND id = $2)",
+    )
+    .bind(user.id)
+    .bind(resource.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
+// md:fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "resource-atomicity@example.com",
+            "hash",
+            "resource atomicity",
+        )
+        .await
+        .unwrap();
+    let initial_bytes = b"initial resource bytes".to_vec();
+    let mut initial = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "initial resource metadata",
+        "application/octet-stream",
+        "initial.bin",
+        initial_bytes.len() as u64,
+    );
+    initial.vv = VersionVector::from([("initial".to_string(), 1)]);
+    initial.last_writer = "initial".into();
+    store
+        .apply_resource_create(user.id, &initial, Some(&initial_bytes))
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION pause_stale_resource_blob() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.data = decode('7374616c65207265736f75726365206279746573', 'hex') THEN PERFORM pg_advisory_xact_lock(7000006); END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER pause_stale_resource_blob BEFORE INSERT OR UPDATE ON resource_blobs FOR EACH ROW EXECUTE FUNCTION pause_stale_resource_blob()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(7000006)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let stale_bytes = b"stale resource bytes".to_vec();
+    let mut stale = initial.clone();
+    stale.title = "stale resource metadata".into();
+    stale.file_name = "stale.bin".into();
+    stale.size = stale_bytes.len() as u64;
+    stale.created_at = initial.created_at + Duration::seconds(1);
+    stale.vv = VersionVector::from([("stale".to_string(), 1)]);
+    stale.last_writer = "stale".into();
+    let stale_store = store.clone();
+    let stale_user = user.id;
+    let stale_apply = tokio::spawn(async move {
+        stale_store
+            .apply_resource_create(stale_user, &stale, Some(&stale_bytes))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 7000006 AND NOT granted",
+            )
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+            if waiting == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let current_bytes = b"current resource bytes".to_vec();
+    let mut current = initial.clone();
+    current.title = "current resource metadata".into();
+    current.file_name = "current.bin".into();
+    current.size = current_bytes.len() as u64;
+    current.created_at = initial.created_at + Duration::seconds(2);
+    current.vv = VersionVector::from([("current".to_string(), 1)]);
+    current.last_writer = "current".into();
+    let current_store = store.clone();
+    let current_user = user.id;
+    let current_apply = tokio::spawn(async move {
+        current_store
+            .apply_resource_create(current_user, &current, Some(&current_bytes))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+            )
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+            if waiting >= 2 || current_apply.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(7000006)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    stale_apply.await.unwrap().unwrap();
+    current_apply.await.unwrap().unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT title, file_name, size FROM resources WHERE user_id = $1 AND id = $2",
+        )
+        .bind(user.id)
+        .bind(initial.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (
+            "current resource metadata".into(),
+            "current.bin".into(),
+            b"current resource bytes".len() as i64,
+        )
+    );
+    assert_eq!(
+        store.get_resource_blob(initial.id).await.unwrap().unwrap(),
+        b"current resource bytes"
+    );
+}
+
+// md:fn mixed_projection_batch_keeps_per_index_terminal_states
+#[sqlx::test(migrations = "../../migrations")]
+async fn mixed_projection_batch_keeps_per_index_terminal_states(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("mixed-projection@example.com", "hash", "mixed projection")
+        .await
+        .unwrap();
+    let device = store
+        .create_device(user.id, "mixed projection")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE mixed_tag_projection_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_first_mixed_tag_projection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('mixed_tag_projection_attempts') = 1 THEN RAISE EXCEPTION 'transient mixed projection failure'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_first_mixed_tag_projection BEFORE INSERT OR UPDATE ON tags FOR EACH ROW EXECUTE FUNCTION fail_first_mixed_tag_projection()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut tag = Tag::new("mixed projection survives");
+    tag.vv = VersionVector::from([("mixed-projection".to_string(), 1)]);
+    tag.last_writer = "mixed-projection".into();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "mixed projection",
+            batch_id,
+            &[
+                json!({"op": "resource_create", "resource": "permanently invalid"}),
+                serde_json::to_value(Change::TagCreate { tag: tag.clone() }).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_batch(&state, user.id, batch_id).await;
+    assert_eq!(
+        sqlx::query_as::<_, (i32, String)>(
+            "SELECT batch_index, state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 ORDER BY batch_index",
+        )
+        .bind(user.id)
+        .bind(batch_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap(),
+        vec![(0, "dead_letter".into()), (1, "retry".into())]
+    );
+    projection::drain_batch(&state, user.id, batch_id).await;
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM tags WHERE user_id = $1 AND id = $2)",
+    )
+    .bind(user.id)
+    .bind(tag.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert_eq!(
+        sqlx::query_as::<_, (i32, String)>(
+            "SELECT batch_index, state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 ORDER BY batch_index",
+        )
+        .bind(user.id)
+        .bind(batch_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap(),
+        vec![(0, "dead_letter".into())]
+    );
+}
+
+// md:fn normal_projection_latency_stays_within_fixed_budget
+#[sqlx::test(migrations = "../../migrations")]
+async fn normal_projection_latency_stays_within_fixed_budget(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "projection-latency@example.com",
+            "hash",
+            "projection latency",
+        )
+        .await
+        .unwrap();
+    let device = store
+        .create_device(user.id, "projection latency")
+        .await
+        .unwrap();
+    let mut tag = Tag::new("projection latency");
+    tag.vv = VersionVector::from([("projection-latency".to_string(), 1)]);
+    tag.last_writer = "projection-latency".into();
+    let state = Arc::new(AppState::new(authorization_test_config(), pool.clone()));
+    let worker = tokio::spawn(projection::worker(state));
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "projection latency",
+            batch_id,
+            &[serde_json::to_value(Change::TagCreate { tag: tag.clone() }).unwrap()],
+        )
+        .await
+        .unwrap();
+    let committed_at = std::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM tags WHERE user_id = $1 AND id = $2)",
+            )
+            .bind(user.id)
+            .bind(tag.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let measured = committed_at.elapsed();
+    worker.abort();
+    assert!(measured < std::time::Duration::from_secs(5), "{measured:?}");
 }
 
 // md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary
