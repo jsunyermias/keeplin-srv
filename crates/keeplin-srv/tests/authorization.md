@@ -2163,6 +2163,170 @@ async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
 
 ---
 
+## fn repeated_share_upsert_updates_the_single_existing_grant
+
+**Identification** — serial note-share upsert regression test; marker `// md:fn repeated_share_upsert_updates_the_single_existing_grant`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn repeated_share_upsert_updates_the_single_existing_grant
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("share-upsert-owner@example.com", "hash", "Owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "share upsert conflict action", owner.id)
+        .await
+        .unwrap();
+
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+
+    let share_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM note_shares WHERE note_id = $1 AND user_id = $2")
+            .bind(note.id)
+            .bind(grantee.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(share_count, 1);
+    assert_eq!(
+        store
+            .get_share(note.id, grantee.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capabilities,
+        Capabilities::WRITE
+    );
+}
+```
+
+**What it does** — Inserts one direct note share with `READ`, repeats the production upsert for the same `(note_id, user_id)` with `WRITE`, then proves that exactly one row remains and its capabilities changed to `WRITE`. This deterministically exercises both the pair-uniqueness conflict target and its `DO UPDATE` action without contention.
+
+**Dependencies**
+
+- `Store::{create_user, create_note}` — creates valid foreign-key principals and a note; expects: the returned IDs identify committed rows.
+- `Store::create_or_update_share` — executes the production conflict action twice; expects: a repeated pair updates `capabilities` and returns the affected row.
+- `Store::get_share` — reads the persisted grant; expects: the pair lookup returns the sole current row.
+- `sqlx::query_scalar` — counts the exact pair; expects: the `note_shares` primary key and upsert preserve one-row cardinality.
+
+**Used by** — authorization mutation review for the `note_shares` upsert conflict action and pair uniqueness.
+
+**Repeated context** — The test is intentionally serial: conflict-action coverage requires a repeated key, not concurrent requests.
+
+---
+
+## fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+
+**Identification** — serial repeated-transfer semantic regression test; marker `// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
+    let _new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("repeat-transfer-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "repeat transfer semantic", owner.id)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let first = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(first.status(), 200);
+    let owned_before_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_before_repeat, 1);
+
+    let repeated = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(repeated.status(), 403);
+    let owned_after_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_after_repeat, owned_before_repeat);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+```
+
+**What it does** — Transfers a note once through the production HTTP route, records the new owner's row count, and repeats the identical request with the former owner's token. The repeat must return `403`; the new-owner count and authoritative `owner_id` must remain unchanged. This pins the owner-only repeat semantic independently of the stress test's one-request-per-note accounting.
+
+**Dependencies**
+
+- `spawn_authorization_state` and `register_and_login` — exposes the real authenticated route and distinct principals; expects: bearer identity remains bound to the original owner after transfer.
+- `authed_json` — invokes `transfer_ownership` twice; expects: the first owner-authorized request commits and the former owner's repeat fails the owner-only access check with `403`.
+- `sqlx::query_scalar` and `Store::get_note` — observes durable ownership; expects: both reads agree that exactly one matching note remains owned by the target.
+
+**Used by** — authorization mutation review for the former-owner repeat-transfer `403` contract; supports the stable-transfer accounting argument in `mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
+
+**Repeated context** — Ownership transfer is not an idempotent success for the former owner: after the first commit that principal no longer has `can_transfer_ownership`.
+
+---
+
 ## fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
 
 **Identification** — hook-free randomized HTTP integrity-under-contention test; marker `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
@@ -2407,7 +2571,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
 }
 ```
 
-**What it does** — Creates a cascade witness owned by the deletion target and shared to the surviving peer, then launches exactly 200 real HTTP requests against 98 additional independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The witness makes both account-deletion foreign-key cascades observable: account deletion must remove its note, while its peer share cannot disappear through the deleted principal's cascade. Account deletion performs one user-row delete; PostgreSQL's `ON DELETE CASCADE` constraints remove the witness note and share, with no handler-side ordered cleanup. The witness is deliberately quiescent, so it proves the declarative cascades under the surrounding workload but does not claim coverage of a victim-note mutation race. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Stable notes begin shared to the deletion target and contested notes begin shared to the surviving peer. Thus the same run combines a non-degenerate write-path control cohort with a natural target-principal race, without requiring a particular winner to prove the cascades. Every transfer, share deletion, and account deletion participates in a serializable transaction and may return `503` when ADR 0002's three-attempt retry bound is exhausted. All 49 stable transfers must be either `200` or that designed `503`, at least one must return `200`, and the final number of notes owned by the peer must equal the stable `200` count. The target-owned witness is only shared to the peer, so it never contributes to that ownership count. The equality proves that each status-labelled success committed the ownership write. A stable note receives only one transfer request, and after a committed transfer the former owner's repeated request would fail the owner-only access check with `403` rather than return an idempotent second `200`; consequently the success count cannot exceed the committed peer-owner count. No higher success floor is claimed: `503` prevalence depends on runtime load and scheduling and carries no correctness signal because the accepted decision defines a retry bound rather than a success-rate guarantee under unscripted contention. The HTTP error representation exposes `ServiceUnavailable` as one generic `503` and carries no reason discriminator, so the test cannot assert a retry-exhaustion response body; the serializable wrapper is the only current producer of that status on these paths. Each share deletion addresses a different row. Its explicit outcomes are `200`, `403` when a completed transfer removed the original owner's share-writing authority, `404` when account deletion removed the note, or the designed `503`; the closed set prevents unrelated outcomes from passing. Outcome assertions run only after every request has joined so any failure reports the complete 200-request histogram rather than a launch-order prefix. Other 5xx responses remain forbidden. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation mix and gives every request up to seven milliseconds of launch jitter. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Direct database checks reject any surviving share without its note or principal and any note without its owner. Duplicate shares are unreachable in this fixture: every share upsert occurs serially during setup and exactly once per `(note_id, user_id)` pair, while the concurrent operation mix only transfers ownership, deletes distinct shares, and deletes the target account. Pair uniqueness is therefore owned here by the `note_shares` schema constraint rather than behaviorally held by this test; holding it behaviorally would require a separate test that issues contended `create_share` requests for the same pair. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
+**What it does** — Creates a cascade witness owned by the deletion target and shared to the surviving peer, then launches exactly 200 real HTTP requests against 98 additional independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The witness makes both account-deletion foreign-key cascades observable: account deletion must remove its note, while its peer share cannot disappear through the deleted principal's cascade. Account deletion performs one user-row delete; PostgreSQL's `ON DELETE CASCADE` constraints remove the witness note and share, with no handler-side ordered cleanup. The witness is deliberately quiescent, so it proves the declarative cascades under the surrounding workload but does not claim coverage of a victim-note mutation race. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Stable notes begin shared to the deletion target and contested notes begin shared to the surviving peer. Thus the same run combines a non-degenerate write-path control cohort with a natural target-principal race, without requiring a particular winner to prove the cascades. Every transfer, share deletion, and account deletion participates in a serializable transaction and may return `503` when ADR 0002's three-attempt retry bound is exhausted. All 49 stable transfers must be either `200` or that designed `503`, at least one must return `200`, and the final number of notes owned by the peer must equal the stable `200` count. The target-owned witness is only shared to the peer, so it never contributes to that ownership count. The equality proves that each status-labelled success committed the ownership write. A stable note receives only one transfer request, and the separate serial `repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` test proves that after a committed transfer the former owner's repeated request fails the owner-only access check with `403` rather than returning an idempotent second `200`; consequently the success count cannot exceed the committed peer-owner count. No higher success floor is claimed: `503` prevalence depends on runtime load and scheduling and carries no correctness signal because the accepted decision defines a retry bound rather than a success-rate guarantee under unscripted contention. The HTTP error representation exposes `ServiceUnavailable` as one generic `503` and carries no reason discriminator, so the test cannot assert a retry-exhaustion response body; the serializable wrapper is the only current producer of that status on these paths. Each share deletion addresses a different row. Its explicit outcomes are `200`, `403` when a completed transfer removed the original owner's share-writing authority, `404` when account deletion removed the note, or the designed `503`; the closed set prevents unrelated outcomes from passing. Outcome assertions run only after every request has joined so any failure reports the complete 200-request histogram rather than a launch-order prefix. Other 5xx responses remain forbidden. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation mix and gives every request up to seven milliseconds of launch jitter. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Direct database checks reject any surviving share without its note or principal and any note without its owner. Duplicate shares are unreachable in this fixture: every share upsert occurs serially during setup and exactly once per `(note_id, user_id)` pair, while the concurrent operation mix only transfers ownership, deletes distinct shares, and deletes the target account. Pair uniqueness and the upsert conflict action are behaviorally pinned by the separate serial `repeated_share_upsert_updates_the_single_existing_grant` test; contention is unnecessary because repeating the same pair deterministically reaches the conflict branch. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
 
 **Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention, with every serializable participant able to expose ADR 0002's bounded-retry exhaustion as `503`. `transfer_ownership` is owner-only on both access checks; expects: after one committed transfer, a request by the former owner is refused rather than reported as another success. `delete_account` delegates deletion to `Store::delete_user_on`; expects: it deletes the user row without manually sequencing dependent note or share deletion. `Store::{create_note, create_or_update_share}` creates the target-owned, peer-shared cascade witness and one unit per transfer/delete pair; expects: target deletion necessarily exercises both the owner and note-side cascades while the surviving peer prevents the witness share from being masked by a principal-side cascade. `BTreeMap` records stable per-operation status counts; expects: all responses remain available for complete-run outcome validation and diagnostics, and the stable-transfer cohort remains distinguishable from contested refusals. `sqlx::query_scalar` counts committed peer-owned notes and performs the final anti-join queries; expects: a stable `200` has exactly one durable ownership row, every surviving share resolves both its note and principal, and every surviving note resolves its owner. PostgreSQL foreign keys supply the declarative cascades whose integrity those queries validate. The `note_shares` primary key supplies pair uniqueness, but this fixture does not exercise that dependency because it never contends on a share upsert.
 
@@ -7154,6 +7318,8 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13dz | `fn target_principal_recheck_locks_the_user_until_transaction_end` | `// md:fn target_principal_recheck_locks_the_user_until_transaction_end` |
 | 13d0 | `fn successful_transfers_remove_target_shares` | `// md:fn successful_transfers_remove_target_shares` |
 | 13d0a | `fn transfer_and_target_account_deletion_resolve_coherently` | `// md:fn transfer_and_target_account_deletion_resolve_coherently` |
+| 13d0a1 | `fn repeated_share_upsert_updates_the_single_existing_grant` | `// md:fn repeated_share_upsert_updates_the_single_existing_grant` |
+| 13d0a2 | `fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` | `// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` |
 | 13d0b | `fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` | `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` |
 | 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
 | 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |

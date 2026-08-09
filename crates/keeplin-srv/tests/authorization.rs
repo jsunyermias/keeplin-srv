@@ -1706,6 +1706,125 @@ async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
         .is_none());
 }
 
+// md:fn repeated_share_upsert_updates_the_single_existing_grant
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("share-upsert-owner@example.com", "hash", "Owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "share upsert conflict action", owner.id)
+        .await
+        .unwrap();
+
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+
+    let share_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM note_shares WHERE note_id = $1 AND user_id = $2")
+            .bind(note.id)
+            .bind(grantee.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(share_count, 1);
+    assert_eq!(
+        store
+            .get_share(note.id, grantee.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capabilities,
+        Capabilities::WRITE
+    );
+}
+
+// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
+    let _new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("repeat-transfer-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "repeat transfer semantic", owner.id)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let first = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(first.status(), 200);
+    let owned_before_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_before_repeat, 1);
+
+    let repeated = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(repeated.status(), 403);
+    let owned_after_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_after_repeat, owned_before_repeat);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+
 // md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
 #[sqlx::test(migrations = "../../migrations")]
 async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity(
