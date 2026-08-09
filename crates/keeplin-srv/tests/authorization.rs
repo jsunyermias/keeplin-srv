@@ -1718,13 +1718,21 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
         .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
         .await
         .unwrap();
+    let other_grantee = store
+        .create_user("share-upsert-other@example.com", "hash", "Other grantee")
+        .await
+        .unwrap();
     let note = store
         .create_note(None, "share upsert conflict action", owner.id)
         .await
         .unwrap();
 
-    store
+    let original_share = store
         .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, other_grantee.id, Capabilities::READ)
         .await
         .unwrap();
     store
@@ -1740,14 +1748,17 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(share_count, 1);
+    let updated_share = store.get_share(note.id, grantee.id).await.unwrap().unwrap();
+    assert_eq!(updated_share.capabilities, Capabilities::WRITE);
+    assert_eq!(updated_share.created_at, original_share.created_at);
     assert_eq!(
         store
-            .get_share(note.id, grantee.id)
+            .get_share(note.id, other_grantee.id)
             .await
             .unwrap()
             .unwrap()
             .capabilities,
-        Capabilities::WRITE
+        Capabilities::READ
     );
 }
 
@@ -1756,7 +1767,8 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
 async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
-    let _new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let _third_owner_token = register_and_login(addr, "repeat-transfer-third@example.com").await;
     let owner = state
         .store
         .get_user_by_email("repeat-transfer-owner@example.com")
@@ -1766,6 +1778,12 @@ async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownersh
     let new_owner = state
         .store
         .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-third@example.com")
         .await
         .unwrap()
         .unwrap();
@@ -1822,6 +1840,27 @@ async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownersh
             .unwrap()
             .owner_id,
         new_owner.id
+    );
+
+    let onward = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &new_owner_token,
+        json!({"user_id": third_owner.id}),
+    )
+    .await;
+    assert_eq!(onward.status(), 200);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        third_owner.id
     );
 }
 

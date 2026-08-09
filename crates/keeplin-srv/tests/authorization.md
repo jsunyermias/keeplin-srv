@@ -2182,13 +2182,21 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
         .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
         .await
         .unwrap();
+    let other_grantee = store
+        .create_user("share-upsert-other@example.com", "hash", "Other grantee")
+        .await
+        .unwrap();
     let note = store
         .create_note(None, "share upsert conflict action", owner.id)
         .await
         .unwrap();
 
-    store
+    let original_share = store
         .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, other_grantee.id, Capabilities::READ)
         .await
         .unwrap();
     store
@@ -2204,26 +2212,29 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(share_count, 1);
+    let updated_share = store.get_share(note.id, grantee.id).await.unwrap().unwrap();
+    assert_eq!(updated_share.capabilities, Capabilities::WRITE);
+    assert_eq!(updated_share.created_at, original_share.created_at);
     assert_eq!(
         store
-            .get_share(note.id, grantee.id)
+            .get_share(note.id, other_grantee.id)
             .await
             .unwrap()
             .unwrap()
             .capabilities,
-        Capabilities::WRITE
+        Capabilities::READ
     );
 }
 ```
 
-**What it does** — Inserts one direct note share with `READ`, repeats the production upsert for the same `(note_id, user_id)` with `WRITE`, then proves that exactly one row remains and its capabilities changed to `WRITE`. This deterministically exercises both the pair-uniqueness conflict target and its `DO UPDATE` action without contention.
+**What it does** — Inserts one direct note share with `READ`, records its `created_at` identity, and creates an independent `READ` grant for a second grantee. It repeats the production upsert for only the first `(note_id, user_id)` pair with `WRITE`, then proves that exactly one row remains for that pair, its capabilities changed, its creation timestamp was preserved, and the second grant stayed `READ`. These observations distinguish the intended pair-scoped `DO UPDATE` from delete-and-reinsert and note-wide conflict-action mutations without requiring contention.
 
 **Dependencies**
 
 - `Store::{create_user, create_note}` — creates valid foreign-key principals and a note; expects: the returned IDs identify committed rows.
-- `Store::create_or_update_share` — executes the production conflict action twice; expects: a repeated pair updates `capabilities` and returns the affected row.
-- `Store::get_share` — reads the persisted grant; expects: the pair lookup returns the sole current row.
-- `sqlx::query_scalar` — counts the exact pair; expects: the `note_shares` primary key and upsert preserve one-row cardinality.
+- `Store::create_or_update_share` — creates two independent grants and executes the production conflict action for the first pair; expects: a repeated pair updates only `capabilities` while preserving that row's `created_at`.
+- `Store::get_share` — reads both persisted grants; expects: each pair lookup is isolated and returns its own current row.
+- `sqlx::query_scalar` — counts the updated pair; expects: the `note_shares` primary key and upsert preserve one-row cardinality.
 
 **Used by** — authorization mutation review for the `note_shares` upsert conflict action and pair uniqueness.
 
@@ -2243,7 +2254,8 @@ async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
 async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
-    let _new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let _third_owner_token = register_and_login(addr, "repeat-transfer-third@example.com").await;
     let owner = state
         .store
         .get_user_by_email("repeat-transfer-owner@example.com")
@@ -2253,6 +2265,12 @@ async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownersh
     let new_owner = state
         .store
         .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-third@example.com")
         .await
         .unwrap()
         .unwrap();
@@ -2310,20 +2328,41 @@ async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownersh
             .owner_id,
         new_owner.id
     );
+
+    let onward = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &new_owner_token,
+        json!({"user_id": third_owner.id}),
+    )
+    .await;
+    assert_eq!(onward.status(), 200);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        third_owner.id
+    );
 }
 ```
 
-**What it does** — Transfers a note once through the production HTTP route, records the new owner's row count, and repeats the identical request with the former owner's token. The repeat must return `403`; the new-owner count and authoritative `owner_id` must remain unchanged. This pins the owner-only repeat semantic independently of the stress test's one-request-per-note accounting.
+**What it does** — Transfers a note through the production HTTP route, records the new owner's row count, and repeats the request with the former owner's token. The repeat must return `403`, with the new-owner count and authoritative `owner_id` unchanged at that observation point. The current owner then transfers the note onward to a third principal and the test requires `200` plus the third principal's durable `owner_id`, proving the rejection is caller-specific rather than an over-broad ban on transferring a note more than once.
 
 **Dependencies**
 
-- `spawn_authorization_state` and `register_and_login` — exposes the real authenticated route and distinct principals; expects: bearer identity remains bound to the original owner after transfer.
-- `authed_json` — invokes `transfer_ownership` twice; expects: the first owner-authorized request commits and the former owner's repeat fails the owner-only access check with `403`.
-- `sqlx::query_scalar` and `Store::get_note` — observes durable ownership; expects: both reads agree that exactly one matching note remains owned by the target.
+- `spawn_authorization_state` and `register_and_login` — exposes the real authenticated route and three distinct principals; expects: each bearer identity remains bound to its registered principal across ownership changes.
+- `authed_json` — invokes `transfer_ownership` as the original owner, former owner, and current owner; expects: authorized transfers commit, while only the former owner's repeat fails the owner-only access check with `403`.
+- `sqlx::query_scalar` and `Store::get_note` — observes durable ownership after the rejected repeat and onward transfer; expects: reads identify the sole current owner after each completed request.
 
 **Used by** — authorization mutation review for the former-owner repeat-transfer `403` contract; supports the stable-transfer accounting argument in `mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
 
-**Repeated context** — Ownership transfer is not an idempotent success for the former owner: after the first commit that principal no longer has `can_transfer_ownership`.
+**Repeated context** — Ownership transfer is not an idempotent success for the former owner: after the first commit that principal no longer has `can_transfer_ownership`. The note remains transferable by whichever principal currently owns it.
 
 ---
 

@@ -1822,12 +1822,12 @@
           {
             "basis": "dependency-expectation",
             "origin": "INFERRED",
-            "value": "a repeated pair updates `capabilities` and returns the affected row."
+            "value": "a repeated pair updates only `capabilities` while preserving that row's `created_at`."
           },
           {
             "basis": "dependency-expectation",
             "origin": "INFERRED",
-            "value": "the pair lookup returns the sole current row."
+            "value": "each pair lookup is isolated and returns its own current row."
           },
           {
             "basis": "dependency-expectation",
@@ -1837,17 +1837,17 @@
           {
             "basis": "dependency-expectation",
             "origin": "INFERRED",
-            "value": "bearer identity remains bound to the original owner after transfer."
+            "value": "each bearer identity remains bound to its registered principal across ownership changes."
           },
           {
             "basis": "dependency-expectation",
             "origin": "INFERRED",
-            "value": "the first owner-authorized request commits and the former owner's repeat fails the owner-only access check with `403`."
+            "value": "authorized transfers commit, while only the former owner's repeat fails the owner-only access check with `403`."
           },
           {
             "basis": "dependency-expectation",
             "origin": "INFERRED",
-            "value": "both reads agree that exactly one matching note remains owned by the target."
+            "value": "reads identify the sole current owner after each completed request."
           },
           {
             "basis": "dependency-expectation",
