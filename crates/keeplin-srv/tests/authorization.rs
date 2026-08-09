@@ -1743,6 +1743,16 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .await
         .unwrap()
         .unwrap();
+    let cascade_witness = state
+        .store
+        .create_note(None, "account deletion cascade witness", target.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(cascade_witness.id, peer.id, Capabilities::READ)
+        .await
+        .unwrap();
     let mut notes = Vec::with_capacity(98);
     for index in 0..98 {
         let title = format!("hook-free contention {index}");
@@ -1751,9 +1761,10 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
             .create_note(None, &title, owner.id)
             .await
             .unwrap();
+        let share_target_id = if index < 49 { target.id } else { peer.id };
         state
             .store
-            .create_or_update_share(note.id, target.id, Capabilities::READ)
+            .create_or_update_share(note.id, share_target_id, Capabilities::READ)
             .await
             .unwrap();
         notes.push(note);
@@ -1806,10 +1817,11 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                         .await
                 }
                 1 => {
+                    let share_target_id = if index < 49 { target.id } else { peer.id };
                     client
                         .delete(format!(
                             "http://{addr}/api/notes/{}/share/{}",
-                            note_id, target.id
+                            note_id, share_target_id
                         ))
                         .bearer_auth(owner_token)
                         .json(&json!({}))
@@ -1847,15 +1859,27 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         *status_histogram
             .entry((operation, response.status().as_u16()))
             .or_insert(0) += 1;
-        assert!(
-            !response.status().is_server_error()
-                || (operation == "stable_transfer" && response.status().as_u16() == 503),
-            "mix seed {seed}: request returned {}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}",
-            response.status(),
-        );
     }
     eprintln!(
         "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let share_delete_outcomes = status_histogram
+        .iter()
+        .filter(|((operation, status), _)| {
+            *operation == "share_delete" && matches!(*status, 200 | 403 | 404 | 503)
+        })
+        .map(|(_, count)| count)
+        .sum::<usize>();
+    assert_eq!(
+        share_delete_outcomes,
+        98,
+        "mix seed {seed}: share deletion must succeed, lose owner authorization after transfer, lose its note to account deletion, or exhaust the serializable retry bound; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        status_histogram
+            .keys()
+            .all(|(_, status)| *status < 500 || *status == 503),
+        "mix seed {seed}: a request returned a server error other than designed retry exhaustion; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
     let stable_successes = status_histogram
         .get(&("stable_transfer", 200))
@@ -1873,6 +1897,17 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
     assert!(
         stable_successes >= 1,
         "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    let stable_peer_owners: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE owner_id = $1")
+            .bind(peer.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stable_peer_owners,
+        stable_successes as i64,
+        "mix seed {seed}: every stable 200 must correspond to a committed peer-owned note; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
     );
 
     let dangling_share_note: bool = sqlx::query_scalar(

@@ -2207,6 +2207,16 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .await
         .unwrap()
         .unwrap();
+    let cascade_witness = state
+        .store
+        .create_note(None, "account deletion cascade witness", target.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(cascade_witness.id, peer.id, Capabilities::READ)
+        .await
+        .unwrap();
     let mut notes = Vec::with_capacity(98);
     for index in 0..98 {
         let title = format!("hook-free contention {index}");
@@ -2215,9 +2225,10 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
             .create_note(None, &title, owner.id)
             .await
             .unwrap();
+        let share_target_id = if index < 49 { target.id } else { peer.id };
         state
             .store
-            .create_or_update_share(note.id, target.id, Capabilities::READ)
+            .create_or_update_share(note.id, share_target_id, Capabilities::READ)
             .await
             .unwrap();
         notes.push(note);
@@ -2270,10 +2281,11 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                         .await
                 }
                 1 => {
+                    let share_target_id = if index < 49 { target.id } else { peer.id };
                     client
                         .delete(format!(
                             "http://{addr}/api/notes/{}/share/{}",
-                            note_id, target.id
+                            note_id, share_target_id
                         ))
                         .bearer_auth(owner_token)
                         .json(&json!({}))
@@ -2311,15 +2323,27 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         *status_histogram
             .entry((operation, response.status().as_u16()))
             .or_insert(0) += 1;
-        assert!(
-            !response.status().is_server_error()
-                || (operation == "stable_transfer" && response.status().as_u16() == 503),
-            "mix seed {seed}: request returned {}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}",
-            response.status(),
-        );
     }
     eprintln!(
         "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let share_delete_outcomes = status_histogram
+        .iter()
+        .filter(|((operation, status), _)| {
+            *operation == "share_delete" && matches!(*status, 200 | 403 | 404 | 503)
+        })
+        .map(|(_, count)| count)
+        .sum::<usize>();
+    assert_eq!(
+        share_delete_outcomes,
+        98,
+        "mix seed {seed}: share deletion must succeed, lose owner authorization after transfer, lose its note to account deletion, or exhaust the serializable retry bound; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        status_histogram
+            .keys()
+            .all(|(_, status)| *status < 500 || *status == 503),
+        "mix seed {seed}: a request returned a server error other than designed retry exhaustion; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
     let stable_successes = status_histogram
         .get(&("stable_transfer", 200))
@@ -2337,6 +2361,17 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
     assert!(
         stable_successes >= 1,
         "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    let stable_peer_owners: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE owner_id = $1")
+            .bind(peer.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stable_peer_owners,
+        stable_successes as i64,
+        "mix seed {seed}: every stable 200 must correspond to a committed peer-owned note; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
     );
 
     let dangling_share_note: bool = sqlx::query_scalar(
@@ -2372,13 +2407,13 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
 }
 ```
 
-**What it does** — Launches exactly 200 real HTTP requests against 98 independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Thus the same run combines a non-degenerate write-path control cohort with the target-principal race. A stable transfer may return `503` when ADR 0002's three-attempt serializable retry bound is exhausted; all 49 stable transfers must be either `200` or that designed `503`, and at least one must return `200` to prove the control cohort completed the write path. No higher success floor is claimed because the accepted decision defines a retry bound, not a success-rate guarantee under this unscripted contention. Each share deletion addresses a different row, so repeated 200 responses no longer merely exercise the endpoint's intentional idempotence; a deletion may still lose legitimately to ownership transfer or the target account's cascade. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation order and adds up to seven milliseconds of launch jitter without using test hooks. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Other server errors fail the test, and direct database checks reject any surviving share without its note or principal and any note without its owner. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
+**What it does** — Creates a cascade witness owned by the deletion target and shared to the surviving peer, then launches exactly 200 real HTTP requests against 98 additional independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The witness makes the final foreign-key checks observable in every interleaving: account deletion must remove its note, while its peer share cannot disappear through the deleted principal's cascade. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Stable notes begin shared to the deletion target and contested notes begin shared to the surviving peer. Thus the same run combines a non-degenerate write-path control cohort with a natural target-principal race, without requiring a transfer-first outcome to prove the cascades. Every transfer, share deletion, and account deletion participates in a serializable transaction and may return `503` when ADR 0002's three-attempt retry bound is exhausted. All 49 stable transfers must be either `200` or that designed `503`, at least one must return `200`, and the final number of notes owned by the peer must equal the stable `200` count plus the cascade witness until account deletion removes that witness. Because account deletion completes in every run, the final equality is exactly the stable `200` count and proves that each status-labelled success committed the ownership write. No higher success floor is claimed: `503` prevalence depends on runtime load and scheduling and carries no correctness signal because the accepted decision defines a retry bound rather than a success-rate guarantee under unscripted contention. The HTTP error representation exposes `ServiceUnavailable` as one generic `503` and carries no reason discriminator, so the test cannot assert a retry-exhaustion response body; the serializable wrapper is the only current producer of that status on these paths. Each share deletion addresses a different row. Its explicit outcomes are `200`, `403` when a completed transfer removed the original owner's share-writing authority, `404` when account deletion removed the note, or the designed `503`; this distinguishes the exercised authorization-loss ordering from an unconstrained allowance. Outcome assertions run only after every request has joined so any failure reports the complete 200-request histogram rather than a launch-order prefix. Other 5xx responses remain forbidden. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation order and gives every request up to seven milliseconds of launch jitter. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Direct database checks reject any surviving share without its note or principal and any note without its owner. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
 
-**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention, with stable transfers exposing only success or ADR 0002's bounded-retry exhaustion. `Store::{create_note, create_or_update_share}` creates one contested unit per transfer/delete pair; expects: each note and share is independent so one committed mutation cannot make the remaining workload vacuous. `BTreeMap` records stable per-operation status counts; expects: the stable-transfer cohort is distinguishable from contested refusals and remains available for successful-run output and failure diagnostics. PostgreSQL foreign keys and the final anti-join queries provide whole-database validation; expects: every surviving share resolves both its note and principal, and every surviving note resolves its owner.
+**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention, with every serializable participant able to expose ADR 0002's bounded-retry exhaustion as `503`. `Store::{create_note, create_or_update_share}` creates the target-owned, peer-shared cascade witness and one unit per transfer/delete pair; expects: target deletion necessarily exercises both the owner and note-side cascades while the surviving peer prevents the witness share from being masked by a principal-side cascade. `BTreeMap` records stable per-operation status counts; expects: all responses remain available for complete-run outcome validation and diagnostics, and the stable-transfer cohort remains distinguishable from contested refusals. `sqlx::query_scalar` counts committed peer-owned notes and performs the final anti-join queries; expects: a stable `200` has exactly one durable ownership row, every surviving share resolves both its note and principal, and every surviving note resolves its owner. PostgreSQL foreign keys supply the cascades whose integrity those queries validate.
 
 **Used by** — issue #149 concurrency regression suite.
 
-**Repeated context** — The seed reproduces only the operation mix, shuffle, and launch delays. It does not control Tokio polling, connection acquisition, PostgreSQL lock order, or transaction winners, so a failure is not replayable by seed alone. Reproducing the interleaving would require explicit handler checkpoints or barriers plus control of database progress; that belongs in the focused deterministic interleaving tests and would defeat this test's purpose as a hook-free natural-contention probe.
+**Repeated context** — The seed reproduces only the operation mix, shuffle, and launch delays. It does not control Tokio polling, connection acquisition, PostgreSQL lock order, or transaction winners, so a failure is not replayable by seed alone and contested-transfer status prevalence is machine-dependent. The cascade witness makes referential-integrity observability independent of that prevalence. Reproducing an exact interleaving requires explicit handler checkpoints or barriers plus control of database progress; `transfer_and_target_account_deletion_resolve_coherently` provides that focused deterministic coverage, while this test remains a hook-free natural-contention probe.
 
 ---
 
