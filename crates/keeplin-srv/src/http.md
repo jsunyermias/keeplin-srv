@@ -1334,15 +1334,24 @@ async fn delete_account(
     user: AuthedUser,
     Json(body): Json<DeleteAccountBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let stored = state
+        .store
+        .get_user_by_id(user.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !auth::verify_password(&body.password, &stored.password_hash)? {
+        return Err(AppError::InvalidToken);
+    }
+    let verified_password_hash = stored.password_hash;
     serializable(state.clone(), "delete_account", |state, conn| {
-        let password = body.password.clone();
+        let verified_password_hash = verified_password_hash.clone();
         Box::pin(async move {
             let stored = state
                 .store
                 .get_user_by_id_on(conn, user.user_id)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if !auth::verify_password(&password, &stored.password_hash)? {
+            if stored.password_hash != verified_password_hash {
                 return Err(AppError::InvalidToken);
             }
             state.store.delete_user_on(conn, user.user_id).await
