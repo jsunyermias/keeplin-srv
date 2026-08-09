@@ -1,8 +1,10 @@
 // md:Overview
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fs,
     io::Write,
     net::SocketAddr,
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -354,6 +356,54 @@ struct HandlerAuthorization {
     inputs: &'static [&'static str],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterleavingOutcome {
+    Refusal(u16),
+    Replay(u16),
+    Exempt(&'static str),
+}
+
+struct HandlerInterleaving {
+    handler: &'static str,
+    transition: &'static str,
+    outcome: InterleavingOutcome,
+    case: Option<&'static str>,
+}
+
+const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
+    HandlerInterleaving { handler: "change_password", transition: "none", outcome: InterleavingOutcome::Exempt("the credential is the mutation target and there is no separate resource authorization guard"), case: None },
+    HandlerInterleaving { handler: "crate::collab::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the collaboration session protocol is outside the HTTP operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "crate::sync::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the sync session protocol is outside the per-HTTP-operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_notebook_share") },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
+    HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "delete_account", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_delete_account") },
+    HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
+    HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
+    HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
+    HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
+    HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_notebook") },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_ownership") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
+    HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "verify_request", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+];
+
+const TARGET_PRINCIPAL_REREAD_HANDOFF: &str =
+    "target principal existence query (users SIREAD; include all four in #145 quota conflict matrix)";
+
 const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
     HandlerAuthorization {
         handler: "change_password",
@@ -387,12 +437,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "create_share",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "delete_account",
@@ -545,12 +600,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "transfer_ownership",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "update_note",
@@ -588,6 +648,7 @@ const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
     "create_notebook_share",
     "delete_notebook_share",
     "transfer_notebook",
+    "delete_account",
 ];
 
 fn routed_handlers(source: &str) -> Vec<String> {
@@ -617,6 +678,108 @@ fn routed_handlers(source: &str) -> Vec<String> {
             })
         })
         .collect()
+}
+
+// md:fn collect_writer_sources
+fn collect_writer_sources(path: &Path, files: &mut Vec<(String, String)>) {
+    for entry in fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_writer_sources(&path, files);
+        } else if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("rs" | "writer")
+        ) {
+            files.push((
+                path.display().to_string(),
+                fs::read_to_string(path).unwrap(),
+            ));
+        }
+    }
+}
+
+// md:fn guarded_writer_inventory_unions_source_and_catalog
+#[sqlx::test(migrations = "../../migrations")]
+async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_writer_sources(&root.join("src"), &mut sources);
+    collect_writer_sources(&root.join("tests/fixtures"), &mut sources);
+    let guarded = ["notes", "note_shares", "notebooks", "notebook_shares"];
+    let mut source_writers = BTreeMap::new();
+    let mut decoy_detected = false;
+    for (path, source) in &sources {
+        let uppercase = source
+            .replace('"', "")
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for table in guarded {
+            let table_upper = table.to_ascii_uppercase();
+            for verb in ["INSERT INTO", "UPDATE", "DELETE FROM"] {
+                let occurrences = uppercase.matches(&format!("{verb} {table_upper}")).count();
+                *source_writers.entry(table).or_insert(0) += occurrences;
+                decoy_detected |= occurrences > 0
+                    && path.ends_with("writer_inventory_decoy.writer")
+                    && table == "notebook_shares";
+            }
+        }
+    }
+    assert_eq!(
+        source_writers,
+        [("note_shares", 2), ("notebook_shares", 3), ("notebooks", 4), ("notes", 4)]
+            .into_iter()
+            .collect(),
+        "literal writer occurrence inventory changed; classify every new site and make its Rust entry point join the serializable protocol"
+    );
+    assert!(decoy_detected, "the permanently planted direct-SQL decoy was not detected; this scanner sees literal INSERT, UPDATE, and DELETE statements only");
+
+    let guarded_names = guarded.into_iter().map(str::to_string).collect::<Vec<_>>();
+    let cascade_tables: BTreeSet<String> = sqlx::query_scalar(
+        "WITH RECURSIVE affected(table_oid) AS (SELECT value::regclass FROM unnest($1::text[]) value UNION SELECT CASE WHEN constraint_row.conrelid = affected.table_oid THEN constraint_row.confrelid ELSE constraint_row.conrelid END FROM pg_constraint constraint_row JOIN affected ON constraint_row.conrelid = affected.table_oid OR constraint_row.confrelid = affected.table_oid WHERE constraint_row.contype = 'f' AND constraint_row.confdeltype = 'c') SELECT table_oid::regclass::text FROM affected",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect();
+    assert_eq!(
+        cascade_tables,
+        [
+            "changes",
+            "device_cursors",
+            "email_tokens",
+            "lines",
+            "note_line_order",
+            "note_shares",
+            "note_tags",
+            "notebook_shares",
+            "notebooks",
+            "notes",
+            "resource_blobs",
+            "resources",
+            "tags",
+            "user_devices",
+            "users",
+        ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "catalog cascade closure walks both FK directions, conservatively including parents; it is table-level and does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
+    );
+    let trigger_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT relation.relname FROM pg_trigger trigger_row JOIN pg_class relation ON relation.oid = trigger_row.tgrelid WHERE NOT trigger_row.tgisinternal AND relation.relname = ANY($1)",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        trigger_tables.is_empty(),
+        "a trigger exists on guarded state; catalog discovery cannot prove what its body writes, so classify its Rust entry point explicitly"
+    );
 }
 
 // md:fn handler_authorization_inventory_covers_router
@@ -734,6 +897,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_notebook_share",
         "delete_notebook_share",
         "transfer_notebook",
+        "delete_account",
     ]
     .into_iter()
     .collect();
@@ -754,21 +918,1653 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_or_update_notebook_share_on",
         "delete_notebook_share_on",
         "set_notebook_owner_on",
+        "delete_user_on",
     ];
     for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
             .split(&format!("// {}fn {handler}", "md:"))
             .nth(1)
             .unwrap()
-            .split("// md:")
+            .split(concat!("// ", "md:"))
             .next()
             .unwrap();
+        assert_eq!(
+            body.matches(&format!("serializable(state.clone(), \"{handler}\","))
+                .count(),
+            1,
+            "{handler} must have exactly one SERIALIZABLE retry boundary"
+        );
+        let boundary_start = body
+            .find(&format!("serializable(state.clone(), \"{handler}\","))
+            .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
+        let call_line = &body[body[..boundary_start].rfind('\n').unwrap() + 1..boundary_start];
+        let indentation = &call_line[..call_line.len() - call_line.trim_start().len()];
+        let boundary = &body[boundary_start..];
+        let boundary_end = boundary
+            .find(&format!("\n{indentation}.await{};", "?"))
+            .unwrap_or_else(|| panic!("{handler} has no awaited SERIALIZABLE boundary terminator"));
+        let boundary = &boundary[..boundary_end];
         assert!(
-            body.contains(&format!("serializable(state.clone(), \"{handler}\","))
-                && body.contains(mutation),
-            "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
+            boundary.contains(mutation),
+            "{handler} must execute {mutation} inside the SERIALIZABLE retry closure"
         );
     }
+    let delete_account = source
+        .split(concat!("// ", "md:fn delete_account"))
+        .nth(1)
+        .unwrap()
+        .split(concat!("// ", "md:"))
+        .next()
+        .unwrap();
+    assert!(
+        delete_account.find("auth::verify_password").unwrap()
+            < delete_account.find("serializable(state.clone()").unwrap(),
+        "delete_account must not hold a transaction or pool connection across Argon2 verification"
+    );
+    assert!(
+        delete_account.contains("stored.password_hash != verified_password_hash"),
+        "delete_account must reject a password-hash change between verification and deletion"
+    );
+}
+
+// md:fn changed_password_is_reverified_for_delete_account
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn changed_password_is_reverified_for_delete_account(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let token = register_and_login(addr, "delete-password-race@example.com").await;
+    state
+        .http_test_hooks
+        .pause_at("delete_account", "before_operation")
+        .await;
+    let delete_token = token.clone();
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::DELETE,
+            addr,
+            "/api/account",
+            &delete_token,
+            json!({ "password": "password123" }),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_account", "before_operation")
+        .await;
+    let changed = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        "/api/account/password",
+        &token,
+        json!({ "current_password": "password123", "new_password": "changed123" }),
+    )
+    .await;
+    assert_eq!(changed.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 401);
+    assert!(state
+        .store
+        .get_user_by_email("delete-password-race@example.com")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+// md:fn sync_notebook_writers_retry_real_40001_within_the_bound
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_retry_real_40001_within_the_bound(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-retry@example.com", "hash", "sync retry")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('sync_writer_failure_sequence') <= 1 THEN RAISE EXCEPTION USING ERRCODE = '40001'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("retry once");
+    assert!(store.upsert_notebook(user.id, &notebook).await.unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
+}
+
+// md:fn sync_notebook_writers_do_not_retry_a_fourth_time
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-exhaust@example.com", "hash", "sync exhaust")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('sync_writer_failure_sequence'); RAISE EXCEPTION USING ERRCODE = '40001'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("exhaust retries");
+    assert!(store.upsert_notebook(user.id, &notebook).await.is_err());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1)"
+    )
+    .bind(notebook.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
+// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("real-ssi@example.com", "hash", "real ssi")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE real_ssi_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER rendezvous_real_ssi BEFORE INSERT ON notebooks FOR EACH ROW EXECUTE FUNCTION rendezvous_real_ssi()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let left_notebook = Notebook::new("real serialization retry left");
+    let right_notebook = Notebook::new("real serialization retry right");
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(left_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(right_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let user_id = user.id;
+    let left_store = store.clone();
+    let left_id = left_notebook.id;
+    let left =
+        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
+    let right_store = store.clone();
+    let right_id = right_notebook.id;
+    let right =
+        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted AND locks.objid IN (hashtext($1::text), hashtext($2::text))",
+            )
+            .bind(left_id)
+            .bind(right_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(left_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(left.await.unwrap().unwrap());
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(right_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(right.await.unwrap().unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+}
+
+// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state(
+    pool: PgPool,
+) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-rollback@example.com", "hash", "sync rollback")
+        .await
+        .unwrap();
+    let inserted = Notebook::new("failed insert");
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_insert_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_insert_after AFTER INSERT ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_insert_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(entity_snapshot(&pool, "notebooks", inserted.id).await, None);
+    sqlx::query("DROP TRIGGER fail_notebook_insert_after ON notebooks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("failed delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    let before = entity_snapshot(&pool, "notebooks", deleted.id).await;
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_delete_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_delete_after AFTER UPDATE ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_delete_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let deletion_vv = VersionVector::from([("rollback-test".to_string(), 1)]);
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
+            "rollback-test",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", deleted.id).await,
+        before
+    );
+}
+
+// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_non_serialization_failures(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "sync-non-retryable@example.com",
+            "hash",
+            "sync non retryable",
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE non_retryable_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23505'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_notebook_constraint BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_notebook_constraint()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let inserted = Notebook::new("non-retryable insert");
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23503'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let foreign_key_failure = Notebook::new("non-retryable foreign key");
+    assert!(store
+        .upsert_notebook(user.id, &foreign_key_failure)
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    sqlx::query("ALTER TABLE notebooks DISABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("non-retryable delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    sqlx::query("ALTER TABLE notebooks ENABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deletion_vv = VersionVector::from([("non-retryable".to_string(), 1)]);
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
+            "non-retryable",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+}
+
+// md:fn target_principals_are_reverified_in_share_and_transfer_transactions
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principals_are_reverified_in_share_and_transfer_transactions(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "target-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("target-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    for (handler, path, body) in [
+        {
+            let target = state
+                .store
+                .create_user("target-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "share target", owner.id)
+                .await
+                .unwrap();
+            (
+                "create_share",
+                format!("/api/notes/{}/share", note.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "transfer target", owner.id)
+                .await
+                .unwrap();
+            (
+                "transfer_ownership",
+                format!("/api/notes/{}/transfer", note.id),
+                json!({"user_id": target.id}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook share target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "create_notebook_share",
+                format!("/api/notebooks/{}/share", notebook.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook transfer target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "transfer_notebook",
+                format!("/api/notebooks/{}/transfer", notebook.id),
+                json!({"user_id": target.id}),
+            )
+        },
+    ] {
+        let target_id = Uuid::parse_str(body["user_id"].as_str().unwrap()).unwrap();
+        state
+            .http_test_hooks
+            .pause_at(handler, "before_operation")
+            .await;
+        let request_client = client.clone();
+        let request_token = owner_token.clone();
+        let request = tokio::spawn(async move {
+            authed_json(
+                &request_client,
+                reqwest::Method::POST,
+                addr,
+                &path,
+                &request_token,
+                body,
+            )
+            .await
+        });
+        state
+            .http_test_hooks
+            .wait_until_reached(handler, "before_operation")
+            .await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(target_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        state.http_test_hooks.resume();
+        assert_eq!(
+            request.await.unwrap().status(),
+            404,
+            "{handler} accepted a target deleted after its preliminary lookup"
+        );
+    }
+}
+
+// md:fn target_principal_recheck_locks_the_user_until_transaction_end
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principal_recheck_locks_the_user_until_transaction_end(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let target = store
+        .create_user("target-lock@example.com", "old hash", "target lock")
+        .await
+        .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    store
+        .get_user_by_id_on(&mut transaction, target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let update_store = store.clone();
+    let update = tokio::spawn(async move {
+        update_store
+            .update_password(target.id, "new hash")
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query LIKE 'UPDATE users SET password_hash%' AND wait_event_type = 'Lock')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), update)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .get_user_by_id(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .password_hash,
+        "new hash"
+    );
+}
+
+// md:fn successful_transfers_remove_target_shares
+#[sqlx::test(migrations = "../../migrations")]
+async fn successful_transfers_remove_target_shares(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-cleanup-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-cleanup-target@example.com").await;
+    let _third_token = register_and_login(addr, "transfer-cleanup-third@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-cleanup-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-cleanup-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third = state
+        .store
+        .get_user_by_email("transfer-cleanup-third@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer cleanup note", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    let client = reqwest::Client::new();
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        target.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    let notebook = Notebook::new("transfer cleanup notebook");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/transfer", notebook.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(target.id)
+    );
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+// md:fn transfer_and_target_account_deletion_resolve_coherently
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-delete-owner@example.com").await;
+    let target_token = register_and_login(addr, "transfer-delete-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-delete-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer deletion race", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let transfer = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &owner_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    let deletion = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &target_token,
+        json!({"password": "password123"}),
+    )
+    .await;
+    assert_eq!(deletion.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(transfer.await.unwrap().status(), 404);
+    assert!(state
+        .store
+        .get_user_by_id(target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        owner.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn repeated_share_upsert_updates_the_single_existing_grant
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("share-upsert-owner@example.com", "hash", "Owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
+        .await
+        .unwrap();
+    let other_grantee = store
+        .create_user("share-upsert-other@example.com", "hash", "Other grantee")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "share upsert conflict action", owner.id)
+        .await
+        .unwrap();
+
+    let original_share = store
+        .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, other_grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+
+    let share_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM note_shares WHERE note_id = $1 AND user_id = $2")
+            .bind(note.id)
+            .bind(grantee.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(share_count, 1);
+    let updated_share = store.get_share(note.id, grantee.id).await.unwrap().unwrap();
+    assert_eq!(updated_share.capabilities, Capabilities::WRITE);
+    assert_eq!(updated_share.created_at, original_share.created_at);
+    assert_eq!(
+        store
+            .get_share(note.id, other_grantee.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capabilities,
+        Capabilities::READ
+    );
+}
+
+// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let _third_owner_token = register_and_login(addr, "repeat-transfer-third@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("repeat-transfer-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-third@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "repeat transfer semantic", owner.id)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let first = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(first.status(), 200);
+    let owned_before_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_before_repeat, 1);
+
+    let repeated = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(repeated.status(), 403);
+    let owned_after_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_after_repeat, owned_before_repeat);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+
+    let onward = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &new_owner_token,
+        json!({"user_id": third_owner.id}),
+    )
+    .await;
+    assert_eq!(onward.status(), 200);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        third_owner.id
+    );
+}
+
+// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+#[sqlx::test(migrations = "../../migrations")]
+async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity(
+    pool: PgPool,
+) {
+    const REQUESTS: usize = 200;
+    const DEFAULT_SEED: u64 = 149_004;
+
+    let seed = std::env::var("KEEPLIN_STRESS_SEED")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("KEEPLIN_STRESS_SEED must be a u64")
+        })
+        .unwrap_or(DEFAULT_SEED);
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let _peer_token = register_and_login(addr, "stress-peer@example.com").await;
+    let target_token = register_and_login(addr, "stress-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("stress-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("stress-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = state
+        .store
+        .get_user_by_email("stress-peer@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let cascade_witness = state
+        .store
+        .create_note(None, "account deletion cascade witness", target.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(cascade_witness.id, peer.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let mut notes = Vec::with_capacity(98);
+    for index in 0..98 {
+        let title = format!("hook-free contention {index}");
+        let note = state
+            .store
+            .create_note(None, &title, owner.id)
+            .await
+            .unwrap();
+        let share_target_id = if index < 49 { target.id } else { peer.id };
+        state
+            .store
+            .create_or_update_share(note.id, share_target_id, Capabilities::READ)
+            .await
+            .unwrap();
+        notes.push(note);
+    }
+
+    let mut schedule = (0..REQUESTS)
+        .map(|index| {
+            let operation = if index < 98 {
+                0
+            } else if index < 196 {
+                1
+            } else {
+                2
+            };
+            (operation, index % 98, 0_u64)
+        })
+        .collect::<Vec<_>>();
+    let mut random = seed;
+    for index in (1..schedule.len()).rev() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let other = (random as usize) % (index + 1);
+        schedule.swap(index, other);
+    }
+    for (_, _, delay) in &mut schedule {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        *delay = random % 8;
+    }
+
+    let client = reqwest::Client::new();
+    let mut requests = Vec::with_capacity(REQUESTS);
+    for (operation, index, delay) in schedule {
+        let client = client.clone();
+        let owner_token = owner_token.clone();
+        let target_token = target_token.clone();
+        let note_id = notes[index].id;
+        requests.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            let response = match operation {
+                0 => {
+                    let target_id = if index < 49 { peer.id } else { target.id };
+                    client
+                        .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
+                        .bearer_auth(owner_token)
+                        .json(&json!({"user_id": target_id}))
+                        .send()
+                        .await
+                }
+                1 => {
+                    let share_target_id = if index < 49 { target.id } else { peer.id };
+                    client
+                        .delete(format!(
+                            "http://{addr}/api/notes/{}/share/{}",
+                            note_id, share_target_id
+                        ))
+                        .bearer_auth(owner_token)
+                        .json(&json!({}))
+                        .send()
+                        .await
+                }
+                _ => {
+                    client
+                        .delete(format!("http://{addr}/api/account"))
+                        .bearer_auth(target_token)
+                        .json(&json!({"password": "password123"}))
+                        .send()
+                        .await
+                }
+            };
+            (operation, index, response)
+        }));
+    }
+    let mut status_histogram = BTreeMap::new();
+    for request in requests {
+        let (operation, index, response) = request.await.unwrap_or_else(|error| {
+            panic!(
+                "mix seed {seed}: request task failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+            )
+        });
+        let response = response.unwrap_or_else(|error| {
+            panic!("mix seed {seed}: request failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}")
+        });
+        let operation = match operation {
+            0 if index < 49 => "stable_transfer",
+            0 => "contested_transfer",
+            1 => "share_delete",
+            _ => "account_delete",
+        };
+        *status_histogram
+            .entry((operation, response.status().as_u16()))
+            .or_insert(0) += 1;
+    }
+    eprintln!(
+        "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let share_delete_outcomes = status_histogram
+        .iter()
+        .filter(|((operation, status), _)| {
+            *operation == "share_delete" && matches!(*status, 200 | 403 | 404 | 503)
+        })
+        .map(|(_, count)| count)
+        .sum::<usize>();
+    assert_eq!(
+        share_delete_outcomes,
+        98,
+        "mix seed {seed}: share deletion must succeed, lose owner authorization after transfer, lose its note to account deletion, or exhaust the serializable retry bound; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        status_histogram
+            .keys()
+            .all(|(_, status)| *status < 500 || *status == 503),
+        "mix seed {seed}: a request returned a server error other than designed retry exhaustion; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    let stable_successes = status_histogram
+        .get(&("stable_transfer", 200))
+        .copied()
+        .unwrap_or(0);
+    let stable_exhaustions = status_histogram
+        .get(&("stable_transfer", 503))
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        stable_successes + stable_exhaustions,
+        49,
+        "mix seed {seed}: stable transfers must return 200 or the designed retry-exhaustion 503; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        stable_successes >= 1,
+        "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    let stable_peer_owners: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE owner_id = $1")
+            .bind(peer.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stable_peer_owners,
+        stable_successes as i64,
+        "mix seed {seed}: every stable 200 must correspond to a committed peer-owned note; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+
+    let dangling_share_note: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN notes note ON note.id = share.note_id WHERE note.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_share: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM notes note LEFT JOIN users owner_row ON owner_row.id = note.owner_id WHERE owner_row.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !dangling_share_note,
+        "mix seed {seed}: a surviving share has no note; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        !dangling_share,
+        "mix seed {seed}: a surviving share has no principal; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        !dangling_owner,
+        "mix seed {seed}: a surviving note has no owner; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+}
+
+// md:fn revoked_share_authority_is_reverified_for_create_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "create-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "create-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "create-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("create-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("create-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("create-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "create-share authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("create_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", note.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn revoked_ownership_is_reverified_for_transfer_ownership
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-note-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-note-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-note-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-note-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-note-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer-note authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+
+// md:fn revoked_share_authority_is_reverified_for_create_notebook_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_notebook_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "notebook-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "notebook-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "notebook-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("notebook-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("notebook-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("notebook-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("notebook-share authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("create_notebook_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_notebook_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn revoked_ownership_is_reverified_for_transfer_notebook
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_notebook(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-notebook-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-notebook-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-notebook-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-notebook-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("transfer-notebook authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("transfer_notebook", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_notebook", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(new_owner.id)
+    );
+}
+
+// md:fn revoked_note_guard_is_refused_for_delete_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let _owner_token = register_and_login(addr, "guard-owner@example.com").await;
+    let actor_token = register_and_login(addr, "guard-actor@example.com").await;
+    let _target_token = register_and_login(addr, "guard-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("guard-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let actor = state
+        .store
+        .get_user_by_email("guard-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("guard-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    let notebook = Notebook::new("delete-share guard");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete-share guard", owner.id)
+        .await
+        .unwrap();
+    let note = state
+        .store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_share", "before_operation")
+        .await;
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}/share/{}", note.id, target.id),
+            &actor_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_share", "before_operation")
+        .await;
+    assert!(state.store.delete_share(note.id, actor.id).await.unwrap());
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(state
+        .store
+        .get_share(note.id, actor.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// md:fn transferred_ownership_is_reverified_for_delete_note
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "delete-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("delete-new-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete ownership guard", owner.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_note", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let delete_client = client.clone();
+    let delete_token = owner_token.clone();
+    let note_id = note.id;
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &delete_client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{note_id}"),
+            &delete_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_note", "before_operation")
+        .await;
+    let transfer_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(transfer_response.status(), 200);
+    let share_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &new_owner_token,
+        json!({"user_id": owner.id, "capabilities": Capabilities::READ}),
+    )
+    .await;
+    assert_eq!(share_response.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 403);
+    let persisted = state.store.get_note(note.id).await.unwrap().unwrap();
+    assert_eq!(persisted.owner_id, new_owner.id);
+    assert!(persisted.deleted_at.is_none());
 }
 
 // md:fn authorization_reads_observe_transaction_local_state
@@ -1139,6 +2935,45 @@ fn authorization_inventory_is_complete() {
     );
 }
 
+// md:fn mutating_handler_interleaving_harness_is_complete
+#[test]
+fn mutating_handler_interleaving_harness_is_complete() {
+    let inventory = HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .filter(|entry| entry.kind == HandlerKind::Mutating)
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    let harness = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inventory, harness);
+    let distinct_rows = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| (entry.handler, entry.transition))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(distinct_rows.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
+    let tests = include_str!("authorization.rs");
+    for entry in MUTATING_HANDLER_INTERLEAVINGS {
+        assert!(!entry.transition.is_empty());
+        match (entry.outcome, entry.case) {
+            (InterleavingOutcome::Refusal(status), Some(case)) => {
+                assert!((400..500).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Replay(status), Some(case)) => {
+                assert!((200..300).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Exempt(reason), None) => {
+                assert_eq!(entry.transition, "none");
+                assert!(!reason.is_empty());
+            }
+            _ => panic!("{} has an unpinned or contradictory outcome", entry.handler),
+        }
+    }
+}
+
 // md:fn inventory_classifications_are_disjoint_and_cases_are_tests
 #[test]
 fn inventory_classifications_are_disjoint_and_cases_are_tests() {
@@ -1397,11 +3232,11 @@ async fn authed_json(
 }
 
 // md:fn entity_snapshot
-async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
+async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String> {
     let query = format!("SELECT to_jsonb(t)::text FROM {table} t WHERE id = $1");
     sqlx::query_scalar(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .unwrap()
 }
@@ -1479,7 +3314,10 @@ async fn serializable_move_interleaving_and_byte_equivalent_refusal(pool: PgPool
             .await
         })
     };
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("update_note", "after_early_move_guard")
+        .await;
     store
         .create_or_update_notebook_share(source.id, carol.id, Capabilities::READ)
         .await
@@ -1566,24 +3404,179 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    let note = store
+    let target = store
+        .create_user("rollback-target@example.com", "hash", "rollback target")
+        .await
+        .unwrap();
+    let update_note = store
         .create_note(None, "rollback original", owner.id)
         .await
         .unwrap();
-    state.http_test_hooks.inject_failure_after_mutation();
-    let failed = authed_json(
-        &reqwest::Client::new(),
-        reqwest::Method::PATCH,
-        addr,
-        &format!("/api/notes/{}", note.id),
-        &owner_token,
-        json!({ "title": "must roll back" }),
+    let delete_note = store
+        .create_note(None, "rollback delete", owner.id)
+        .await
+        .unwrap();
+    let create_share_note = store
+        .create_note(None, "rollback create share", owner.id)
+        .await
+        .unwrap();
+    let delete_share_note = store
+        .create_note(None, "rollback delete share", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(delete_share_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note = store
+        .create_note(None, "rollback transfer", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(transfer_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let create_share_notebook = Notebook::new("rollback create notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &create_share_notebook)
+        .await
+        .unwrap());
+    let delete_share_notebook = Notebook::new("rollback delete notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &delete_share_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(delete_share_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_notebook = Notebook::new("rollback notebook transfer");
+    assert!(store
+        .upsert_notebook(owner.id, &transfer_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(transfer_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note_share_before =
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await;
+    let transfer_notebook_share_before = relation_snapshot(
+        store.pool(),
+        "notebook_shares",
+        "notebook_id",
+        transfer_notebook.id,
     )
     .await;
-    assert_eq!(failed.status(), 500);
+    let client = reqwest::Client::new();
+    let cases = [
+        (
+            reqwest::Method::PATCH,
+            format!("/api/notes/{}", update_note.id),
+            json!({ "title": "must roll back" }),
+            "notes",
+            "id",
+            update_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}", delete_note.id),
+            json!({}),
+            "notes",
+            "id",
+            delete_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/share", create_share_note.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "note_shares",
+            "note_id",
+            create_share_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}/share/{}", delete_share_note.id, target.id),
+            json!({}),
+            "note_shares",
+            "note_id",
+            delete_share_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/transfer", transfer_note.id),
+            json!({ "user_id": target.id }),
+            "notes",
+            "id",
+            transfer_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/share", create_share_notebook.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "notebook_shares",
+            "notebook_id",
+            create_share_notebook.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!(
+                "/api/notebooks/{}/share/{}",
+                delete_share_notebook.id, target.id
+            ),
+            json!({}),
+            "notebook_shares",
+            "notebook_id",
+            delete_share_notebook.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/transfer", transfer_notebook.id),
+            json!({ "user_id": target.id }),
+            "notebooks",
+            "id",
+            transfer_notebook.id,
+        ),
+    ];
+    for (method, path, body, table, key, id) in cases {
+        let before = relation_snapshot(store.pool(), table, key, id).await;
+        state.http_test_hooks.inject_failure_after_mutation();
+        let failed = authed_json(&client, method, addr, &path, &owner_token, body).await;
+        assert_eq!(failed.status(), 500, "{path}");
+        assert_eq!(
+            relation_snapshot(store.pool(), table, key, id).await,
+            before
+        );
+    }
     assert_eq!(
-        store.get_note(note.id).await.unwrap().unwrap().title,
-        "rollback original"
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await,
+        transfer_note_share_before
+    );
+    assert_eq!(
+        relation_snapshot(
+            store.pool(),
+            "notebook_shares",
+            "notebook_id",
+            transfer_notebook.id,
+        )
+        .await,
+        transfer_notebook_share_before
+    );
+    let owner_before = entity_snapshot(store.pool(), "users", owner.id).await;
+    state.http_test_hooks.inject_failure_after_mutation();
+    let failed = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &owner_token,
+        json!({ "password": "password123" }),
+    )
+    .await;
+    assert_eq!(failed.status(), 500, "/api/account");
+    assert_eq!(
+        entity_snapshot(store.pool(), "users", owner.id).await,
+        owner_before
     );
 }
 
@@ -1680,7 +3673,10 @@ async fn serializable_two_failures_defer_revocation_notice_until_commit(pool: Pg
         )
         .await
     });
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_notebook_share", "after_mutation")
+        .await;
     assert!(inbox.lock().await.is_empty());
     assert_eq!(state.http_test_hooks.observations().3 - before.3, 0);
     state.http_test_hooks.inject_serialization_failures(2);

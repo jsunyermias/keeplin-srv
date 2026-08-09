@@ -11,9 +11,11 @@ Self-contained companion for `crates/keeplin-srv/tests/authorization.rs`.
 ```rust
 // md:Overview
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fs,
     io::Write,
     net::SocketAddr,
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -455,6 +457,54 @@ struct HandlerAuthorization {
     inputs: &'static [&'static str],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterleavingOutcome {
+    Refusal(u16),
+    Replay(u16),
+    Exempt(&'static str),
+}
+
+struct HandlerInterleaving {
+    handler: &'static str,
+    transition: &'static str,
+    outcome: InterleavingOutcome,
+    case: Option<&'static str>,
+}
+
+const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
+    HandlerInterleaving { handler: "change_password", transition: "none", outcome: InterleavingOutcome::Exempt("the credential is the mutation target and there is no separate resource authorization guard"), case: None },
+    HandlerInterleaving { handler: "crate::collab::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the collaboration session protocol is outside the HTTP operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "crate::sync::handler", transition: "none", outcome: InterleavingOutcome::Exempt("the sync session protocol is outside the per-HTTP-operation interleaving harness"), case: None },
+    HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_notebook_share") },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
+    HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "delete_account", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_delete_account") },
+    HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
+    HandlerInterleaving { handler: "delete_note", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("transferred_ownership_is_reverified_for_delete_note") },
+    HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
+    HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
+    HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+    HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
+    HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
+    HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_notebook") },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_ownership") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
+    HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
+    HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
+    HandlerInterleaving { handler: "verify_request", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
+];
+
+const TARGET_PRINCIPAL_REREAD_HANDOFF: &str =
+    "target principal existence query (users SIREAD; include all four in #145 quota conflict matrix)";
+
 const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
     HandlerAuthorization {
         handler: "change_password",
@@ -488,12 +538,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "create_share",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "delete_account",
@@ -646,12 +701,17 @@ const HTTP_HANDLER_AUTHORIZATION: &[HandlerAuthorization] = &[
             "notebook resolver",
             "authenticated identity",
             "ownership query",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
         ],
     },
     HandlerAuthorization {
         handler: "transfer_ownership",
         kind: HandlerKind::Mutating,
-        inputs: &["note resolver", "authenticated identity"],
+        inputs: &[
+            "note resolver",
+            "authenticated identity",
+            TARGET_PRINCIPAL_REREAD_HANDOFF,
+        ],
     },
     HandlerAuthorization {
         handler: "update_note",
@@ -689,6 +749,7 @@ const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
     "create_notebook_share",
     "delete_notebook_share",
     "transfer_notebook",
+    "delete_account",
 ];
 
 fn routed_handlers(source: &str) -> Vec<String> {
@@ -728,14 +789,154 @@ no check verifies. The inventory excludes credential and token reads at the unau
 `login`, `reset_request`, `verify_confirm`, and `reset_confirm` entry points from ADR 0002's
 authorization seam. It classifies `entity_history` as response materialization deferred to phase 3,
 not an authorization input. It also records the executor-aware authorization reads and ADR 0002's
-exact eight-handler serializable invariant set as data without enabling that isolation level in
-phase 1.
+exact nine-handler serializable invariant set as data without enabling that isolation level in
+phase 1. `TARGET_PRINCIPAL_REREAD_HANDOFF` also records that the four target-principal writers read
+`users` inside their serializable transactions, creating SIREAD dependencies that issue #145's
+quota conflict matrix must include.
 
 **Dependencies** — `authorization_inventory_is_complete` compares these case names with source-derived inventories; expects equality to fail closed when source expands.
 
 **Used by** — `authorization_inventory_is_complete`.
 
 **Repeated context** — Protected HTTP mutations have tenant cases; capability cases cover shared note/notebook operations, while entity classes without delegation are explicitly excepted.
+
+---
+
+## fn collect_writer_sources
+
+**Identification** — recursive source collector; marker `// md:fn collect_writer_sources`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn collect_writer_sources
+fn collect_writer_sources(path: &Path, files: &mut Vec<(String, String)>) {
+    for entry in fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_writer_sources(&path, files);
+        } else if matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("rs" | "writer")
+        ) {
+            files.push((
+                path.display().to_string(),
+                fs::read_to_string(path).unwrap(),
+            ));
+        }
+    }
+}
+```
+
+**What it does** — Recursively collects Rust and SQL corpus files for the writer derivation.
+
+**Dependencies** — `fs::read_dir` and `fs::read_to_string` — traverse and read the bounded crate corpus; expects unreadable fixture/source files to fail the test.
+
+**Used by** — `guarded_writer_inventory_unions_source_and_catalog`.
+
+**Repeated context** — This recognizes literal SQL only.
+
+---
+
+## fn guarded_writer_inventory_unions_source_and_catalog
+
+**Identification** — source/catalog writer inventory; marker `// md:fn guarded_writer_inventory_unions_source_and_catalog`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn guarded_writer_inventory_unions_source_and_catalog
+#[sqlx::test(migrations = "../../migrations")]
+async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    collect_writer_sources(&root.join("src"), &mut sources);
+    collect_writer_sources(&root.join("tests/fixtures"), &mut sources);
+    let guarded = ["notes", "note_shares", "notebooks", "notebook_shares"];
+    let mut source_writers = BTreeMap::new();
+    let mut decoy_detected = false;
+    for (path, source) in &sources {
+        let uppercase = source
+            .replace('"', "")
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for table in guarded {
+            let table_upper = table.to_ascii_uppercase();
+            for verb in ["INSERT INTO", "UPDATE", "DELETE FROM"] {
+                let occurrences = uppercase.matches(&format!("{verb} {table_upper}")).count();
+                *source_writers.entry(table).or_insert(0) += occurrences;
+                decoy_detected |= occurrences > 0
+                    && path.ends_with("writer_inventory_decoy.writer")
+                    && table == "notebook_shares";
+            }
+        }
+    }
+    assert_eq!(
+        source_writers,
+        [("note_shares", 2), ("notebook_shares", 3), ("notebooks", 4), ("notes", 4)]
+            .into_iter()
+            .collect(),
+        "literal writer occurrence inventory changed; classify every new site and make its Rust entry point join the serializable protocol"
+    );
+    assert!(decoy_detected, "the permanently planted direct-SQL decoy was not detected; this scanner sees literal INSERT, UPDATE, and DELETE statements only");
+
+    let guarded_names = guarded.into_iter().map(str::to_string).collect::<Vec<_>>();
+    let cascade_tables: BTreeSet<String> = sqlx::query_scalar(
+        "WITH RECURSIVE affected(table_oid) AS (SELECT value::regclass FROM unnest($1::text[]) value UNION SELECT CASE WHEN constraint_row.conrelid = affected.table_oid THEN constraint_row.confrelid ELSE constraint_row.conrelid END FROM pg_constraint constraint_row JOIN affected ON constraint_row.conrelid = affected.table_oid OR constraint_row.confrelid = affected.table_oid WHERE constraint_row.contype = 'f' AND constraint_row.confdeltype = 'c') SELECT table_oid::regclass::text FROM affected",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect();
+    assert_eq!(
+        cascade_tables,
+        [
+            "changes",
+            "device_cursors",
+            "email_tokens",
+            "lines",
+            "note_line_order",
+            "note_shares",
+            "note_tags",
+            "notebook_shares",
+            "notebooks",
+            "notes",
+            "resource_blobs",
+            "resources",
+            "tags",
+            "user_devices",
+            "users",
+        ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "catalog cascade closure walks both FK directions, conservatively including parents; it is table-level and does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
+    );
+    let trigger_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT relation.relname FROM pg_trigger trigger_row JOIN pg_class relation ON relation.oid = trigger_row.tgrelid WHERE NOT trigger_row.tgisinternal AND relation.relname = ANY($1)",
+    )
+    .bind(&guarded_names)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        trigger_tables.is_empty(),
+        "a trigger exists on guarded state; catalog discovery cannot prove what its body writes, so classify its Rust entry point explicitly"
+    );
+}
+```
+
+**What it does** — Unions literal source writers with PostgreSQL cascade and trigger metadata and proves the permanent decoy remains detectable. This inventory counts writer sites but cannot associate a discovered SQL literal with the transaction-bearing Rust entry point or prove that delegation stays on the caller's connection; `serializable_post_mutation_failure_rolls_back` supplies that behavioral evidence for every guarded HTTP mutation.
+
+**Dependencies** — `collect_writer_sources` and PostgreSQL catalogs — derive the two inventory halves; expects the assertion messages to preserve the deliberately bounded completeness claim.
+
+**Used by** — repository test suite.
+
+**Repeated context** — Trigger bodies, dynamic SQL, writable views, rules, database functions, and Rust-entry-point mapping are outside this derivation. The rollback matrix, rather than this inventory, covers a writer that escapes through an unlisted pool-backed delegate.
 
 ---
 
@@ -926,6 +1127,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_notebook_share",
         "delete_notebook_share",
         "transfer_notebook",
+        "delete_account",
     ]
     .into_iter()
     .collect();
@@ -946,26 +1148,66 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "create_or_update_notebook_share_on",
         "delete_notebook_share_on",
         "set_notebook_owner_on",
+        "delete_user_on",
     ];
     for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
             .split(&format!("// {}fn {handler}", "md:"))
             .nth(1)
             .unwrap()
-            .split("// md:")
+            .split(concat!("// ", "md:"))
             .next()
             .unwrap();
+        assert_eq!(
+            body.matches(&format!("serializable(state.clone(), \"{handler}\","))
+                .count(),
+            1,
+            "{handler} must have exactly one SERIALIZABLE retry boundary"
+        );
+        let boundary_start = body
+            .find(&format!("serializable(state.clone(), \"{handler}\","))
+            .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
+        let call_line = &body[body[..boundary_start].rfind('\n').unwrap() + 1..boundary_start];
+        let indentation = &call_line[..call_line.len() - call_line.trim_start().len()];
+        let boundary = &body[boundary_start..];
+        let boundary_end = boundary
+            .find(&format!("\n{indentation}.await{};", "?"))
+            .unwrap_or_else(|| panic!("{handler} has no awaited SERIALIZABLE boundary terminator"));
+        let boundary = &boundary[..boundary_end];
         assert!(
-            body.contains(&format!("serializable(state.clone(), \"{handler}\","))
-                && body.contains(mutation),
-            "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
+            boundary.contains(mutation),
+            "{handler} must execute {mutation} inside the SERIALIZABLE retry closure"
         );
     }
+    let delete_account = source
+        .split(concat!("// ", "md:fn delete_account"))
+        .nth(1)
+        .unwrap()
+        .split(concat!("// ", "md:"))
+        .next()
+        .unwrap();
+    assert!(
+        delete_account.find("auth::verify_password").unwrap()
+            < delete_account.find("serializable(state.clone()").unwrap(),
+        "delete_account must not hold a transaction or pool connection across Argon2 verification"
+    );
+    assert!(
+        delete_account.contains("stored.password_hash != verified_password_hash"),
+        "delete_account must reject a password-hash change between verification and deletion"
+    );
 }
 ```
 
-**What it does** — Keeps the exact eight-handler SERIALIZABLE set explicit and requires each
-handler to route its matching `_on` mutation through the common serializable boundary.
+**What it does** — Keeps the exact nine-handler SERIALIZABLE set explicit, requires each
+handler to route its matching `_on` mutation through the common serializable boundary, requires
+target-principal handlers to re-read that target after entering the boundary, and requires both
+synchronization notebook writers to retry their complete transaction at SERIALIZABLE. It also
+requires `delete_account` to perform Argon2 verification before entering the boundary and to compare
+the re-read hash with the verified hash inside it. Behavioural isolation evidence deliberately
+covers 1 of the 11 direct participants (`upsert_notebook`); the other synchronization writer and all
+nine HTTP handlers are pinned structurally, while the handler rollback matrix separately proves that
+their mutations remain on the transaction connection. This must not be reported as behavioural
+isolation mutation coverage across the complete participant set.
 
 **Dependencies** — `SERIALIZABLE_INVARIANT_HANDLERS` — supplies the accepted set; expects ADR 0002
 scope to remain stable. `http.rs` source — supplies handler bodies; expects markers to delimit them.
@@ -973,7 +1215,1983 @@ scope to remain stable. `http.rs` source — supplies handler bodies; expects ma
 **Used by** — repository test suite.
 
 **Repeated context** — Replacing any one boundary call with a weaker isolation helper is the
-killing mutation.
+killing mutation. This is intentionally a source-shape guard rather than a Rust parser: it requires
+exactly one named boundary and derives the awaited terminator indentation from each call so both
+assignment layouts used by the handlers remain covered.
+
+---
+
+## fn changed_password_is_reverified_for_delete_account
+
+**Identification** — deterministic credential-change interleaving test; marker `// md:fn changed_password_is_reverified_for_delete_account`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn changed_password_is_reverified_for_delete_account
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn changed_password_is_reverified_for_delete_account(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let token = register_and_login(addr, "delete-password-race@example.com").await;
+    state
+        .http_test_hooks
+        .pause_at("delete_account", "before_operation")
+        .await;
+    let delete_token = token.clone();
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::DELETE,
+            addr,
+            "/api/account",
+            &delete_token,
+            json!({ "password": "password123" }),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_account", "before_operation")
+        .await;
+    let changed = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        addr,
+        "/api/account/password",
+        &token,
+        json!({ "current_password": "password123", "new_password": "changed123" }),
+    )
+    .await;
+    assert_eq!(changed.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 401);
+    assert!(state
+        .store
+        .get_user_by_email("delete-password-race@example.com")
+        .await
+        .unwrap()
+        .is_some());
+}
+```
+
+**What it does** — Verifies the current password, parks account deletion at the serializable
+operation checkpoint, changes the same account's password through the real HTTP handler, then
+requires deletion to refuse with HTTP 401 and preserve the account. The bearer token remains valid
+across `change_password`, so the refusal pins the transaction-local password-hash comparison.
+
+**Dependencies** — `HttpTestHooks::pause_at`, `wait_until_reached`, and `resume` — force the password
+change to commit between preliminary credential verification and the operation read; expects the
+checkpoint to precede the closure body. `change_password` — changes only `users.password_hash`;
+expects the existing session token to remain valid. `delete_account` — supplies the guarded
+operation; expects a changed hash to map to `AppError::InvalidToken` and HTTP 401.
+
+**Used by** — `MUTATING_HANDLER_INTERLEAVINGS` names this case as behavioral evidence.
+
+**Repeated context** — Credential hashing stays outside the database transaction; only the exact
+verified hash is carried into it.
+
+---
+
+## fn sync_notebook_writers_retry_real_40001_within_the_bound
+
+**Identification** — sync writer retry integration test; marker `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_retry_real_40001_within_the_bound
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_retry_real_40001_within_the_bound(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-retry@example.com", "hash", "sync retry")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('sync_writer_failure_sequence') <= 1 THEN RAISE EXCEPTION USING ERRCODE = '40001'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("retry once");
+    assert!(store.upsert_notebook(user.id, &notebook).await.unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
+}
+```
+
+**What it does** — Makes PostgreSQL raise one real serialization failure and requires the complete notebook write to succeed on attempt two.
+
+**Dependencies** — PostgreSQL trigger and sequence — inject and count real `40001` failures; expects sequence increments to survive transaction rollback.
+
+**Used by** — ADR 0005 row 3 evidence.
+
+**Repeated context** — The trigger is local to the isolated sqlx test database.
+
+---
+
+## fn sync_notebook_writers_do_not_retry_a_fourth_time
+
+**Identification** — sync writer exhaustion integration test; marker `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_do_not_retry_a_fourth_time
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-exhaust@example.com", "hash", "sync exhaust")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE sync_writer_failure_sequence")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_sync_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('sync_writer_failure_sequence'); RAISE EXCEPTION USING ERRCODE = '40001'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_sync_writer BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_sync_writer()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("exhaust retries");
+    assert!(store.upsert_notebook(user.id, &notebook).await.is_err());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1)"
+    )
+    .bind(notebook.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+```
+
+**What it does** — Forces every notebook attempt to fail and proves exactly three attempts occur with no committed notebook.
+
+**Dependencies** — PostgreSQL trigger and sequence — provide rollback-independent attempt evidence; expects SQLSTATE `40001` to enter the production classifier.
+
+**Used by** — ADR 0005 retry-bound evidence.
+
+**Repeated context** — Exhaustion remains an error and never commits a partial write.
+
+---
+
+## fn sync_notebook_writer_retries_under_a_real_ssi_conflict
+
+**Identification** — production-boundary PostgreSQL SSI-conflict test; marker `// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("real-ssi@example.com", "hash", "real ssi")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE real_ssi_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER rendezvous_real_ssi BEFORE INSERT ON notebooks FOR EACH ROW EXECUTE FUNCTION rendezvous_real_ssi()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let left_notebook = Notebook::new("real serialization retry left");
+    let right_notebook = Notebook::new("real serialization retry right");
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(left_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(right_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let user_id = user.id;
+    let left_store = store.clone();
+    let left_id = left_notebook.id;
+    let left =
+        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
+    let right_store = store.clone();
+    let right_id = right_notebook.id;
+    let right =
+        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted AND locks.objid IN (hashtext($1::text), hashtext($2::text))",
+            )
+            .bind(left_id)
+            .bind(right_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(left_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(left.await.unwrap().unwrap());
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(right_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(right.await.unwrap().unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+}
+```
+
+**What it does** — Sends two concurrent notebook inserts through `Store::upsert_notebook`, parks both after their predicate reads have fixed their serializable snapshots, then releases and commits the left writer before releasing the right. That fixed order completes a predicate-read/write dependency cycle in which PostgreSQL aborts the right transaction and the production boundary retries it, producing three durable sequence increments for two successful calls.
+
+**Dependencies** — PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
+
+**Used by** — ADR 0005 row 6 evidence.
+
+**Repeated context** — This is a real serialization failure observed and recovered by the application boundary, not a raised `40001` or the HTTP injection seam.
+
+---
+
+## fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state
+
+**Identification** — synchronization-writer post-mutation failure test; marker `// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state(
+    pool: PgPool,
+) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-rollback@example.com", "hash", "sync rollback")
+        .await
+        .unwrap();
+    let inserted = Notebook::new("failed insert");
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_insert_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_insert_after AFTER INSERT ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_insert_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(entity_snapshot(&pool, "notebooks", inserted.id).await, None);
+    sqlx::query("DROP TRIGGER fail_notebook_insert_after ON notebooks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("failed delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    let before = entity_snapshot(&pool, "notebooks", deleted.id).await;
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_delete_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_delete_after AFTER UPDATE ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_delete_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let deletion_vv = VersionVector::from([("rollback-test".to_string(), 1)]);
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
+            "rollback-test",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", deleted.id).await,
+        before
+    );
+}
+```
+
+**What it does** — Raises non-retryable failures from row-level `AFTER INSERT` and `AFTER UPDATE`
+triggers and proves both writers propagate the error without partial state. The two-sided coverage is
+intentional: consolidating it to one writer would permit the other retry loop to swallow a failure.
+For the current single-statement writers PostgreSQL supplies atomicity even without an explicit
+transaction; keeplin-srv#75 owns the future multi-statement rollback case.
+
+**Dependencies** — `Store::{upsert_notebook, delete_notebook}` and PostgreSQL `AFTER` triggers; expects each writer to keep mutation and commit inside the same transaction.
+
+**Used by** — ADR 0005 row 6 rollback evidence.
+
+**Repeated context** — The journal/materialization atomicity decision remains keeplin-srv#75; this test covers only the notebook projection transaction decided here.
+
+---
+
+## fn sync_notebook_writers_do_not_retry_non_serialization_failures
+
+**Identification** — retry-classifier discrimination test; marker `// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_non_serialization_failures(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "sync-non-retryable@example.com",
+            "hash",
+            "sync non retryable",
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE non_retryable_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23505'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_notebook_constraint BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_notebook_constraint()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let inserted = Notebook::new("non-retryable insert");
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23503'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let foreign_key_failure = Notebook::new("non-retryable foreign key");
+    assert!(store
+        .upsert_notebook(user.id, &foreign_key_failure)
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    sqlx::query("ALTER TABLE notebooks DISABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("non-retryable delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    sqlx::query("ALTER TABLE notebooks ENABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deletion_vv = VersionVector::from([("non-retryable".to_string(), 1)]);
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
+            "non-retryable",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+}
+```
+
+**What it does** — Forces SQLSTATE `23505` through both notebook writer loops and uses a
+rollback-independent sequence to prove each returns after exactly one attempt.
+
+**Dependencies** — `Store::{upsert_notebook, delete_notebook}` and PostgreSQL triggers and
+sequences; expects retry classification to admit only SQLSTATE `40001`.
+
+**Used by** — ADR 0005 row 6 retry-predicate evidence.
+
+**Repeated context** — Both insert and delete loops are covered separately so one cannot widen
+without failing this test.
+
+---
+
+## fn target_principals_are_reverified_in_share_and_transfer_transactions
+
+**Identification** — four-handler target re-read interleaving test; marker `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn target_principals_are_reverified_in_share_and_transfer_transactions
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principals_are_reverified_in_share_and_transfer_transactions(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "target-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("target-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    for (handler, path, body) in [
+        {
+            let target = state
+                .store
+                .create_user("target-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "share target", owner.id)
+                .await
+                .unwrap();
+            (
+                "create_share",
+                format!("/api/notes/{}/share", note.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let note = state
+                .store
+                .create_note(None, "transfer target", owner.id)
+                .await
+                .unwrap();
+            (
+                "transfer_ownership",
+                format!("/api/notes/{}/transfer", note.id),
+                json!({"user_id": target.id}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-share@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook share target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "create_notebook_share",
+                format!("/api/notebooks/{}/share", notebook.id),
+                json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+            )
+        },
+        {
+            let target = state
+                .store
+                .create_user("target-notebook-transfer@example.com", "hash", "target")
+                .await
+                .unwrap();
+            let notebook = Notebook::new("notebook transfer target");
+            assert!(state
+                .store
+                .upsert_notebook(owner.id, &notebook)
+                .await
+                .unwrap());
+            (
+                "transfer_notebook",
+                format!("/api/notebooks/{}/transfer", notebook.id),
+                json!({"user_id": target.id}),
+            )
+        },
+    ] {
+        let target_id = Uuid::parse_str(body["user_id"].as_str().unwrap()).unwrap();
+        state
+            .http_test_hooks
+            .pause_at(handler, "before_operation")
+            .await;
+        let request_client = client.clone();
+        let request_token = owner_token.clone();
+        let request = tokio::spawn(async move {
+            authed_json(
+                &request_client,
+                reqwest::Method::POST,
+                addr,
+                &path,
+                &request_token,
+                body,
+            )
+            .await
+        });
+        state
+            .http_test_hooks
+            .wait_until_reached(handler, "before_operation")
+            .await;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(target_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        state.http_test_hooks.resume();
+        assert_eq!(
+            request.await.unwrap().status(),
+            404,
+            "{handler} accepted a target deleted after its preliminary lookup"
+        );
+    }
+}
+```
+
+**What it does** — Deletes each target after preliminary resolution but before the transaction operation and requires all four handlers to return `404`.
+
+**Dependencies** — `HttpTestHooks::pause_at` — controls the handler boundary; expects `before_operation` to precede every transaction-local guard read. PostgreSQL cascade deletion supplies the killing interleaving.
+
+**Used by** — ADR 0005 target-principal evidence.
+
+**Repeated context** — Removing a transaction-local target read changes the outcome to an accepted mutation or database error.
+
+---
+
+## fn target_principal_recheck_locks_the_user_until_transaction_end
+
+**Identification** — user-row lock interleaving test; marker `// md:fn target_principal_recheck_locks_the_user_until_transaction_end`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn target_principal_recheck_locks_the_user_until_transaction_end
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principal_recheck_locks_the_user_until_transaction_end(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let target = store
+        .create_user("target-lock@example.com", "old hash", "target lock")
+        .await
+        .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    store
+        .get_user_by_id_on(&mut transaction, target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let update_store = store.clone();
+    let update = tokio::spawn(async move {
+        update_store
+            .update_password(target.id, "new hash")
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query LIKE 'UPDATE users SET password_hash%' AND wait_event_type = 'Lock')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), update)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .get_user_by_id(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .password_hash,
+        "new hash"
+    );
+}
+```
+
+**What it does** — Reads a target principal through the transaction-aware helper, starts a
+READ COMMITTED password update on another connection, and proves that update remains blocked until
+the serializable transaction ends.
+
+**Dependencies** — `Store::{get_user_by_id_on, update_password}` and PostgreSQL row locks; expects
+the target recheck to serialize concurrent account changes even when the guarded transaction writes
+only another relation.
+
+**Used by** — ADR 0005 target-principal recheck evidence.
+
+**Repeated context** — The four HTTP target-principal handlers are structurally required to call
+this helper inside their serializable closures.
+
+---
+
+## fn successful_transfers_remove_target_shares
+
+**Identification** — successful transfer cleanup test; marker `// md:fn successful_transfers_remove_target_shares`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn successful_transfers_remove_target_shares
+#[sqlx::test(migrations = "../../migrations")]
+async fn successful_transfers_remove_target_shares(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-cleanup-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-cleanup-target@example.com").await;
+    let _third_token = register_and_login(addr, "transfer-cleanup-third@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-cleanup-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-cleanup-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third = state
+        .store
+        .get_user_by_email("transfer-cleanup-third@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer cleanup note", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    let client = reqwest::Client::new();
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        target.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    let notebook = Notebook::new("transfer cleanup notebook");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, third.id, Capabilities::READ)
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/transfer", notebook.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(target.id)
+    );
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, third.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+```
+
+**What it does** — Transfers a note and a notebook to principals that already have direct shares,
+then proves both redundant share rows are removed on the success path.
+
+**Dependencies** — the two transfer HTTP endpoints and `Store::{get_share,
+get_notebook_share}`; expects ownership transfer and target-share cleanup to commit together.
+
+**Used by** — ADR 0005 target-principal transaction evidence.
+
+**Repeated context** — Failure-path snapshot equality cannot detect a deleted cleanup call; this
+success assertion makes that no-op mutation observable.
+
+---
+
+## fn transfer_and_target_account_deletion_resolve_coherently
+
+**Identification** — end-to-end transfer/account-deletion interleaving test; marker `// md:fn transfer_and_target_account_deletion_resolve_coherently`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transfer_and_target_account_deletion_resolve_coherently
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-delete-owner@example.com").await;
+    let target_token = register_and_login(addr, "transfer-delete-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-delete-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer deletion race", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let transfer = tokio::spawn(async move {
+        authed_json(
+            &reqwest::Client::new(),
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &owner_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    let deletion = authed_json(
+        &reqwest::Client::new(),
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &target_token,
+        json!({"password": "password123"}),
+    )
+    .await;
+    assert_eq!(deletion.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(transfer.await.unwrap().status(), 404);
+    assert!(state
+        .store
+        .get_user_by_id(target.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        owner.id
+    );
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts a note ownership transfer and pauses its serializable transaction before the target-principal gate, deletes the target through the real account-deletion handler on another connection, then requires deletion alone to succeed. The transfer must return `404`, the target user and their pre-existing share must be absent, and the note must remain owned by the live original owner.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` controls the real handler interleaving; expects `before_operation` to occur after the transfer transaction begins and before its target lock. `transfer_ownership` and `delete_account` supply the competing serializable requests; expects their user-row locking and foreign-key cascades to produce a coherent winner.
+
+**Used by** — ADR 0005 end-to-end target-principal race evidence.
+
+**Repeated context** — A raw SQL delete is insufficient evidence here: both competitors intentionally traverse their HTTP handlers and transaction boundaries.
+
+---
+
+## fn repeated_share_upsert_updates_the_single_existing_grant
+
+**Identification** — serial note-share upsert regression test; marker `// md:fn repeated_share_upsert_updates_the_single_existing_grant`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn repeated_share_upsert_updates_the_single_existing_grant
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_share_upsert_updates_the_single_existing_grant(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let owner = store
+        .create_user("share-upsert-owner@example.com", "hash", "Owner")
+        .await
+        .unwrap();
+    let grantee = store
+        .create_user("share-upsert-grantee@example.com", "hash", "Grantee")
+        .await
+        .unwrap();
+    let other_grantee = store
+        .create_user("share-upsert-other@example.com", "hash", "Other grantee")
+        .await
+        .unwrap();
+    let note = store
+        .create_note(None, "share upsert conflict action", owner.id)
+        .await
+        .unwrap();
+
+    let original_share = store
+        .create_or_update_share(note.id, grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, other_grantee.id, Capabilities::READ)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(note.id, grantee.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+
+    let share_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM note_shares WHERE note_id = $1 AND user_id = $2")
+            .bind(note.id)
+            .bind(grantee.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(share_count, 1);
+    let updated_share = store.get_share(note.id, grantee.id).await.unwrap().unwrap();
+    assert_eq!(updated_share.capabilities, Capabilities::WRITE);
+    assert_eq!(updated_share.created_at, original_share.created_at);
+    assert_eq!(
+        store
+            .get_share(note.id, other_grantee.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capabilities,
+        Capabilities::READ
+    );
+}
+```
+
+**What it does** — Inserts one direct note share with `READ`, records its `created_at` identity, and creates an independent `READ` grant for a second grantee. It repeats the production upsert for only the first `(note_id, user_id)` pair with `WRITE`, then proves that exactly one row remains for that pair, its capabilities changed, its creation timestamp was preserved, and the second grant stayed `READ`. These observations distinguish the intended pair-scoped `DO UPDATE` from delete-and-reinsert and note-wide conflict-action mutations without requiring contention.
+
+**Dependencies**
+
+- `Store::{create_user, create_note}` — creates valid foreign-key principals and a note; expects: the returned IDs identify committed rows.
+- `Store::create_or_update_share` — creates two independent grants and executes the production conflict action for the first pair; expects: a repeated pair updates only `capabilities` while preserving that row's `created_at`.
+- `Store::get_share` — reads both persisted grants; expects: each pair lookup is isolated and returns its own current row.
+- `sqlx::query_scalar` — counts the updated pair; expects: the `note_shares` primary key and upsert preserve one-row cardinality.
+
+**Used by** — authorization mutation review for the `note_shares` upsert conflict action and pair uniqueness.
+
+**Repeated context** — The test is intentionally serial: conflict-action coverage requires a repeated key, not concurrent requests.
+
+---
+
+## fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+
+**Identification** — serial repeated-transfer semantic regression test; marker `// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "repeat-transfer-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "repeat-transfer-target@example.com").await;
+    let _third_owner_token = register_and_login(addr, "repeat-transfer-third@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("repeat-transfer-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let third_owner = state
+        .store
+        .get_user_by_email("repeat-transfer-third@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "repeat transfer semantic", owner.id)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let first = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(first.status(), 200);
+    let owned_before_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_before_repeat, 1);
+
+    let repeated = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(repeated.status(), 403);
+    let owned_after_repeat: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE id = $1 AND owner_id = $2")
+            .bind(note.id)
+            .bind(new_owner.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owned_after_repeat, owned_before_repeat);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+
+    let onward = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &new_owner_token,
+        json!({"user_id": third_owner.id}),
+    )
+    .await;
+    assert_eq!(onward.status(), 200);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        third_owner.id
+    );
+}
+```
+
+**What it does** — Transfers a note through the production HTTP route, records the new owner's row count, and repeats the request with the former owner's token. The repeat must return `403`, with the new-owner count and authoritative `owner_id` unchanged at that observation point. The current owner then transfers the note onward to a third principal and the test requires `200` plus the third principal's durable `owner_id`, proving the rejection is caller-specific rather than an over-broad ban on transferring a note more than once.
+
+**Dependencies**
+
+- `spawn_authorization_state` and `register_and_login` — exposes the real authenticated route and three distinct principals; expects: each bearer identity remains bound to its registered principal across ownership changes.
+- `authed_json` — invokes `transfer_ownership` as the original owner, former owner, and current owner; expects: authorized transfers commit, while only the former owner's repeat fails the owner-only access check with `403`.
+- `sqlx::query_scalar` and `Store::get_note` — observes durable ownership after the rejected repeat and onward transfer; expects: reads identify the sole current owner after each completed request.
+
+**Used by** — authorization mutation review for the former-owner repeat-transfer `403` contract; supports the stable-transfer accounting argument in `mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
+
+**Repeated context** — Ownership transfer is not an idempotent success for the former owner: after the first commit that principal no longer has `can_transfer_ownership`. The note remains transferable by whichever principal currently owns it.
+
+---
+
+## fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+
+**Identification** — hook-free randomized HTTP integrity-under-contention test; marker `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+#[sqlx::test(migrations = "../../migrations")]
+async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity(
+    pool: PgPool,
+) {
+    const REQUESTS: usize = 200;
+    const DEFAULT_SEED: u64 = 149_004;
+
+    let seed = std::env::var("KEEPLIN_STRESS_SEED")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("KEEPLIN_STRESS_SEED must be a u64")
+        })
+        .unwrap_or(DEFAULT_SEED);
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let _peer_token = register_and_login(addr, "stress-peer@example.com").await;
+    let target_token = register_and_login(addr, "stress-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("stress-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("stress-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = state
+        .store
+        .get_user_by_email("stress-peer@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let cascade_witness = state
+        .store
+        .create_note(None, "account deletion cascade witness", target.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(cascade_witness.id, peer.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let mut notes = Vec::with_capacity(98);
+    for index in 0..98 {
+        let title = format!("hook-free contention {index}");
+        let note = state
+            .store
+            .create_note(None, &title, owner.id)
+            .await
+            .unwrap();
+        let share_target_id = if index < 49 { target.id } else { peer.id };
+        state
+            .store
+            .create_or_update_share(note.id, share_target_id, Capabilities::READ)
+            .await
+            .unwrap();
+        notes.push(note);
+    }
+
+    let mut schedule = (0..REQUESTS)
+        .map(|index| {
+            let operation = if index < 98 {
+                0
+            } else if index < 196 {
+                1
+            } else {
+                2
+            };
+            (operation, index % 98, 0_u64)
+        })
+        .collect::<Vec<_>>();
+    let mut random = seed;
+    for index in (1..schedule.len()).rev() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let other = (random as usize) % (index + 1);
+        schedule.swap(index, other);
+    }
+    for (_, _, delay) in &mut schedule {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        *delay = random % 8;
+    }
+
+    let client = reqwest::Client::new();
+    let mut requests = Vec::with_capacity(REQUESTS);
+    for (operation, index, delay) in schedule {
+        let client = client.clone();
+        let owner_token = owner_token.clone();
+        let target_token = target_token.clone();
+        let note_id = notes[index].id;
+        requests.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            let response = match operation {
+                0 => {
+                    let target_id = if index < 49 { peer.id } else { target.id };
+                    client
+                        .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
+                        .bearer_auth(owner_token)
+                        .json(&json!({"user_id": target_id}))
+                        .send()
+                        .await
+                }
+                1 => {
+                    let share_target_id = if index < 49 { target.id } else { peer.id };
+                    client
+                        .delete(format!(
+                            "http://{addr}/api/notes/{}/share/{}",
+                            note_id, share_target_id
+                        ))
+                        .bearer_auth(owner_token)
+                        .json(&json!({}))
+                        .send()
+                        .await
+                }
+                _ => {
+                    client
+                        .delete(format!("http://{addr}/api/account"))
+                        .bearer_auth(target_token)
+                        .json(&json!({"password": "password123"}))
+                        .send()
+                        .await
+                }
+            };
+            (operation, index, response)
+        }));
+    }
+    let mut status_histogram = BTreeMap::new();
+    for request in requests {
+        let (operation, index, response) = request.await.unwrap_or_else(|error| {
+            panic!(
+                "mix seed {seed}: request task failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+            )
+        });
+        let response = response.unwrap_or_else(|error| {
+            panic!("mix seed {seed}: request failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}")
+        });
+        let operation = match operation {
+            0 if index < 49 => "stable_transfer",
+            0 => "contested_transfer",
+            1 => "share_delete",
+            _ => "account_delete",
+        };
+        *status_histogram
+            .entry((operation, response.status().as_u16()))
+            .or_insert(0) += 1;
+    }
+    eprintln!(
+        "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let share_delete_outcomes = status_histogram
+        .iter()
+        .filter(|((operation, status), _)| {
+            *operation == "share_delete" && matches!(*status, 200 | 403 | 404 | 503)
+        })
+        .map(|(_, count)| count)
+        .sum::<usize>();
+    assert_eq!(
+        share_delete_outcomes,
+        98,
+        "mix seed {seed}: share deletion must succeed, lose owner authorization after transfer, lose its note to account deletion, or exhaust the serializable retry bound; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        status_histogram
+            .keys()
+            .all(|(_, status)| *status < 500 || *status == 503),
+        "mix seed {seed}: a request returned a server error other than designed retry exhaustion; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    let stable_successes = status_histogram
+        .get(&("stable_transfer", 200))
+        .copied()
+        .unwrap_or(0);
+    let stable_exhaustions = status_histogram
+        .get(&("stable_transfer", 503))
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        stable_successes + stable_exhaustions,
+        49,
+        "mix seed {seed}: stable transfers must return 200 or the designed retry-exhaustion 503; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        stable_successes >= 1,
+        "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    let stable_peer_owners: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notes WHERE owner_id = $1")
+            .bind(peer.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stable_peer_owners,
+        stable_successes as i64,
+        "mix seed {seed}: every stable 200 must correspond to a committed peer-owned note; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+
+    let dangling_share_note: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN notes note ON note.id = share.note_id WHERE note.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_share: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM notes note LEFT JOIN users owner_row ON owner_row.id = note.owner_id WHERE owner_row.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !dangling_share_note,
+        "mix seed {seed}: a surviving share has no note; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        !dangling_share,
+        "mix seed {seed}: a surviving share has no principal; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        !dangling_owner,
+        "mix seed {seed}: a surviving note has no owner; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+}
+```
+
+**What it does** — Creates a cascade witness owned by the deletion target and shared to the surviving peer, then launches exactly 200 real HTTP requests against 98 additional independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The witness makes both account-deletion foreign-key cascades observable: account deletion must remove its note, while its peer share cannot disappear through the deleted principal's cascade. Account deletion performs one user-row delete; PostgreSQL's `ON DELETE CASCADE` constraints remove the witness note and share, with no handler-side ordered cleanup. The witness is deliberately quiescent, so it proves the declarative cascades under the surrounding workload but does not claim coverage of a victim-note mutation race. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Stable notes begin shared to the deletion target and contested notes begin shared to the surviving peer. Thus the same run combines a non-degenerate write-path control cohort with a natural target-principal race, without requiring a particular winner to prove the cascades. Every transfer, share deletion, and account deletion participates in a serializable transaction and may return `503` when ADR 0002's three-attempt retry bound is exhausted. All 49 stable transfers must be either `200` or that designed `503`, at least one must return `200`, and the final number of notes owned by the peer must equal the stable `200` count. The target-owned witness is only shared to the peer, so it never contributes to that ownership count. The equality proves that each status-labelled success committed the ownership write. A stable note receives only one transfer request, and the separate serial `repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` test proves that after a committed transfer the former owner's repeated request fails the owner-only access check with `403` rather than returning an idempotent second `200`; consequently the success count cannot exceed the committed peer-owner count. No higher success floor is claimed: `503` prevalence depends on runtime load and scheduling and carries no correctness signal because the accepted decision defines a retry bound rather than a success-rate guarantee under unscripted contention. The HTTP error representation exposes `ServiceUnavailable` as one generic `503` and carries no reason discriminator, so the test cannot assert a retry-exhaustion response body; the serializable wrapper is the only current producer of that status on these paths. Each share deletion addresses a different row. Its explicit outcomes are `200`, `403` when a completed transfer removed the original owner's share-writing authority, `404` when account deletion removed the note, or the designed `503`; the closed set prevents unrelated outcomes from passing. Outcome assertions run only after every request has joined so any failure reports the complete 200-request histogram rather than a launch-order prefix. Other 5xx responses remain forbidden. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation mix and gives every request up to seven milliseconds of launch jitter. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Direct database checks reject any surviving share without its note or principal and any note without its owner. Duplicate shares are unreachable in this fixture: every share upsert occurs serially during setup and exactly once per `(note_id, user_id)` pair, while the concurrent operation mix only transfers ownership, deletes distinct shares, and deletes the target account. Pair uniqueness and the upsert conflict action are behaviorally pinned by the separate serial `repeated_share_upsert_updates_the_single_existing_grant` test; contention is unnecessary because repeating the same pair deterministically reaches the conflict branch. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
+
+**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention, with every serializable participant able to expose ADR 0002's bounded-retry exhaustion as `503`. `transfer_ownership` is owner-only on both access checks; expects: after one committed transfer, a request by the former owner is refused rather than reported as another success. `delete_account` delegates deletion to `Store::delete_user_on`; expects: it deletes the user row without manually sequencing dependent note or share deletion. `Store::{create_note, create_or_update_share}` creates the target-owned, peer-shared cascade witness and one unit per transfer/delete pair; expects: target deletion necessarily exercises both the owner and note-side cascades while the surviving peer prevents the witness share from being masked by a principal-side cascade. `BTreeMap` records stable per-operation status counts; expects: all responses remain available for complete-run outcome validation and diagnostics, and the stable-transfer cohort remains distinguishable from contested refusals. `sqlx::query_scalar` counts committed peer-owned notes and performs the final anti-join queries; expects: a stable `200` has exactly one durable ownership row, every surviving share resolves both its note and principal, and every surviving note resolves its owner. PostgreSQL foreign keys supply the declarative cascades whose integrity those queries validate. The `note_shares` primary key supplies pair uniqueness, but this fixture does not exercise that dependency because it never contends on a share upsert.
+
+**Used by** — issue #149 concurrency regression suite.
+
+**Repeated context** — This test claims integrity under contention, not request ordering. The seed reproduces only the operation mix, shuffle, and launch delays. It does not control Tokio polling, connection acquisition, PostgreSQL lock order, or transaction winners, so a failure is not replayable by seed alone and contested-transfer status prevalence is machine-dependent. The cascade witness makes referential-integrity observability independent of that prevalence. Exact interleavings require explicit handler checkpoints or barriers plus control of database progress; `transfer_and_target_account_deletion_resolve_coherently` provides that focused deterministic coverage, while this test remains a hook-free natural-contention probe.
+
+---
+
+## fn revoked_share_authority_is_reverified_for_create_share
+
+**Identification** — note share-authority transition interleaving; marker `// md:fn revoked_share_authority_is_reverified_for_create_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_share_authority_is_reverified_for_create_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "create-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "create-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "create-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("create-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("create-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("create-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "create-share authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("create_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/share", note.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts `create_share` while the actor owns the note, pauses before the operation snapshot, transfers ownership, and retains a direct `WRITE` grant for the actor. Resolution therefore still succeeds, but `WRITE` lacks `SHARE_WRITE`; ADR 0001's capability ceiling and ADR 0002's current-state re-verification require 403. The absent target share also pins rollback. Removing only the transaction-local capability guard permits the share and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the authority change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_note_owner, create_or_update_share}` leaves the actor resolvable with exactly `WRITE`; expects ownership and direct grants to remain independent. `Store::get_share` verifies no unauthorized grant committed; expects absent shares to return `None`.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_share`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_ownership_is_reverified_for_transfer_ownership
+
+**Identification** — note ownership-transition interleaving; marker `// md:fn revoked_ownership_is_reverified_for_transfer_ownership`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_ownership_is_reverified_for_transfer_ownership
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_ownership(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-note-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-note-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-note-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-note-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-note-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-note-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer-note authority guard", actor.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("transfer_ownership", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notes/{}/transfer", note.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_ownership", "before_operation")
+        .await;
+    state
+        .store
+        .set_note_owner(note.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state
+            .store
+            .get_note(note.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        new_owner.id
+    );
+}
+```
+
+**What it does** — Starts `transfer_ownership` while the actor owns the note, pauses before the operation snapshot, transfers ownership to another principal, and retains `READ` for the actor. Resolution succeeds while `can_transfer_ownership` is false, so ADR 0001's owner-only transfer power and ADR 0002's re-verification rule require 403. The current owner remains unchanged. Removing only the transaction-local ownership guard transfers to the request target and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the ownership change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_note_owner, create_or_update_share}` leaves the former owner resolvable with `READ`; expects `Access::granted` never to set owner status. `Store::get_note` verifies the refused transfer did not mutate ownership; expects `owner_id` to remain authoritative.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_ownership`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_share_authority_is_reverified_for_create_notebook_share
+
+**Identification** — notebook share-authority transition interleaving; marker `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_share_authority_is_reverified_for_create_notebook_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_share_authority_is_reverified_for_create_notebook_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "notebook-share-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "notebook-share-owner@example.com").await;
+    let _target_token = register_and_login(addr, "notebook-share-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("notebook-share-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("notebook-share-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("notebook-share-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("notebook-share authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("create_notebook_share", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/share", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id, "capabilities": Capabilities::READ}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("create_notebook_share", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Starts `create_notebook_share` while the actor owns the notebook, pauses before the operation snapshot, transfers ownership, and retains a notebook `WRITE` grant. Resolution succeeds but `can_share_write` is false, so ADR 0001's strict capability model and ADR 0002's re-verification rule require 403. The absent target grant pins rollback. Removing only the transaction-local capability guard permits the share and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the authority change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_notebook_owner, create_or_update_notebook_share}` leaves the actor resolvable with exactly `WRITE`; expects `WRITE` not to imply `SHARE_WRITE`. `Store::get_notebook_share` verifies no unauthorized grant committed; expects absent shares to return `None`.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_notebook_share`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_ownership_is_reverified_for_transfer_notebook
+
+**Identification** — notebook ownership-transition interleaving; marker `// md:fn revoked_ownership_is_reverified_for_transfer_notebook`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_ownership_is_reverified_for_transfer_notebook
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_ownership_is_reverified_for_transfer_notebook(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let actor_token = register_and_login(addr, "transfer-notebook-actor@example.com").await;
+    let _new_owner_token = register_and_login(addr, "transfer-notebook-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-notebook-target@example.com").await;
+    let actor = state
+        .store
+        .get_user_by_email("transfer-notebook-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("transfer-notebook-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-notebook-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let notebook = Notebook::new("transfer-notebook authority guard");
+    assert!(state
+        .store
+        .upsert_notebook(actor.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .http_test_hooks
+        .pause_at("transfer_notebook", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            addr,
+            &format!("/api/notebooks/{}/transfer", notebook.id),
+            &actor_token,
+            json!({"user_id": target.id}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("transfer_notebook", "before_operation")
+        .await;
+    state
+        .store
+        .set_notebook_owner(notebook.id, new_owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert_eq!(
+        state.store.notebook_owner(notebook.id).await.unwrap(),
+        Some(new_owner.id)
+    );
+}
+```
+
+**What it does** — Starts `transfer_notebook` while the actor owns the notebook, pauses before the operation snapshot, transfers ownership, and retains a notebook `READ` grant. Resolution succeeds while owner-only transfer authority is gone, so ADR 0001 and ADR 0002 require 403. The intermediate owner remains authoritative. Removing only the transaction-local ownership guard transfers to the request target and makes this test fail.
+
+**Dependencies** — `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the ownership change before transaction-local resolution; expects `before_operation` to precede the complete guard. `Store::{set_notebook_owner, create_or_update_notebook_share}` leaves the former owner resolvable with `READ`; expects delegated access never to confer ownership. `Store::notebook_owner` verifies the refused transfer did not mutate ownership; expects it to return the current owner.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_notebook`; ADR 0002 verification row 3.
+
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+
+---
+
+## fn revoked_note_guard_is_refused_for_delete_share
+
+**Identification** — delegated-authorization revocation interleaving for note-share deletion; marker `// md:fn revoked_note_guard_is_refused_for_delete_share`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn revoked_note_guard_is_refused_for_delete_share
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let _owner_token = register_and_login(addr, "guard-owner@example.com").await;
+    let actor_token = register_and_login(addr, "guard-actor@example.com").await;
+    let _target_token = register_and_login(addr, "guard-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("guard-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let actor = state
+        .store
+        .get_user_by_email("guard-actor@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("guard-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let client = reqwest::Client::new();
+    let notebook = Notebook::new("delete-share guard");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, actor.id, Capabilities::WRITE)
+        .await
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete-share guard", owner.id)
+        .await
+        .unwrap();
+    let note = state
+        .store
+        .update_note_meta(
+            note.id,
+            &NotePatch {
+                notebook_id: Some(Some(notebook.id)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, actor.id, Capabilities::ALL)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_share", "before_operation")
+        .await;
+    let request = tokio::spawn(async move {
+        authed_json(
+            &client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{}/share/{}", note.id, target.id),
+            &actor_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_share", "before_operation")
+        .await;
+    assert!(state.store.delete_share(note.id, actor.id).await.unwrap());
+    state.http_test_hooks.resume();
+    assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(state
+        .store
+        .get_share(note.id, actor.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+```
+
+**What it does** — Gives the actor both a direct `ALL` note grant and inherited `WRITE` access from the note's notebook, pauses `delete_share` before its operation snapshot, then revokes only the direct grant. Strict inheritance leaves enough access for transaction-local resolution to succeed but no `SHARE_WRITE` capability, while the requested target is a different user. The pinned 403 therefore exercises the transaction-local `can_share_write` guard; removing that guard allows the target share deletion and changes the response to 200.
+
+**Dependencies** — `HttpTestHooks::pause_at` and `wait_until_reached` control and identify the handler's pre-operation boundary; expects `before_operation` to precede transaction-local access resolution. `Store::create_or_update_notebook_share` supplies inherited `WRITE`; expects the strict permission scheme to preserve read/write while excluding `SHARE_WRITE`. `Store::update_note_meta` places the note in that notebook; expects access resolution to combine direct and inherited grants. `Store::delete_share` commits the guard transition; expects only the actor's direct grant to disappear, leaving inherited access resolvable.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_share`.
+
+**Repeated context** — The actor deletes another user's share, so self-removal cannot bypass the guard. The assertion remains pinned to 403.
+
+---
+
+## fn transferred_ownership_is_reverified_for_delete_note
+
+**Identification** — ownership-transition interleaving for note deletion; marker `// md:fn transferred_ownership_is_reverified_for_delete_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn transferred_ownership_is_reverified_for_delete_note
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "delete-owner@example.com").await;
+    let new_owner_token = register_and_login(addr, "delete-new-owner@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("delete-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let new_owner = state
+        .store
+        .get_user_by_email("delete-new-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "delete ownership guard", owner.id)
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("delete_note", "before_operation")
+        .await;
+    let client = reqwest::Client::new();
+    let delete_client = client.clone();
+    let delete_token = owner_token.clone();
+    let note_id = note.id;
+    let delete_request = tokio::spawn(async move {
+        authed_json(
+            &delete_client,
+            reqwest::Method::DELETE,
+            addr,
+            &format!("/api/notes/{note_id}"),
+            &delete_token,
+            json!({}),
+        )
+        .await
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_note", "before_operation")
+        .await;
+    let transfer_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": new_owner.id}),
+    )
+    .await;
+    assert_eq!(transfer_response.status(), 200);
+    let share_response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/share", note.id),
+        &new_owner_token,
+        json!({"user_id": owner.id, "capabilities": Capabilities::READ}),
+    )
+    .await;
+    assert_eq!(share_response.status(), 200);
+    state.http_test_hooks.resume();
+    assert_eq!(delete_request.await.unwrap().status(), 403);
+    let persisted = state.store.get_note(note.id).await.unwrap().unwrap();
+    assert_eq!(persisted.owner_id, new_owner.id);
+    assert!(persisted.deleted_at.is_none());
+}
+```
+
+**What it does** — Starts an owner-authorized `delete_note`, pauses it at the serializable transaction's `before_operation` checkpoint, commits `transfer_ownership` to a second user, grants the former owner READ access, and resumes deletion. The retained share makes transaction-local access resolution succeed while withholding delete capability, so the pinned HTTP 403 can come only from `delete_note`'s transaction-local `can_delete` guard. Removing that guard lets the endpoint delete the note and changes the response to 200.
+
+**Dependencies** — `spawn_authorization_state` exposes the production router plus deterministic debug checkpoints; expects `before_operation` to precede every transaction-local authorization read. `register_and_login` creates two authenticated principals; expects each token to preserve its user's identity. `Store::{get_user_by_email, create_note, get_note}` establishes and verifies ownership; expects `owner_id` to be authoritative. `HttpTestHooks::{pause_at, wait_until_reached, resume}` orders the requests; expects transfer and the retained READ share to commit before deletion resumes. `authed_json` invokes `delete_note`, `transfer_ownership`, and `create_share`; expects the READ share to make `resolve_note_access_on` return access whose `can_delete` remains false.
+
+**Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `delete_note`; ADR 0002 verification row 3.
+
+**Repeated context** — ADR 0001 invariant 5 binds deletion to owner-only capability rather than mere access; ADR 0002 invariants 1–4 require re-verification against transaction-local current state and the ordinary 403 refusal. The retained READ grant is essential mutation evidence: without it, `resolve_note_access_on` itself returns 403 before the guard under test is reached.
 
 ---
 
@@ -1457,6 +3675,63 @@ fn authorization_inventory_is_complete() {
 
 ---
 
+## fn mutating_handler_interleaving_harness_is_complete
+
+**Identification** — inventory-derived per-handler interleaving completeness harness; marker `// md:fn mutating_handler_interleaving_harness_is_complete`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn mutating_handler_interleaving_harness_is_complete
+#[test]
+fn mutating_handler_interleaving_harness_is_complete() {
+    let inventory = HTTP_HANDLER_AUTHORIZATION
+        .iter()
+        .filter(|entry| entry.kind == HandlerKind::Mutating)
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    let harness = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| entry.handler)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(inventory, harness);
+    let distinct_rows = MUTATING_HANDLER_INTERLEAVINGS
+        .iter()
+        .map(|entry| (entry.handler, entry.transition))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(distinct_rows.len(), MUTATING_HANDLER_INTERLEAVINGS.len());
+    let tests = include_str!("authorization.rs");
+    for entry in MUTATING_HANDLER_INTERLEAVINGS {
+        assert!(!entry.transition.is_empty());
+        match (entry.outcome, entry.case) {
+            (InterleavingOutcome::Refusal(status), Some(case)) => {
+                assert!((400..500).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Replay(status), Some(case)) => {
+                assert!((200..300).contains(&status));
+                assert!(tests.contains(&format!("async fn {case}(")));
+            }
+            (InterleavingOutcome::Exempt(reason), None) => {
+                assert_eq!(entry.transition, "none");
+                assert!(!reason.is_empty());
+            }
+            _ => panic!("{} has an unpinned or contradictory outcome", entry.handler),
+        }
+    }
+}
+```
+
+**What it does** — Derives every mutating entry from `HTTP_HANDLER_AUTHORIZATION`, requires at least one harness row per entry, rejects duplicate handler/transition pairs, and requires each row to carry either one pinned refusal/replay status and a real test or an explicit non-empty exemption reason. Multiple rows for one handler distinguish independent guards, including actor authority and target existence.
+
+**Dependencies** — `HTTP_HANDLER_AUTHORIZATION` supplies the classification source of truth; expects additions to expand the derived set. `MUTATING_HANDLER_INTERLEAVINGS` supplies per-handler transition data; expects set equality to fail when a handler is absent and `(handler, transition)` uniqueness to reject a repeated property without forbidding distinct properties for one handler.
+
+**Used by** — ADR 0002 verification row 3.
+
+**Repeated context** — The harness permits neither “refuses or replays” nor an undeclared absence.
+
+---
+
 ## fn inventory_classifications_are_disjoint_and_cases_are_tests
 
 **Identification** — disjoint-classification and registered-test existence test; marker `// md:fn inventory_classifications_are_disjoint_and_cases_are_tests`.
@@ -1914,27 +4189,30 @@ async fn authed_json(
 
 ## fn entity_snapshot
 
-**Identification** — byte-stable projection snapshot helper; marker `// md:fn entity_snapshot`.
+**Identification** — `async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String>`; marker `// md:fn entity_snapshot`.
 
 **Code** — complete and verbatim:
 
 ```rust
 // md:fn entity_snapshot
-async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
+async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String> {
     let query = format!("SELECT to_jsonb(t)::text FROM {table} t WHERE id = $1");
     sqlx::query_scalar(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .unwrap()
 }
 ```
 
-**What it does** — Serializes a complete database row to deterministic JSON text for exact before/after comparison.
+**What it does** — Serializes a complete database row to JSON text for exact before/after comparison, returning `None` when the row is absent so tests compare both presence and content.
 
-**Dependencies** — PostgreSQL `to_jsonb` exposes every column; expects the entity table to have an `id` column.
+**Dependencies** —
 
-**Used by** — `cross_tenant_store_mutations_leave_victim_unchanged`.
+- PostgreSQL `to_jsonb` — exposes every column in the selected row; expects the entity table to have an `id` column.
+- `sqlx::query_scalar`, `QueryScalar::bind`, and `QueryScalar::fetch_optional` — execute the dynamically selected snapshot query; expect a matching row to decode as `String` and absence to remain `None`.
+
+**Used by** — authorization rollback and cross-tenant isolation tests in this module that compare an entity's complete presence and content before and after a failed operation.
 
 **Repeated context** — The comparison covers all projection fields, not only user-visible values.
 
@@ -2038,7 +4316,10 @@ async fn serializable_move_interleaving_and_byte_equivalent_refusal(pool: PgPool
             .await
         })
     };
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("update_note", "after_early_move_guard")
+        .await;
     store
         .create_or_update_notebook_share(source.id, carol.id, Capabilities::READ)
         .await
@@ -2161,35 +4442,190 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    let note = store
+    let target = store
+        .create_user("rollback-target@example.com", "hash", "rollback target")
+        .await
+        .unwrap();
+    let update_note = store
         .create_note(None, "rollback original", owner.id)
         .await
         .unwrap();
-    state.http_test_hooks.inject_failure_after_mutation();
-    let failed = authed_json(
-        &reqwest::Client::new(),
-        reqwest::Method::PATCH,
-        addr,
-        &format!("/api/notes/{}", note.id),
-        &owner_token,
-        json!({ "title": "must roll back" }),
+    let delete_note = store
+        .create_note(None, "rollback delete", owner.id)
+        .await
+        .unwrap();
+    let create_share_note = store
+        .create_note(None, "rollback create share", owner.id)
+        .await
+        .unwrap();
+    let delete_share_note = store
+        .create_note(None, "rollback delete share", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(delete_share_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note = store
+        .create_note(None, "rollback transfer", owner.id)
+        .await
+        .unwrap();
+    store
+        .create_or_update_share(transfer_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let create_share_notebook = Notebook::new("rollback create notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &create_share_notebook)
+        .await
+        .unwrap());
+    let delete_share_notebook = Notebook::new("rollback delete notebook share");
+    assert!(store
+        .upsert_notebook(owner.id, &delete_share_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(delete_share_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_notebook = Notebook::new("rollback notebook transfer");
+    assert!(store
+        .upsert_notebook(owner.id, &transfer_notebook)
+        .await
+        .unwrap());
+    store
+        .create_or_update_notebook_share(transfer_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note_share_before =
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await;
+    let transfer_notebook_share_before = relation_snapshot(
+        store.pool(),
+        "notebook_shares",
+        "notebook_id",
+        transfer_notebook.id,
     )
     .await;
-    assert_eq!(failed.status(), 500);
+    let client = reqwest::Client::new();
+    let cases = [
+        (
+            reqwest::Method::PATCH,
+            format!("/api/notes/{}", update_note.id),
+            json!({ "title": "must roll back" }),
+            "notes",
+            "id",
+            update_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}", delete_note.id),
+            json!({}),
+            "notes",
+            "id",
+            delete_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/share", create_share_note.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "note_shares",
+            "note_id",
+            create_share_note.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/notes/{}/share/{}", delete_share_note.id, target.id),
+            json!({}),
+            "note_shares",
+            "note_id",
+            delete_share_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notes/{}/transfer", transfer_note.id),
+            json!({ "user_id": target.id }),
+            "notes",
+            "id",
+            transfer_note.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/share", create_share_notebook.id),
+            json!({ "user_id": target.id, "capabilities": Capabilities::READ }),
+            "notebook_shares",
+            "notebook_id",
+            create_share_notebook.id,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!(
+                "/api/notebooks/{}/share/{}",
+                delete_share_notebook.id, target.id
+            ),
+            json!({}),
+            "notebook_shares",
+            "notebook_id",
+            delete_share_notebook.id,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/notebooks/{}/transfer", transfer_notebook.id),
+            json!({ "user_id": target.id }),
+            "notebooks",
+            "id",
+            transfer_notebook.id,
+        ),
+    ];
+    for (method, path, body, table, key, id) in cases {
+        let before = relation_snapshot(store.pool(), table, key, id).await;
+        state.http_test_hooks.inject_failure_after_mutation();
+        let failed = authed_json(&client, method, addr, &path, &owner_token, body).await;
+        assert_eq!(failed.status(), 500, "{path}");
+        assert_eq!(
+            relation_snapshot(store.pool(), table, key, id).await,
+            before
+        );
+    }
     assert_eq!(
-        store.get_note(note.id).await.unwrap().unwrap().title,
-        "rollback original"
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await,
+        transfer_note_share_before
+    );
+    assert_eq!(
+        relation_snapshot(
+            store.pool(),
+            "notebook_shares",
+            "notebook_id",
+            transfer_notebook.id,
+        )
+        .await,
+        transfer_notebook_share_before
+    );
+    let owner_before = entity_snapshot(store.pool(), "users", owner.id).await;
+    state.http_test_hooks.inject_failure_after_mutation();
+    let failed = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        addr,
+        "/api/account",
+        &owner_token,
+        json!({ "password": "password123" }),
+    )
+    .await;
+    assert_eq!(failed.status(), 500, "/api/account");
+    assert_eq!(
+        entity_snapshot(store.pool(), "users", owner.id).await,
+        owner_before
     );
 }
 ```
 
-**What it does** — Injects a failure after the title mutation and proves the transaction leaves the explicitly created note unchanged.
+**What it does** — Exercises all nine serializable invariant handlers with independent rows, injects a failure after each authorized mutation but before commit, and proves the affected rows remain byte-equivalent to their baselines. A store writer that delegates to a pool-backed connection escapes the handler transaction and makes its corresponding row fail.
 
-**Dependencies** — `HttpTestHooks::inject_failure_after_mutation`, `authed_json`, and `Store::get_note`; expects failure before commit to roll back the write.
+**Dependencies** — `HttpTestHooks::inject_failure_after_mutation`, `authed_json`, `relation_snapshot`, and `entity_snapshot` — force each post-mutation error through the real HTTP boundary and compare committed database state; expects every transaction-bearing store entry point to execute its write on the supplied connection so rollback removes the mutation.
 
 **Used by** — `cargo test --workspace`; ADR 0002 verification row 9.
 
-**Repeated context** — The baseline note is created explicitly in this test's fresh SQLx fixture.
+**Repeated context** — Each note, share, notebook, and account baseline is created explicitly in this test's fresh SQLx fixture; the cases follow `SERIALIZABLE_INVARIANT_HANDLERS` order and cover all nine entries.
 
 ---
 
@@ -2311,7 +4747,10 @@ async fn serializable_two_failures_defer_revocation_notice_until_commit(pool: Pg
         )
         .await
     });
-    state.http_test_hooks.wait_until_reached().await;
+    state
+        .http_test_hooks
+        .wait_until_reached("delete_notebook_share", "after_mutation")
+        .await;
     assert!(inbox.lock().await.is_empty());
     assert_eq!(state.http_test_hooks.observations().3 - before.3, 0);
     state.http_test_hooks.inject_serialization_failures(2);
@@ -4899,12 +7338,34 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 5 | `fn route_registration_is_confined_to_router` | `// md:fn route_registration_is_confined_to_router` |
 | 6 | `fn source_relay_changes` | `// md:fn source_relay_changes` |
 | 7 | `fn authorization_inventory_is_complete` | `// md:fn authorization_inventory_is_complete` |
+| 7a | `fn mutating_handler_interleaving_harness_is_complete` | `// md:fn mutating_handler_interleaving_harness_is_complete` |
 | 8 | `fn inventory_classifications_are_disjoint_and_cases_are_tests` | `// md:fn inventory_classifications_are_disjoint_and_cases_are_tests` |
 | 9 | `fn source_inventory_detects_an_uncovered_route` | `// md:fn source_inventory_detects_an_uncovered_route` |
+| 9a | `fn collect_writer_sources` | `// md:fn collect_writer_sources` |
+| 9b | `fn guarded_writer_inventory_unions_source_and_catalog` | `// md:fn guarded_writer_inventory_unions_source_and_catalog` |
 | 10 | `fn handler_authorization_inventory_covers_router` | `// md:fn handler_authorization_inventory_covers_router` |
 | 11 | `fn authorization_reads_never_fall_back_to_the_pool` | `// md:fn authorization_reads_never_fall_back_to_the_pool` |
 | 12 | `fn owner_note_access_does_not_acquire_a_connection` | `// md:fn owner_note_access_does_not_acquire_a_connection` |
 | 13 | `fn serializable_invariant_inventory_is_exact_and_enforced` | `// md:fn serializable_invariant_inventory_is_exact_and_enforced` |
+| 13aa | `fn changed_password_is_reverified_for_delete_account` | `// md:fn changed_password_is_reverified_for_delete_account` |
+| 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
+| 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
+| 13c | `fn sync_notebook_writer_retries_under_a_real_ssi_conflict` | `// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict` |
+| 13cc | `fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state` | `// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state` |
+| 13cd | `fn sync_notebook_writers_do_not_retry_non_serialization_failures` | `// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures` |
+| 13d | `fn target_principals_are_reverified_in_share_and_transfer_transactions` | `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions` |
+| 13dz | `fn target_principal_recheck_locks_the_user_until_transaction_end` | `// md:fn target_principal_recheck_locks_the_user_until_transaction_end` |
+| 13d0 | `fn successful_transfers_remove_target_shares` | `// md:fn successful_transfers_remove_target_shares` |
+| 13d0a | `fn transfer_and_target_account_deletion_resolve_coherently` | `// md:fn transfer_and_target_account_deletion_resolve_coherently` |
+| 13d0a1 | `fn repeated_share_upsert_updates_the_single_existing_grant` | `// md:fn repeated_share_upsert_updates_the_single_existing_grant` |
+| 13d0a2 | `fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` | `// md:fn repeated_transfer_by_former_owner_is_forbidden_without_changing_ownership` |
+| 13d0b | `fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` | `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` |
+| 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
+| 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |
+| 13d3 | `fn revoked_share_authority_is_reverified_for_create_notebook_share` | `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share` |
+| 13d4 | `fn revoked_ownership_is_reverified_for_transfer_notebook` | `// md:fn revoked_ownership_is_reverified_for_transfer_notebook` |
+| 13e | `fn revoked_note_guard_is_refused_for_delete_share` | `// md:fn revoked_note_guard_is_refused_for_delete_share` |
+| 13f | `fn transferred_ownership_is_reverified_for_delete_note` | `// md:fn transferred_ownership_is_reverified_for_delete_note` |
 | 10 | `fn authorization_reads_observe_transaction_local_state` | `// md:fn authorization_reads_observe_transaction_local_state` |
 | 11 | `fn put_resource_data_checks_blob_write_result` | `// md:fn put_resource_data_checks_blob_write_result` |
 | 11 | `fn relay_materialization_uses_authenticated_session_identity` | `// md:fn relay_materialization_uses_authenticated_session_identity` |

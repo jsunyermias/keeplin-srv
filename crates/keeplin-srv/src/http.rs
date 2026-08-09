@@ -56,6 +56,11 @@ where
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *transaction)
             .await?;
+        #[cfg(debug_assertions)]
+        state
+            .http_test_hooks
+            .checkpoint(_handler, "before_operation")
+            .await;
         let result = operation(state.clone(), &mut transaction).await;
         #[cfg(debug_assertions)]
         let mut result = result;
@@ -593,7 +598,22 @@ async fn delete_account(
     if !auth::verify_password(&body.password, &stored.password_hash)? {
         return Err(AppError::InvalidToken);
     }
-    state.store.delete_user(user.user_id).await?;
+    let verified_password_hash = stored.password_hash;
+    serializable(state.clone(), "delete_account", |state, conn| {
+        let verified_password_hash = verified_password_hash.clone();
+        Box::pin(async move {
+            let stored = state
+                .store
+                .get_user_by_id_on(conn, user.user_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if stored.password_hash != verified_password_hash {
+                return Err(AppError::InvalidToken);
+            }
+            state.store.delete_user_on(conn, user.user_id).await
+        })
+    })
+    .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1458,6 +1478,11 @@ async fn create_share(
             }
             state
                 .store
+                .get_user_by_id_on(conn, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            state
+                .store
                 .create_or_update_share_on(conn, id, target_id, requested.bits())
                 .await
         })
@@ -1594,6 +1619,11 @@ async fn transfer_ownership(
             if !access.can_transfer_ownership() {
                 return Err(AppError::Forbidden);
             }
+            state
+                .store
+                .get_user_by_id_on(conn, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
             state.store.delete_share_on(conn, id, target_id).await?;
             state
                 .store
@@ -1677,6 +1707,11 @@ async fn create_notebook_share(
             }
             state
                 .store
+                .get_user_by_id_on(conn, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            state
+                .store
                 .create_or_update_notebook_share_on(conn, id, target_id, requested.bits())
                 .await
         })
@@ -1747,6 +1782,11 @@ async fn transfer_notebook(
             if !access.can_transfer_ownership() {
                 return Err(AppError::Forbidden);
             }
+            state
+                .store
+                .get_user_by_id_on(conn, target_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
             state
                 .store
                 .set_notebook_owner_on(conn, id, target_id)
