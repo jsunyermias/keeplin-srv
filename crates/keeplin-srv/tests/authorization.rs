@@ -1230,7 +1230,7 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
             )
             .bind(left_id)
             .bind(right_id)
-            .fetch_one(&pool)
+            .fetch_one(&mut *blocker)
             .await
             .unwrap();
             if waiting >= 2 {
