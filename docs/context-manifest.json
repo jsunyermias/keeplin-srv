@@ -1856,6 +1856,7 @@
           "fn target_principal_recheck_locks_the_user_until_transaction_end",
           "fn successful_transfers_remove_target_shares",
           "fn transfer_and_target_account_deletion_resolve_coherently",
+          "fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity",
           "fn revoked_share_authority_is_reverified_for_create_share",
           "fn revoked_ownership_is_reverified_for_transfer_ownership",
           "fn revoked_share_authority_is_reverified_for_create_notebook_share",

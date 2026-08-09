@@ -1706,6 +1706,138 @@ async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
         .is_none());
 }
 
+// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+#[sqlx::test(migrations = "../../migrations")]
+async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity(
+    pool: PgPool,
+) {
+    const REQUESTS: usize = 200;
+    const DEFAULT_SEED: u64 = 149_004;
+
+    let seed = std::env::var("KEEPLIN_STRESS_SEED")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("KEEPLIN_STRESS_SEED must be a u64")
+        })
+        .unwrap_or(DEFAULT_SEED);
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let target_token = register_and_login(addr, "stress-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("stress-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("stress-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "hook-free contention", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+
+    let mut schedule = (0..REQUESTS)
+        .map(|index| (if index < 4 { 2 } else { index % 2 }, 0_u64))
+        .collect::<Vec<_>>();
+    let mut random = seed;
+    for index in (1..schedule.len()).rev() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let other = (random as usize) % (index + 1);
+        schedule.swap(index, other);
+    }
+    for (_, delay) in &mut schedule {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        *delay = random % 8;
+    }
+
+    let client = reqwest::Client::new();
+    let mut requests = Vec::with_capacity(REQUESTS);
+    for (operation, delay) in schedule {
+        let client = client.clone();
+        let owner_token = owner_token.clone();
+        let target_token = target_token.clone();
+        requests.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            match operation {
+                0 => {
+                    client
+                        .post(format!("http://{addr}/api/notes/{}/transfer", note.id))
+                        .bearer_auth(owner_token)
+                        .json(&json!({"user_id": target.id}))
+                        .send()
+                        .await
+                }
+                1 => {
+                    client
+                        .delete(format!(
+                            "http://{addr}/api/notes/{}/share/{}",
+                            note.id, target.id
+                        ))
+                        .bearer_auth(owner_token)
+                        .json(&json!({}))
+                        .send()
+                        .await
+                }
+                _ => {
+                    client
+                        .delete(format!("http://{addr}/api/account"))
+                        .bearer_auth(target_token)
+                        .json(&json!({"password": "password123"}))
+                        .send()
+                        .await
+                }
+            }
+        }));
+    }
+    for request in requests {
+        let response = request
+            .await
+            .unwrap_or_else(|error| panic!("seed {seed}: request task failed: {error}"))
+            .unwrap_or_else(|error| panic!("seed {seed}: request failed: {error}"));
+        assert!(
+            !response.status().is_server_error(),
+            "seed {seed}: request returned {}",
+            response.status()
+        );
+    }
+
+    let dangling_share: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM notes note LEFT JOIN users owner_row ON owner_row.id = note.owner_id WHERE owner_row.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !dangling_share,
+        "seed {seed}: a surviving share has no principal"
+    );
+    assert!(
+        !dangling_owner,
+        "seed {seed}: a surviving note has no owner"
+    );
+}
+
 // md:fn revoked_share_authority_is_reverified_for_create_share
 #[cfg(debug_assertions)]
 #[sqlx::test(migrations = "../../migrations")]

@@ -2163,6 +2163,156 @@ async fn transfer_and_target_account_deletion_resolve_coherently(pool: PgPool) {
 
 ---
 
+## fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+
+**Identification** — hook-free randomized HTTP contention test; marker `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity
+#[sqlx::test(migrations = "../../migrations")]
+async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity(
+    pool: PgPool,
+) {
+    const REQUESTS: usize = 200;
+    const DEFAULT_SEED: u64 = 149_004;
+
+    let seed = std::env::var("KEEPLIN_STRESS_SEED")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("KEEPLIN_STRESS_SEED must be a u64")
+        })
+        .unwrap_or(DEFAULT_SEED);
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let target_token = register_and_login(addr, "stress-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("stress-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("stress-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "hook-free contention", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+
+    let mut schedule = (0..REQUESTS)
+        .map(|index| (if index < 4 { 2 } else { index % 2 }, 0_u64))
+        .collect::<Vec<_>>();
+    let mut random = seed;
+    for index in (1..schedule.len()).rev() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let other = (random as usize) % (index + 1);
+        schedule.swap(index, other);
+    }
+    for (_, delay) in &mut schedule {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        *delay = random % 8;
+    }
+
+    let client = reqwest::Client::new();
+    let mut requests = Vec::with_capacity(REQUESTS);
+    for (operation, delay) in schedule {
+        let client = client.clone();
+        let owner_token = owner_token.clone();
+        let target_token = target_token.clone();
+        requests.push(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            match operation {
+                0 => {
+                    client
+                        .post(format!("http://{addr}/api/notes/{}/transfer", note.id))
+                        .bearer_auth(owner_token)
+                        .json(&json!({"user_id": target.id}))
+                        .send()
+                        .await
+                }
+                1 => {
+                    client
+                        .delete(format!(
+                            "http://{addr}/api/notes/{}/share/{}",
+                            note.id, target.id
+                        ))
+                        .bearer_auth(owner_token)
+                        .json(&json!({}))
+                        .send()
+                        .await
+                }
+                _ => {
+                    client
+                        .delete(format!("http://{addr}/api/account"))
+                        .bearer_auth(target_token)
+                        .json(&json!({"password": "password123"}))
+                        .send()
+                        .await
+                }
+            }
+        }));
+    }
+    for request in requests {
+        let response = request
+            .await
+            .unwrap_or_else(|error| panic!("seed {seed}: request task failed: {error}"))
+            .unwrap_or_else(|error| panic!("seed {seed}: request failed: {error}"));
+        assert!(
+            !response.status().is_server_error(),
+            "seed {seed}: request returned {}",
+            response.status()
+        );
+    }
+
+    let dangling_share: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dangling_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM notes note LEFT JOIN users owner_row ON owner_row.id = note.owner_id WHERE owner_row.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !dangling_share,
+        "seed {seed}: a surviving share has no principal"
+    );
+    assert!(
+        !dangling_owner,
+        "seed {seed}: a surviving note has no owner"
+    );
+}
+```
+
+**What it does** — Launches exactly 200 real HTTP requests against one note and target principal: 98 ownership transfers, 98 direct-share deletions, and four target-account deletions. Keeping account deletion plural while limiting its Argon2 password checks makes the contention meaningful without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation order and adds up to seven milliseconds of launch jitter without using test hooks. Every response must be non-5xx, and direct database checks reject any surviving share without a principal or note without an owner. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise seed `149004` is used, and every failure reports the effective seed.
+
+**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention. PostgreSQL foreign keys and the final anti-join queries provide whole-database validation; expects: all surviving principals and owners remain resolvable.
+
+**Used by** — issue #149 concurrency regression suite.
+
+**Repeated context** — The seeded launch schedule is reproducible, while executor and PostgreSQL scheduling remain intentionally uncontrolled so the test exercises natural contention rather than a scripted interleaving.
+
+---
+
 ## fn revoked_share_authority_is_reverified_for_create_share
 
 **Identification** — note share-authority transition interleaving; marker `// md:fn revoked_share_authority_is_reverified_for_create_share`.
@@ -6900,6 +7050,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13dz | `fn target_principal_recheck_locks_the_user_until_transaction_end` | `// md:fn target_principal_recheck_locks_the_user_until_transaction_end` |
 | 13d0 | `fn successful_transfers_remove_target_shares` | `// md:fn successful_transfers_remove_target_shares` |
 | 13d0a | `fn transfer_and_target_account_deletion_resolve_coherently` | `// md:fn transfer_and_target_account_deletion_resolve_coherently` |
+| 13d0b | `fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` | `// md:fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_integrity` |
 | 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
 | 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |
 | 13d3 | `fn revoked_share_authority_is_reverified_for_create_notebook_share` | `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share` |
