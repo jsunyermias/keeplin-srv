@@ -478,9 +478,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "create_device", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "create_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only authorization guard; quota interleavings are outside ADR 0002 row 3"), case: None },
     HandlerInterleaving { handler: "create_notebook_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_notebook_share") },
-    HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "create_notebook_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
     HandlerInterleaving { handler: "create_share", transition: "ownership is transferred and the former owner retains only write access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_share_authority_is_reverified_for_create_share") },
-    HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "create_share", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
     HandlerInterleaving { handler: "delete_account", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_delete_account") },
     HandlerInterleaving { handler: "delete_all_devices", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
     HandlerInterleaving { handler: "delete_device", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is enforced by the mutation statement itself, with no separate early authorization guard"), case: None },
@@ -494,9 +494,9 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
     HandlerInterleaving { handler: "reset_request", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
     HandlerInterleaving { handler: "transfer_notebook", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_notebook") },
-    HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "transfer_notebook", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
     HandlerInterleaving { handler: "transfer_ownership", transition: "ownership is transferred and the former owner retains only read access after the early guard and before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_ownership_is_reverified_for_transfer_ownership") },
-    HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_inside_every_mutating_transaction") },
+    HandlerInterleaving { handler: "transfer_ownership", transition: "target principal is deleted before the operation snapshot", outcome: InterleavingOutcome::Refusal(404), case: Some("target_principals_are_reverified_in_share_and_transfer_transactions") },
     HandlerInterleaving { handler: "update_note", transition: "an inherited principal is added after the early move guard", outcome: InterleavingOutcome::Refusal(403), case: Some("serializable_move_interleaving_and_byte_equivalent_refusal") },
     HandlerInterleaving { handler: "verify_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
     HandlerInterleaving { handler: "verify_request", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
@@ -856,7 +856,12 @@ async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
     let mut source_writers = BTreeMap::new();
     let mut decoy_detected = false;
     for (path, source) in &sources {
-        let uppercase = source.to_ascii_uppercase();
+        let uppercase = source
+            .replace('"', "")
+            .to_ascii_uppercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for table in guarded {
             let table_upper = table.to_ascii_uppercase();
             for verb in ["INSERT INTO", "UPDATE", "DELETE FROM"] {
@@ -879,7 +884,7 @@ async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
 
     let guarded_names = guarded.into_iter().map(str::to_string).collect::<Vec<_>>();
     let cascade_tables: BTreeSet<String> = sqlx::query_scalar(
-        "WITH RECURSIVE affected(table_oid) AS (SELECT value::regclass FROM unnest($1::text[]) value UNION SELECT constraint_row.confrelid FROM pg_constraint constraint_row JOIN affected ON constraint_row.conrelid = affected.table_oid WHERE constraint_row.contype = 'f' AND constraint_row.confdeltype = 'c') SELECT table_oid::regclass::text FROM affected",
+        "WITH RECURSIVE affected(table_oid) AS (SELECT value::regclass FROM unnest($1::text[]) value UNION SELECT CASE WHEN constraint_row.conrelid = affected.table_oid THEN constraint_row.confrelid ELSE constraint_row.conrelid END FROM pg_constraint constraint_row JOIN affected ON constraint_row.conrelid = affected.table_oid OR constraint_row.confrelid = affected.table_oid WHERE constraint_row.contype = 'f' AND constraint_row.confdeltype = 'c') SELECT table_oid::regclass::text FROM affected",
     )
     .bind(&guarded_names)
     .fetch_all(&pool)
@@ -889,14 +894,30 @@ async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
     .collect();
     assert_eq!(
         cascade_tables,
-        ["note_shares", "notebook_shares", "notebooks", "notes", "users"]
+        [
+            "changes",
+            "device_cursors",
+            "email_tokens",
+            "lines",
+            "note_line_order",
+            "note_shares",
+            "note_tags",
+            "notebook_shares",
+            "notebooks",
+            "notes",
+            "resource_blobs",
+            "resources",
+            "tags",
+            "user_devices",
+            "users",
+        ]
             .into_iter()
             .map(str::to_string)
             .collect(),
         "catalog cascade closure is table-level: it does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
     );
     let trigger_tables: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT event_object_table FROM information_schema.triggers WHERE event_object_table = ANY($1)",
+        "SELECT DISTINCT relation.relname FROM pg_trigger trigger_row JOIN pg_class relation ON relation.oid = trigger_row.tgrelid WHERE NOT trigger_row.tgisinternal AND relation.relname = ANY($1)",
     )
     .bind(&guarded_names)
     .fetch_all(&pool)
@@ -1137,10 +1158,14 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             .split(concat!("// ", "md:"))
             .next()
             .unwrap();
+        let boundary = body
+            .split(&format!("serializable(state.clone(), \"{handler}\","))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
+        let boundary = boundary.split("\n    .await?;").next().unwrap();
         assert!(
-            body.contains(&format!("serializable(state.clone(), \"{handler}\","))
-                && body.contains(mutation),
-            "{handler} must execute {mutation} through the SERIALIZABLE retry boundary"
+            boundary.contains(mutation),
+            "{handler} must execute {mutation} inside the SERIALIZABLE retry closure"
         );
     }
     let delete_account = source
@@ -1360,16 +1385,16 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
 
 ---
 
-## fn serializable_participants_form_a_real_ssi_conflict
+## fn postgres_serializable_isolation_detects_a_real_ssi_conflict
 
-**Identification** — controlled SSI integration test; marker `// md:fn serializable_participants_form_a_real_ssi_conflict`.
+**Identification** — controlled PostgreSQL SSI capability test; marker `// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict`.
 
 **Code** — complete and verbatim:
 
 ```rust
-// md:fn serializable_participants_form_a_real_ssi_conflict
+// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict
 #[sqlx::test(migrations = "../../migrations")]
-async fn serializable_participants_form_a_real_ssi_conflict(pool: PgPool) {
+async fn postgres_serializable_isolation_detects_a_real_ssi_conflict(pool: PgPool) {
     sqlx::query("CREATE TABLE ssi_probe (id integer PRIMARY KEY, value integer NOT NULL)")
         .execute(&pool)
         .await
@@ -1428,16 +1453,16 @@ async fn serializable_participants_form_a_real_ssi_conflict(pool: PgPool) {
 
 ---
 
-## fn target_principals_are_reverified_inside_every_mutating_transaction
+## fn target_principals_are_reverified_in_share_and_transfer_transactions
 
-**Identification** — four-handler target re-read interleaving test; marker `// md:fn target_principals_are_reverified_inside_every_mutating_transaction`.
+**Identification** — four-handler target re-read interleaving test; marker `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions`.
 
 **Code** — complete and verbatim:
 
 ```rust
-// md:fn target_principals_are_reverified_inside_every_mutating_transaction
+// md:fn target_principals_are_reverified_in_share_and_transfer_transactions
 #[sqlx::test(migrations = "../../migrations")]
-async fn target_principals_are_reverified_inside_every_mutating_transaction(pool: PgPool) {
+async fn target_principals_are_reverified_in_share_and_transfer_transactions(pool: PgPool) {
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "target-owner@example.com").await;
     let owner = state
@@ -1652,7 +1677,7 @@ async fn revoked_share_authority_is_reverified_for_create_share(pool: PgPool) {
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_share`; ADR 0002 verification row 3.
 
-**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
 
 ---
 
@@ -1746,7 +1771,7 @@ async fn revoked_ownership_is_reverified_for_transfer_ownership(pool: PgPool) {
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_ownership`; ADR 0002 verification row 3.
 
-**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
 
 ---
 
@@ -1837,7 +1862,7 @@ async fn revoked_share_authority_is_reverified_for_create_notebook_share(pool: P
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `create_notebook_share`; ADR 0002 verification row 3.
 
-**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
 
 ---
 
@@ -1926,7 +1951,7 @@ async fn revoked_ownership_is_reverified_for_transfer_notebook(pool: PgPool) {
 
 **Used by** — `mutating_handler_interleaving_harness_is_complete` names this evidence for `transfer_notebook`; ADR 0002 verification row 3.
 
-**Repeated context** — `target_principals_are_reverified_inside_every_mutating_transaction` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
+**Repeated context** — `target_principals_are_reverified_in_share_and_transfer_transactions` separately pins ADR 0005's transaction-local target lookup; this row pins the actor's transaction-local authority guard.
 
 ---
 
@@ -2024,6 +2049,18 @@ async fn revoked_note_guard_is_refused_for_delete_share(pool: PgPool) {
     assert!(state.store.delete_share(note.id, actor.id).await.unwrap());
     state.http_test_hooks.resume();
     assert_eq!(request.await.unwrap().status(), 403);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(state
+        .store
+        .get_share(note.id, actor.id)
+        .await
+        .unwrap()
+        .is_none());
 }
 ```
 
@@ -2113,16 +2150,9 @@ async fn transferred_ownership_is_reverified_for_delete_note(pool: PgPool) {
     assert_eq!(share_response.status(), 200);
     state.http_test_hooks.resume();
     assert_eq!(delete_request.await.unwrap().status(), 403);
-    assert_eq!(
-        state
-            .store
-            .get_note(note.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .owner_id,
-        new_owner.id
-    );
+    let persisted = state.store.get_note(note.id).await.unwrap().unwrap();
+    assert_eq!(persisted.owner_id, new_owner.id);
+    assert!(persisted.deleted_at.is_none());
 }
 ```
 
@@ -6257,8 +6287,8 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13aa | `fn changed_password_is_reverified_for_delete_account` | `// md:fn changed_password_is_reverified_for_delete_account` |
 | 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
-| 13c | `fn serializable_participants_form_a_real_ssi_conflict` | `// md:fn serializable_participants_form_a_real_ssi_conflict` |
-| 13d | `fn target_principals_are_reverified_inside_every_mutating_transaction` | `// md:fn target_principals_are_reverified_inside_every_mutating_transaction` |
+| 13c | `fn postgres_serializable_isolation_detects_a_real_ssi_conflict` | `// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict` |
+| 13d | `fn target_principals_are_reverified_in_share_and_transfer_transactions` | `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions` |
 | 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
 | 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |
 | 13d3 | `fn revoked_share_authority_is_reverified_for_create_notebook_share` | `// md:fn revoked_share_authority_is_reverified_for_create_notebook_share` |
