@@ -292,6 +292,7 @@ async fn metrics(
     let (users, notes, lines, tombstones) = state.store.counts().await?;
     let (collab_sessions, collab_connections) = state.collab.stats().await;
     let relay_users = state.hub.live_users().await;
+    let projection = crate::projection::stats(&state.store).await?;
 
     if q.format.as_deref() == Some("prometheus") {
         let body = format!(
@@ -315,7 +316,23 @@ async fn metrics(
              keeplin_collab_connections {collab_connections}\n\
              # HELP keeplin_relay_live_users Users with a live relay connection on this instance.\n\
              # TYPE keeplin_relay_live_users gauge\n\
-             keeplin_relay_live_users {relay_users}\n"
+             keeplin_relay_live_users {relay_users}\n\
+             # HELP keeplin_projection_jobs_outstanding Projection jobs awaiting completion.\n\
+             # TYPE keeplin_projection_jobs_outstanding gauge\n\
+             keeplin_projection_jobs_outstanding {outstanding}\n\
+             # HELP keeplin_projection_jobs_retrying Projection jobs delayed for retry.\n\
+             # TYPE keeplin_projection_jobs_retrying gauge\n\
+             keeplin_projection_jobs_retrying {retrying}\n\
+             # HELP keeplin_projection_jobs_dead_lettered Projection jobs requiring operator action.\n\
+             # TYPE keeplin_projection_jobs_dead_lettered gauge\n\
+             keeplin_projection_jobs_dead_lettered {dead_lettered}\n\
+             # HELP keeplin_projection_oldest_outstanding_seconds Age of the oldest outstanding projection job.\n\
+             # TYPE keeplin_projection_oldest_outstanding_seconds gauge\n\
+             keeplin_projection_oldest_outstanding_seconds {oldest}\n",
+            outstanding = projection.outstanding,
+            retrying = projection.retrying,
+            dead_lettered = projection.dead_lettered,
+            oldest = projection.oldest_outstanding_seconds,
         );
         return Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response());
     }

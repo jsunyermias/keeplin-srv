@@ -25,6 +25,13 @@ port:
 
 Everything lives in PostgreSQL; the schema is versioned SQL migrations (`migrations/`).
 
+Journal appends and durable projection jobs commit together. Each newly inserted
+`(user_id, batch_id, batch_index)` receives one `projection_jobs` row, and fan-out uses only that
+inserted subset. In-process workers claim with `FOR UPDATE SKIP LOCKED`, retain the row lock through
+application, and delete the job only after success. Resource metadata and inline bytes commit
+atomically. Bounded retries distinguish enumerated permanent data errors from transient failures;
+dead letters remain linked to journal input and are exposed to metrics and reconciliation.
+
 - **`users`** — account (email, Argon2 password hash, `display_name`).
 - **`user_devices`** — one row per device login. The **device** is the concurrency actor:
   the JWT carries `device_id`, and that id is what a device signs its edits with.

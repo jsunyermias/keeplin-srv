@@ -12,7 +12,7 @@ use std::{
 use axum::{body::Body, extract::ConnectInfo, http::Request, Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
-    models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
+    models::{Change, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
 };
 use keeplin_srv::{
@@ -21,6 +21,7 @@ use keeplin_srv::{
     permissions::{
         resolve_note_access, resolve_note_access_on, resolve_notebook_access_on, Capabilities,
     },
+    projection,
     state::AppState,
     store::{Note, NotePatch, Store},
 };
@@ -1038,12 +1039,44 @@ async fn sync_notebook_writers_retry_real_40001_within_the_bound(pool: PgPool) {
     .await
     .unwrap();
     let notebook = Notebook::new("retry once");
-    assert!(store.upsert_notebook(user.id, &notebook).await.unwrap());
+    let device = store.create_device(user.id, "sync retry").await.unwrap();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "sync retry",
+            batch_id,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_available(&state, Some(user.id), 1).await;
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(attempts, 2);
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1 AND user_id = $2)"
+    )
+    .bind(notebook.id)
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
 }
 
 // md:fn sync_notebook_writers_do_not_retry_a_fourth_time
@@ -1071,7 +1104,23 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .await
     .unwrap();
     let notebook = Notebook::new("exhaust retries");
-    assert!(store.upsert_notebook(user.id, &notebook).await.is_err());
+    let device = store.create_device(user.id, "sync exhaust").await.unwrap();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "sync exhaust",
+            batch_id,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_available(&state, Some(user.id), 1).await;
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
         .fetch_one(&pool)
         .await
@@ -1084,6 +1133,15 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap());
+    let job_state: String = sqlx::query_scalar(
+        "SELECT state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(job_state, "retry");
 }
 
 // md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict
@@ -1112,6 +1170,35 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
     .unwrap();
     let left_notebook = Notebook::new("real serialization retry left");
     let right_notebook = Notebook::new("real serialization retry right");
+    let device = store.create_device(user.id, "real ssi").await.unwrap();
+    let left_batch = Uuid::new_v4();
+    let right_batch = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "real ssi",
+            left_batch,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: left_notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "real ssi",
+            right_batch,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: right_notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
     let mut blocker = pool.acquire().await.unwrap();
     sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
         .bind(left_notebook.id)
@@ -1123,15 +1210,19 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
         .execute(&mut *blocker)
         .await
         .unwrap();
-    let user_id = user.id;
-    let left_store = store.clone();
+    let left_state = AppState::new(authorization_test_config(), pool.clone());
     let left_id = left_notebook.id;
+    let user_id = user.id;
     let left =
-        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
-    let right_store = store.clone();
+        tokio::spawn(
+            async move { projection::drain_available(&left_state, Some(user_id), 1).await },
+        );
+    let right_state = AppState::new(authorization_test_config(), pool.clone());
     let right_id = right_notebook.id;
     let right =
-        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+        tokio::spawn(
+            async move { projection::drain_available(&right_state, Some(user_id), 1).await },
+        );
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
@@ -1155,18 +1246,37 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
         .execute(&mut *blocker)
         .await
         .unwrap();
-    assert!(left.await.unwrap().unwrap());
+    left.await.unwrap();
     sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
         .bind(right_id)
         .execute(&mut *blocker)
         .await
         .unwrap();
-    assert!(right.await.unwrap().unwrap());
+    right.await.unwrap();
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(attempts, 3);
+    let materialized: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notebooks WHERE user_id = $1 AND id IN ($2, $3)")
+            .bind(user.id)
+            .bind(left_id)
+            .bind(right_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(materialized, 2);
+    let outstanding: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM projection_jobs WHERE user_id = $1 AND batch_id IN ($2, $3)",
+    )
+    .bind(user.id)
+    .bind(left_batch)
+    .bind(right_batch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outstanding, 0);
 }
 
 // md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state
@@ -2873,12 +2983,12 @@ fn route_registration_is_confined_to_router() {
 
 // md:fn source_relay_changes
 fn source_relay_changes() -> BTreeSet<String> {
-    let source = include_str!("../src/sync.rs");
+    let source = include_str!("../src/projection.rs");
     let materialize = source
-        .split(concat!("// md:", "fn materialize"))
+        .split(concat!("// md:", "fn apply_change"))
         .nth(1)
         .unwrap()
-        .split(concat!("// md:", "fn changes_frame"))
+        .split(concat!("// md:", "fn claim_one"))
         .next()
         .unwrap();
     materialize
@@ -3067,33 +3177,47 @@ fn put_resource_data_checks_blob_write_result() {
 // md:fn relay_materialization_uses_authenticated_session_identity
 #[test]
 fn relay_materialization_uses_authenticated_session_identity() {
-    let source = include_str!("../src/sync.rs");
-    let handler = source
+    let relay = include_str!("../src/sync.rs");
+    let handler = relay
         .split("async fn handle_incoming(")
-        .nth(1)
-        .unwrap()
-        .split("async fn materialize(")
-        .next()
-        .unwrap();
-    assert!(handler.contains("user_id: Uuid,"));
-    assert!(handler.contains("materialize(state, user_id, &changes).await;"));
-}
-
-// md:fn note_changes_are_explicitly_non_materializing
-#[test]
-fn note_changes_are_explicitly_non_materializing() {
-    let source = include_str!("../src/sync.rs");
-    let materialize = source
-        .split("// md:fn materialize")
         .nth(1)
         .unwrap()
         .split("// md:fn changes_frame")
         .next()
         .unwrap();
+    assert!(handler.contains("user_id: Uuid,"));
+    assert!(
+        handler.contains(".append_changes(user_id, device_id, sync_device_id, batch_id, &changes)")
+    );
+    assert!(handler.contains("projection::drain_available(state, Some(user_id), 64).await;"));
+    let projection = include_str!("../src/projection.rs");
+    let drain = projection
+        .split("// md:fn drain_available")
+        .nth(1)
+        .unwrap()
+        .split("// md:fn worker")
+        .next()
+        .unwrap();
+    assert!(drain.contains("apply_change(&state.store, job.user_id, change).await"));
+}
+
+// md:fn note_changes_are_explicitly_non_materializing
+#[test]
+fn note_changes_are_explicitly_non_materializing() {
+    let source = include_str!("../src/projection.rs");
+    let materialize = source
+        .split("// md:fn apply_change")
+        .nth(1)
+        .unwrap()
+        .split("// md:fn claim_one")
+        .next()
+        .unwrap();
     assert!(materialize.contains(
         "Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } =>"
     ));
-    assert!(materialize.contains("=> {\n                Ok(())\n            }"));
+    assert!(materialize.contains(
+        "Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {}"
+    ));
 }
 
 // md:fn authorization_test_config

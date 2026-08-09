@@ -9,6 +9,30 @@ recreate the service anywhere.
 The server applies its own schema migrations at startup (`sqlx::migrate!`), so a fresh binary against
 an empty database is ready with no extra step.
 
+## Durable projection queue
+
+Every replica runs an in-process projection worker at a 250 ms cadence. Normal projection latency
+has a fixed p99 budget of 5 seconds. The bounded backoff keeps one transient retry below the fixed
+60 second worst-case budget.
+
+Monitor `keeplin_projection_jobs_outstanding`, `keeplin_projection_jobs_retrying`,
+`keeplin_projection_jobs_dead_lettered`, and `keeplin_projection_oldest_outstanding_seconds` at
+`GET /api/metrics?format=prometheus`. Alert on any dead letter, an oldest age above 5 seconds in the
+normal regime, or sustained outstanding growth. Inspect `last_error`, `attempts`, `available_at`,
+and lease columns in `projection_jobs`; never delete queue rows manually because they retain their
+journal input against pruning.
+
+Re-drive without broadcasting:
+
+```bash
+cargo run -p keeplin-srv --bin reconcile-projections -- --user USER_UUID
+cargo run -p keeplin-srv --bin reconcile-projections -- --from 2026-08-01T00:00:00Z --to 2026-08-02T00:00:00Z
+```
+
+Options may be combined; with none, every retained journal change is re-derived. The command resets
+matching dead letters, drains work, and prints queue counts. Before rollback, run an unscoped
+reconciliation and require both outstanding and dead-lettered counts to be zero.
+
 ## What to back up
 
 | Item | Where | Notes |

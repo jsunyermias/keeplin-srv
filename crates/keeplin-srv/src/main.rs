@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "startup presence cleanup failed");
     }
     keeplin_srv::bus::spawn(state.clone());
+    tokio::spawn(keeplin_srv::projection::worker(state.clone()));
 
     tokio::spawn(maintenance_loop(
         state.clone(),

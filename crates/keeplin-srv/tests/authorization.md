@@ -23,7 +23,7 @@ use std::{
 use axum::{body::Body, extract::ConnectInfo, http::Request, Json, Router};
 use chrono::{Duration, Utc};
 use keeplin_core::{
-    models::{Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
+    models::{Change, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
 };
 use keeplin_srv::{
@@ -32,6 +32,7 @@ use keeplin_srv::{
     permissions::{
         resolve_note_access, resolve_note_access_on, resolve_notebook_access_on, Capabilities,
     },
+    projection,
     state::AppState,
     store::{Note, NotePatch, Store},
 };
@@ -1325,18 +1326,50 @@ async fn sync_notebook_writers_retry_real_40001_within_the_bound(pool: PgPool) {
     .await
     .unwrap();
     let notebook = Notebook::new("retry once");
-    assert!(store.upsert_notebook(user.id, &notebook).await.unwrap());
+    let device = store.create_device(user.id, "sync retry").await.unwrap();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "sync retry",
+            batch_id,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_available(&state, Some(user.id), 1).await;
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(attempts, 2);
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1 AND user_id = $2)"
+    )
+    .bind(notebook.id)
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
 }
 ```
 
-**What it does** — Makes PostgreSQL raise one real serialization failure and requires the complete notebook write to succeed on attempt two.
+**What it does** — Enqueues a notebook projection, makes PostgreSQL raise one real operation-time serialization failure, and requires the projection boundary to succeed on attempt two, materialize the authenticated user's notebook, and remove the completed job. It is killed by removing `apply_change`'s serialization retry or by completing a job without applying its change.
 
-**Dependencies** — PostgreSQL trigger and sequence — inject and count real `40001` failures; expects sequence increments to survive transaction rollback.
+**Dependencies** — `Store::append_changes` and `projection::drain_available` — create and execute the durable job; expects the job payload to be applied through `apply_change`. PostgreSQL trigger and sequence — inject and count real `40001` failures; expects sequence increments to survive transaction rollback.
 
 **Used by** — ADR 0005 row 3 evidence.
 
@@ -1376,7 +1409,23 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .await
     .unwrap();
     let notebook = Notebook::new("exhaust retries");
-    assert!(store.upsert_notebook(user.id, &notebook).await.is_err());
+    let device = store.create_device(user.id, "sync exhaust").await.unwrap();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "sync exhaust",
+            batch_id,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_available(&state, Some(user.id), 1).await;
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM sync_writer_failure_sequence")
         .fetch_one(&pool)
         .await
@@ -1389,12 +1438,21 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap());
+    let job_state: String = sqlx::query_scalar(
+        "SELECT state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(job_state, "retry");
 }
 ```
 
-**What it does** — Forces every notebook attempt to fail and proves exactly three attempts occur with no committed notebook.
+**What it does** — Forces every projection notebook attempt to fail and proves exactly three attempts occur, no notebook commits, and the durable job remains retryable. It is killed by adding a fourth immediate retry, dropping the job on exhaustion, or allowing a partial write.
 
-**Dependencies** — PostgreSQL trigger and sequence — provide rollback-independent attempt evidence; expects SQLSTATE `40001` to enter the production classifier.
+**Dependencies** — `Store::append_changes` and `projection::drain_available` — exercise one durable job attempt; expects exhausted operation retries to return control to job-state handling. PostgreSQL trigger and sequence — provide rollback-independent attempt evidence; expects SQLSTATE `40001` to enter the production classifier.
 
 **Used by** — ADR 0005 retry-bound evidence.
 
@@ -1435,6 +1493,35 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
     .unwrap();
     let left_notebook = Notebook::new("real serialization retry left");
     let right_notebook = Notebook::new("real serialization retry right");
+    let device = store.create_device(user.id, "real ssi").await.unwrap();
+    let left_batch = Uuid::new_v4();
+    let right_batch = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "real ssi",
+            left_batch,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: left_notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "real ssi",
+            right_batch,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: right_notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
     let mut blocker = pool.acquire().await.unwrap();
     sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
         .bind(left_notebook.id)
@@ -1446,15 +1533,19 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
         .execute(&mut *blocker)
         .await
         .unwrap();
-    let user_id = user.id;
-    let left_store = store.clone();
+    let left_state = AppState::new(authorization_test_config(), pool.clone());
     let left_id = left_notebook.id;
+    let user_id = user.id;
     let left =
-        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
-    let right_store = store.clone();
+        tokio::spawn(
+            async move { projection::drain_available(&left_state, Some(user_id), 1).await },
+        );
+    let right_state = AppState::new(authorization_test_config(), pool.clone());
     let right_id = right_notebook.id;
     let right =
-        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+        tokio::spawn(
+            async move { projection::drain_available(&right_state, Some(user_id), 1).await },
+        );
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
@@ -1478,24 +1569,43 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
         .execute(&mut *blocker)
         .await
         .unwrap();
-    assert!(left.await.unwrap().unwrap());
+    left.await.unwrap();
     sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
         .bind(right_id)
         .execute(&mut *blocker)
         .await
         .unwrap();
-    assert!(right.await.unwrap().unwrap());
+    right.await.unwrap();
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(attempts, 3);
+    let materialized: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notebooks WHERE user_id = $1 AND id IN ($2, $3)")
+            .bind(user.id)
+            .bind(left_id)
+            .bind(right_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(materialized, 2);
+    let outstanding: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM projection_jobs WHERE user_id = $1 AND batch_id IN ($2, $3)",
+    )
+    .bind(user.id)
+    .bind(left_batch)
+    .bind(right_batch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outstanding, 0);
 }
 ```
 
-**What it does** — Sends two concurrent notebook inserts through `Store::upsert_notebook`, parks both after their predicate reads have fixed their serializable snapshots, then releases and commits the left writer before releasing the right. That fixed order completes a predicate-read/write dependency cycle in which PostgreSQL aborts the right transaction and the production boundary retries it, producing three durable sequence increments for two successful calls.
+**What it does** — Sends two queued projection jobs through concurrent drains, parks both notebook writes after their predicate reads have fixed their serializable snapshots, then releases and commits the left writer before releasing the right. PostgreSQL aborts the right transaction at commit and the projection boundary retries it, producing three durable sequence increments, two materialized notebooks, and no outstanding jobs. It is killed by retrying only statement-time failures, bypassing the projection boundary, or acknowledging either job before its notebook commits.
 
-**Dependencies** — PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
+**Dependencies** — `Store::append_changes` and concurrent `projection::drain_available` calls — drive distinct durable jobs through the production boundary; expects each claimed job to remain attributable through completion. PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
 
 **Used by** — ADR 0005 row 6 evidence.
 
@@ -3584,12 +3694,12 @@ fn route_registration_is_confined_to_router() {
 ```rust
 // md:fn source_relay_changes
 fn source_relay_changes() -> BTreeSet<String> {
-    let source = include_str!("../src/sync.rs");
+    let source = include_str!("../src/projection.rs");
     let materialize = source
-        .split(concat!("// md:", "fn materialize"))
+        .split(concat!("// md:", "fn apply_change"))
         .nth(1)
         .unwrap()
-        .split(concat!("// md:", "fn changes_frame"))
+        .split(concat!("// md:", "fn claim_one"))
         .next()
         .unwrap();
     materialize
@@ -3886,22 +3996,34 @@ fn put_resource_data_checks_blob_write_result() {
 // md:fn relay_materialization_uses_authenticated_session_identity
 #[test]
 fn relay_materialization_uses_authenticated_session_identity() {
-    let source = include_str!("../src/sync.rs");
-    let handler = source
+    let relay = include_str!("../src/sync.rs");
+    let handler = relay
         .split("async fn handle_incoming(")
         .nth(1)
         .unwrap()
-        .split("async fn materialize(")
+        .split("// md:fn changes_frame")
         .next()
         .unwrap();
     assert!(handler.contains("user_id: Uuid,"));
-    assert!(handler.contains("materialize(state, user_id, &changes).await;"));
+    assert!(
+        handler.contains(".append_changes(user_id, device_id, sync_device_id, batch_id, &changes)")
+    );
+    assert!(handler.contains("projection::drain_available(state, Some(user_id), 64).await;"));
+    let projection = include_str!("../src/projection.rs");
+    let drain = projection
+        .split("// md:fn drain_available")
+        .nth(1)
+        .unwrap()
+        .split("// md:fn worker")
+        .next()
+        .unwrap();
+    assert!(drain.contains("apply_change(&state.store, job.user_id, change).await"));
 }
 ```
 
-**What it does** — Requires `handle_incoming` to accept the authenticated session `user_id` and pass that exact local variable to `materialize`, preventing payload-derived identity from selecting the mutation tenant.
+**What it does** — Requires `handle_incoming` to journal and drain changes under its authenticated `user_id`, then requires the projection worker to pass the claimed job's `user_id` into `apply_change`. It is killed if the relay substitutes payload identity, drains across all users, or the worker applies a job under any identity other than the one durably claimed.
 
-**Dependencies** — `include_str!(../src/sync.rs)` and the `handle_incoming`/`materialize` declarations delimit the handler; expects the authenticated identity parameter and materialization call to retain their explicit source forms.
+**Dependencies** — `include_str!(../src/sync.rs)` and `include_str!(../src/projection.rs)` supply the relay and worker source; expects companion markers to delimit `handle_incoming` and `drain_available`, and explicit arguments to preserve the authenticated-to-durable-job identity chain.
 
 **Used by** — `cargo test` and CI; regression verifier for F12.
 
@@ -3919,24 +4041,26 @@ fn relay_materialization_uses_authenticated_session_identity() {
 // md:fn note_changes_are_explicitly_non_materializing
 #[test]
 fn note_changes_are_explicitly_non_materializing() {
-    let source = include_str!("../src/sync.rs");
+    let source = include_str!("../src/projection.rs");
     let materialize = source
-        .split("// md:fn materialize")
+        .split("// md:fn apply_change")
         .nth(1)
         .unwrap()
-        .split("// md:fn changes_frame")
+        .split("// md:fn claim_one")
         .next()
         .unwrap();
     assert!(materialize.contains(
         "Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } =>"
     ));
-    assert!(materialize.contains("=> {\n                Ok(())\n            }"));
+    assert!(materialize.contains(
+        "Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {}"
+    ));
 }
 ```
 
-**What it does** — Pins all three note variants to the explicit no-op arm of relay materialization.
+**What it does** — Pins all three note variants to the explicit no-op arm of durable projection application. It is killed if any note variant is removed from the arm or gains a materializing body.
 
-**Dependencies** — `include_str!(../src/sync.rs)` supplies canonical relay source; expects markers to delimit `materialize`.
+**Dependencies** — `include_str!(../src/projection.rs)` supplies canonical projection source; expects markers to delimit `apply_change`.
 
 **Used by** — relay tenant inventory and F9 evidence.
 
