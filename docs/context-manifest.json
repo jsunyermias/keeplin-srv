@@ -2008,6 +2008,8 @@
           "fn changed_password_is_reverified_for_delete_account",
           "fn sync_notebook_writers_retry_real_40001_within_the_bound",
           "fn sync_notebook_writers_do_not_retry_a_fourth_time",
+          "fn cross_tenant_newer_resource_projection_is_permanently_rejected",
+          "fn reconcile_enqueues_materializing_resource_change",
           "fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary",
           "fn sync_notebook_writer_retries_under_a_real_ssi_conflict",
           "fn projection_jobs_replay_safely_after_projection_commit",

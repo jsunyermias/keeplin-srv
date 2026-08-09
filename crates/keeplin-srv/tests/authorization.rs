@@ -1182,6 +1182,162 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .unwrap());
 }
 
+// md:fn cross_tenant_newer_resource_projection_is_permanently_rejected
+#[sqlx::test(migrations = "../../migrations")]
+async fn cross_tenant_newer_resource_projection_is_permanently_rejected(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let victim = store
+        .create_user("projection-victim@example.com", "hash", "projection victim")
+        .await
+        .unwrap();
+    let attacker = store
+        .create_user(
+            "projection-attacker@example.com",
+            "hash",
+            "projection attacker",
+        )
+        .await
+        .unwrap();
+    let attacker_device = store
+        .create_device(attacker.id, "projection attacker")
+        .await
+        .unwrap();
+    let victim_bytes = b"victim projection bytes".to_vec();
+    let mut victim_resource = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "victim projection resource",
+        "application/octet-stream",
+        "victim-projection.bin",
+        victim_bytes.len() as u64,
+    );
+    victim_resource.vv = VersionVector::from([("victim".to_string(), 1)]);
+    victim_resource.last_writer = "victim".into();
+    store
+        .apply_resource_create(victim.id, &victim_resource, Some(&victim_bytes))
+        .await
+        .unwrap();
+    let metadata_before = entity_snapshot(&pool, "resources", victim_resource.id).await;
+    let blob_before = store
+        .get_resource_blob(victim_resource.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut hostile_resource = victim_resource.clone();
+    hostile_resource.title = "attacker wins lww".into();
+    hostile_resource.file_name = "attacker.bin".into();
+    hostile_resource.size = 23;
+    hostile_resource.created_at = victim_resource.created_at + Duration::days(1);
+    hostile_resource.vv = VersionVector::from([("attacker".to_string(), 99)]);
+    hostile_resource.last_writer = "attacker".into();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            attacker.id,
+            attacker_device.id,
+            "projection attacker",
+            batch_id,
+            &[serde_json::to_value(Change::ResourceCreate {
+                resource: hostile_resource,
+                data: Some(b"attacker projection bytes".to_vec()),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_batch(&state, attacker.id, batch_id).await;
+    assert_eq!(
+        entity_snapshot(&pool, "resources", victim_resource.id).await,
+        metadata_before
+    );
+    assert_eq!(
+        store
+            .get_resource_blob(victim_resource.id)
+            .await
+            .unwrap()
+            .unwrap(),
+        blob_before
+    );
+    let (job_state, attempts, last_error): (String, i32, Option<String>) = sqlx::query_as(
+        "SELECT state, attempts, last_error FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 AND batch_index = 0",
+    )
+    .bind(attacker.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(job_state, "dead_letter");
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().starts_with(
+        "internal error: invalid projection payload: resource id belongs to another user"
+    ));
+}
+
+// md:fn reconcile_enqueues_materializing_resource_change
+#[sqlx::test(migrations = "../../migrations")]
+async fn reconcile_enqueues_materializing_resource_change(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "reconcile-resource@example.com",
+            "hash",
+            "reconcile resource",
+        )
+        .await
+        .unwrap();
+    let device = store
+        .create_device(user.id, "reconcile resource")
+        .await
+        .unwrap();
+    let resource = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "reconcile resource",
+        "application/octet-stream",
+        "reconcile.bin",
+        0,
+    );
+    let payload = serde_json::to_value(Change::ResourceCreate {
+        resource,
+        data: None,
+    })
+    .unwrap();
+    assert_eq!(
+        payload.get("op").and_then(Value::as_str),
+        Some("resource_create")
+    );
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "reconcile resource",
+            batch_id,
+            &[payload],
+        )
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM projection_jobs WHERE user_id = $1 AND batch_id = $2")
+        .bind(user.id)
+        .bind(batch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        projection::reconcile(&store, Some(user.id), None, None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 AND batch_index = 0 AND state = 'pending')"
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+
 // md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary
 #[sqlx::test(migrations = "../../migrations")]
 async fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary(pool: PgPool) {
