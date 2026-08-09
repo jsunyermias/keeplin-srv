@@ -2014,6 +2014,7 @@
           "fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity",
           "fn mixed_projection_batch_keeps_per_index_terminal_states",
           "fn normal_projection_latency_stays_within_fixed_budget",
+          "fn duplicate_batch_request_completes_outstanding_projection_work",
           "fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary",
           "fn sync_notebook_writer_retries_under_a_real_ssi_conflict",
           "fn projection_jobs_replay_safely_after_projection_commit",

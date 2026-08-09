@@ -22,6 +22,7 @@ use std::{
 
 use axum::{body::Body, extract::ConnectInfo, http::Request, Json, Router};
 use chrono::{Duration, Utc};
+use futures_util::SinkExt;
 use keeplin_core::{
     models::{Change, Notebook, Resource, Tag, SYSTEM_RESOURCE_NOTE_ID},
     storage::note_log::VersionVector,
@@ -39,6 +40,7 @@ use keeplin_srv::{
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
@@ -2133,7 +2135,6 @@ async fn normal_projection_latency_stays_within_fixed_budget(pool: PgPool) {
     tag.vv = VersionVector::from([("projection-latency".to_string(), 1)]);
     tag.last_writer = "projection-latency".into();
     let state = Arc::new(AppState::new(authorization_test_config(), pool.clone()));
-    let worker = tokio::spawn(projection::worker(state));
     let batch_id = Uuid::new_v4();
     store
         .append_changes(
@@ -2145,7 +2146,16 @@ async fn normal_projection_latency_stays_within_fixed_budget(pool: PgPool) {
         )
         .await
         .unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM tags WHERE user_id = $1 AND id = $2)",
+    )
+    .bind(user.id)
+    .bind(tag.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
     let committed_at = std::time::Instant::now();
+    let worker = tokio::spawn(projection::worker(state));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if sqlx::query_scalar::<_, bool>(
@@ -2170,13 +2180,139 @@ async fn normal_projection_latency_stays_within_fixed_budget(pool: PgPool) {
 }
 ```
 
-**What it does** — Starts the production projection worker, timestamps journal commit completion, polls the queryable tag projection, and compares measured latency with the maintainer-fixed five-second normal-regime budget.
+**What it does** — Appends a tag change before starting the production projection worker, proves the append did not project synchronously, timestamps journal commit completion, starts the worker, polls the queryable tag projection, and compares measured latency with the maintainer-fixed five-second normal-regime budget.
 
-**Dependencies** — `projection::worker` supplies the production 250 ms cadence; expects available jobs to be drained continuously. `tokio::time::timeout` makes a cadence beyond the fixed budget fail mechanically.
+**Dependencies** — `Store::append_changes` persists and enqueues without materializing; expects the projected tag to remain absent when the call returns. `projection::worker` supplies the production 250 ms cadence; expects available jobs to be drained continuously. `tokio::time::timeout` makes a cadence beyond the fixed budget fail mechanically.
 
 **Used by** — ADR 0006 verification row 10.
 
 **Repeated context** — This is a representative normal-path measurement, not a statistically meaningful p99 estimate or the 60-second retry-path bound.
+
+---
+
+## fn duplicate_batch_request_completes_outstanding_projection_work
+
+**Identification** — full sync-request duplicate recovery test; marker `// md:fn duplicate_batch_request_completes_outstanding_projection_work`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn duplicate_batch_request_completes_outstanding_projection_work
+#[sqlx::test(migrations = "../../migrations")]
+async fn duplicate_batch_request_completes_outstanding_projection_work(pool: PgPool) {
+    let addr = spawn_authorization_server(pool.clone()).await;
+    let token = register_and_login(addr, "duplicate-projection@example.com").await;
+    let store = Store::new(pool.clone());
+    let user = store
+        .get_user_by_email("duplicate-projection@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let device_id: Uuid = sqlx::query_scalar("SELECT id FROM user_devices WHERE user_id = $1")
+        .bind(user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut tag = Tag::new("duplicate projection recovery");
+    tag.vv = VersionVector::from([("duplicate-projection".to_string(), 1)]);
+    tag.last_writer = "duplicate-projection".into();
+    let batch_id = Uuid::new_v4();
+    let changes = vec![serde_json::to_value(Change::TagCreate { tag: tag.clone() }).unwrap()];
+    store
+        .append_changes(
+            user.id,
+            device_id,
+            "duplicate projection",
+            batch_id,
+            &changes,
+        )
+        .await
+        .unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM tags WHERE user_id = $1 AND id = $2)",
+    )
+    .bind(user.id)
+    .bind(tag.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 AND state = 'pending')",
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/sync"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({ "type": "auth", "token": token }).to_string(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "changes",
+                "batch_id": batch_id,
+                "device_id": "duplicate projection",
+                "changes": changes,
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM tags WHERE user_id = $1 AND id = $2)",
+            )
+            .bind(user.id)
+            .bind(tag.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)",
+            )
+            .bind(user.id)
+            .bind(batch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+```
+
+**What it does** — Seeds a journaled tag change directly through the store without running a projection worker, proves its projection is absent and its job pending, then authenticates to `/api/sync` and resends the same batch. The real `handle_incoming` duplicate branch must drain the outstanding job, making the tag visible and eventually removing the job instead of silently returning empty. Separate bounded polls observe both commits without assuming that tag materialization and job deletion become visible atomically.
+
+**Dependencies** — `Store::append_changes` creates the initial journal row and pending projection job; expects it not to materialize synchronously. `tokio_tungstenite::connect_async` and `SinkExt::send` drive the production WebSocket sync request path; expects ordered delivery of authentication before the repeated changes frame. `tokio::time::timeout` bounds both condition polls; expects the tag to become visible and the projection job to disappear within five seconds while allowing their separate transactions to commit in order. `handle_incoming` calls `projection::drain_batch` for an empty insertion set; removing that call leaves the asserted tag absent and job pending.
+
+**Used by** — ADR 0006 verification row 3 and issue #75's repeated-batch acceptance criterion.
+
+**Repeated context** — The first delivery is seeded at store level solely to stop before ordinary eager draining; the repeated delivery exercises the complete authenticated request-path duplicate branch.
 
 ---
 
@@ -8664,6 +8800,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13b3 | `fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity` | `// md:fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity` |
 | 13b4 | `fn mixed_projection_batch_keeps_per_index_terminal_states` | `// md:fn mixed_projection_batch_keeps_per_index_terminal_states` |
 | 13b5 | `fn normal_projection_latency_stays_within_fixed_budget` | `// md:fn normal_projection_latency_stays_within_fixed_budget` |
+| 13b6 | `fn duplicate_batch_request_completes_outstanding_projection_work` | `// md:fn duplicate_batch_request_completes_outstanding_projection_work` |
 | 13ba | `fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary` | `// md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary` |
 | 13c | `fn sync_notebook_writer_retries_under_a_real_ssi_conflict` | `// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict` |
 | 13ca | `fn projection_jobs_replay_safely_after_projection_commit` | `// md:fn projection_jobs_replay_safely_after_projection_commit` |
