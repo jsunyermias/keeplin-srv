@@ -106,6 +106,53 @@ impl Write for CapturedLogs {
 
 ---
 
+## fn prometheus_metrics_expose_projection_queue_series
+
+**Identification** — PostgreSQL-backed metrics exposition test; marker `// md:fn prometheus_metrics_expose_projection_queue_series`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn prometheus_metrics_expose_projection_queue_series
+#[sqlx::test(migrations = "../../migrations")]
+async fn prometheus_metrics_expose_projection_queue_series(pool: PgPool) {
+    let addr = spawn_authorization_server(pool).await;
+    let token = register_and_login(addr, "projection-metrics@example.com").await;
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/metrics?format=prometheus"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; version=0.0.4"
+    );
+    let body = response.text().await.unwrap();
+    for series in [
+        "keeplin_projection_jobs_outstanding",
+        "keeplin_projection_jobs_retrying",
+        "keeplin_projection_jobs_dead_lettered",
+        "keeplin_projection_oldest_outstanding_seconds",
+    ] {
+        assert!(body.contains(&format!("# HELP {series} ")));
+        assert!(body.contains(&format!("# TYPE {series} gauge")));
+        assert!(body.contains(&format!("{series} 0")));
+    }
+}
+```
+
+**What it does** — Authenticates against a spawned production router and pins all four projection gauges, their Prometheus metadata, zero-state values, and content type.
+
+**Dependencies** — `spawn_authorization_server` and `register_and_login` — execute the authenticated production endpoint; expects the metrics route to enforce a valid device-backed bearer token and migrated PostgreSQL queue tables. `reqwest::Response::text` — reads the Prometheus exposition; expects valid text output.
+
+**Used by** — the durable-projection verification plan's metrics-exposition row.
+
+**Repeated context** — Removing or renaming any projection series must fail this test.
+
+---
+
 ## impl CapturedLogs
 
 **Identification** — captured-text accessor; marker `// md:impl CapturedLogs`.
@@ -1438,8 +1485,8 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap());
-    let job_state: String = sqlx::query_scalar(
-        "SELECT state FROM projection_jobs WHERE user_id = $1 AND batch_id = $2",
+    let (job_state, job_attempts): (String, i32) = sqlx::query_as(
+        "SELECT state, attempts FROM projection_jobs WHERE user_id = $1 AND batch_id = $2",
     )
     .bind(user.id)
     .bind(batch_id)
@@ -1447,6 +1494,15 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(job_state, "retry");
+    assert_eq!(job_attempts, 0);
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM changes WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
 }
 ```
 
@@ -1538,13 +1594,13 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
     let user_id = user.id;
     let left =
         tokio::spawn(
-            async move { projection::drain_available(&left_state, Some(user_id), 1).await },
+            async move { projection::drain_batch(&left_state, user_id, left_batch).await },
         );
     let right_state = AppState::new(authorization_test_config(), pool.clone());
     let right_id = right_notebook.id;
     let right =
         tokio::spawn(
-            async move { projection::drain_available(&right_state, Some(user_id), 1).await },
+            async move { projection::drain_batch(&right_state, user_id, right_batch).await },
         );
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -1605,7 +1661,7 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
 
 **What it does** — Sends two queued projection jobs through concurrent drains, parks both notebook writes after their predicate reads have fixed their serializable snapshots, then releases and commits the left writer before releasing the right. PostgreSQL aborts the right transaction at commit and the projection boundary retries it, producing three durable sequence increments, two materialized notebooks, and no outstanding jobs. It is killed by retrying only statement-time failures, bypassing the projection boundary, or acknowledging either job before its notebook commits.
 
-**Dependencies** — `Store::append_changes` and concurrent `projection::drain_available` calls — drive distinct durable jobs through the production boundary; expects each claimed job to remain attributable through completion. PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
+**Dependencies** — `Store::append_changes` and concurrent `projection::drain_batch` calls — drive distinct durable jobs through the production boundary while binding each spawned task to the advisory key the driver releases; expects each targeted drain to claim only its named batch. PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
 
 **Used by** — ADR 0005 row 6 evidence.
 
@@ -4008,6 +4064,7 @@ fn relay_materialization_uses_authenticated_session_identity() {
     assert!(
         handler.contains(".append_changes(user_id, device_id, sync_device_id, batch_id, &changes)")
     );
+    assert!(handler.contains("projection::drain_batch(state, user_id, batch_id).await;"));
     assert!(handler.contains("projection::drain_available(state, Some(user_id), 64).await;"));
     let projection = include_str!("../src/projection.rs");
     let drain = projection
@@ -5578,6 +5635,10 @@ async fn cross_tenant_store_mutations_leave_victim_unchanged(pool: PgPool) {
     hostile_resource.vv = VersionVector::from([("attacker".to_string(), 99)]);
     hostile_resource.created_at = Utc::now() + Duration::days(1);
     hostile_resource.last_writer = "attacker".into();
+    assert!(store
+        .apply_resource_create(attacker.id, &hostile_resource, Some(b"poisoned bytes"))
+        .await
+        .is_err());
     assert!(store
         .upsert_resource_meta(attacker.id, &hostile_resource)
         .await
@@ -7454,6 +7515,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 1 | imports | `// md:Overview` |
 | 2 | `CapturedLogs` | `// md:CapturedLogs` |
 | 3 | `impl Write for CapturedLogs` | `// md:impl Write for CapturedLogs` |
+| 3a | `fn prometheus_metrics_expose_projection_queue_series` | `// md:fn prometheus_metrics_expose_projection_queue_series` |
 | 4 | `impl CapturedLogs` | `// md:impl CapturedLogs` |
 | 5 | `fn capturing_subscriber` | `// md:fn capturing_subscriber` |
 | 2 | authorization case inventory | `// md:authorization_case_inventory` |

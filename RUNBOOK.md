@@ -29,9 +29,16 @@ cargo run -p keeplin-srv --bin reconcile-projections -- --user USER_UUID
 cargo run -p keeplin-srv --bin reconcile-projections -- --from 2026-08-01T00:00:00Z --to 2026-08-02T00:00:00Z
 ```
 
-Options may be combined; with none, every retained journal change is re-derived. The command resets
-matching dead letters, drains work, and prints queue counts. Before rollback, run an unscoped
-reconciliation and require both outstanding and dead-lettered counts to be zero.
+Options may be combined; with none, every retained materializing journal change is re-derived. The
+command runs all forward migrations before reconciliation, resets matching dead letters without
+resetting active retry budgets, drains work, and prints queue counts. Do not run it when preserving
+an older schema for a rollback rehearsal. Counts are aggregate; inspect `last_error` for the input
+that failed. Before rollback, run an unscoped reconciliation and require outstanding, retrying, and
+dead-lettered counts to be zero (`outstanding` already includes `retrying`; checking both makes the
+gate explicit).
+
+The server and reconciliation binaries require `DB_MAX_CONNECTIONS >= 2`: one connection may hold
+a projection claim while the projection transaction acquires another.
 
 ## What to back up
 

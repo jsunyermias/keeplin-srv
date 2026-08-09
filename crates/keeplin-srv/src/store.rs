@@ -2152,6 +2152,10 @@ impl Store {
     ) -> Result<bool, AppError> {
         let incoming_ts = resource.deleted_at.unwrap_or(resource.created_at);
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(resource.id)
+            .execute(&mut *tx)
+            .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
@@ -2173,7 +2177,7 @@ impl Store {
                 return Ok(false);
             }
         }
-        sqlx::query(
+        let metadata = sqlx::query(
             r#"INSERT INTO resources
                    (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -2192,6 +2196,11 @@ impl Store {
         .bind(resource.dimensions.map(|(width, _)| width as i32))
         .bind(resource.dimensions.map(|(_, height)| height as i32)).bind(resource.note_id)
         .execute(&mut *tx).await?;
+        if metadata.rows_affected() != 1 {
+            return Err(AppError::Internal(
+                "invalid projection payload: resource id belongs to another user".into(),
+            ));
+        }
         if let Some(bytes) = data {
             sqlx::query(
                 "INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2) ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data",

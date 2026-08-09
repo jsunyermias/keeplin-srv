@@ -12,6 +12,10 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let config = Config::from_env();
+    anyhow::ensure!(
+        config.db_max_connections >= 2,
+        "DB_MAX_CONNECTIONS must be at least 2 while projection workers hold a claim connection"
+    );
 
     let env_filter = EnvFilter::from_default_env().add_directive("keeplin_srv=info".parse()?);
     if config.log_json {

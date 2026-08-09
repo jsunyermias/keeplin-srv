@@ -1215,6 +1215,7 @@
           "fn claim_one",
           "fn finish_job",
           "fn drain_available",
+          "fn drain_batch",
           "fn worker",
           "fn reconcile",
           "fn stats"
@@ -1994,6 +1995,7 @@
           "Overview",
           "CapturedLogs",
           "impl Write for CapturedLogs",
+          "fn prometheus_metrics_expose_projection_queue_series",
           "impl CapturedLogs",
           "fn capturing_subscriber",
           "authorization_case_inventory",
@@ -3638,6 +3640,48 @@
       "source": {
         "origin": "EXTRACTED",
         "value": "migrations/0018_projection_jobs.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0019_drop_redundant_projection_index.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0019_drop_redundant_projection_index.sql` — remove duplicate queue index"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0019_drop_redundant_projection_index.sql"
       },
       "tests": {
         "origin": "INFERRED",

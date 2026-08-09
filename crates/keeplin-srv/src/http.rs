@@ -292,9 +292,9 @@ async fn metrics(
     let (users, notes, lines, tombstones) = state.store.counts().await?;
     let (collab_sessions, collab_connections) = state.collab.stats().await;
     let relay_users = state.hub.live_users().await;
-    let projection = crate::projection::stats(&state.store).await?;
 
     if q.format.as_deref() == Some("prometheus") {
+        let projection = crate::projection::stats(&state.store).await?;
         let body = format!(
             "# HELP keeplin_users Registered accounts (shared across replicas).\n\
              # TYPE keeplin_users gauge\n\

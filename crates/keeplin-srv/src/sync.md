@@ -690,7 +690,7 @@ async fn handle_incoming(
         .append_changes(user_id, device_id, sync_device_id, batch_id, &changes)
         .await?;
     if inserted.is_empty() {
-        crate::projection::drain_available(state, Some(user_id), 64).await;
+        crate::projection::drain_batch(state, user_id, batch_id).await;
         tracing::debug!(%device_id, %batch_id, "duplicate batch projection work checked");
         return Ok(());
     }
@@ -700,8 +700,6 @@ async fn handle_incoming(
         .iter()
         .map(|(_, payload)| payload.clone())
         .collect();
-    crate::projection::drain_available(state, Some(user_id), 64).await;
-
     let frame = changes_frame(inserted_changes.iter());
     let _ = tx.send(FanoutMsg::Batch(Arc::new(FanoutBatch {
         origin: device_id,
@@ -714,6 +712,7 @@ async fn handle_incoming(
             &format!("{}:{}", user_id, state.instance_id),
         )
         .await;
+    crate::projection::drain_available(state, Some(user_id), 64).await;
     Ok(())
 }
 ```

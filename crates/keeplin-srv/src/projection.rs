@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use keeplin_core::models::Change;
-use sqlx::Row;
+use sqlx::{Row, Transaction};
 use uuid::Uuid;
 
 use crate::{error::AppError, state::AppState, store::Store};
@@ -24,7 +24,7 @@ struct ClaimedJob {
     batch_id: Uuid,
     batch_index: i32,
     payload: serde_json::Value,
-    connection: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    transaction: Transaction<'static, sqlx::Postgres>,
 }
 
 // md:fn is_serialization_failure
@@ -143,9 +143,12 @@ async fn apply_change(store: &Store, user_id: Uuid, change: Change) -> Result<()
 }
 
 // md:fn claim_one
-async fn claim_one(state: &AppState, user: Option<Uuid>) -> Result<Option<ClaimedJob>, AppError> {
-    let mut connection = state.store.pool().acquire().await?;
-    sqlx::query("BEGIN").execute(&mut *connection).await?;
+async fn claim_one(
+    state: &AppState,
+    user: Option<Uuid>,
+    batch: Option<Uuid>,
+) -> Result<Option<ClaimedJob>, AppError> {
+    let mut transaction = state.store.pool().begin().await?;
     let row = sqlx::query(
         r#"SELECT pj.user_id, pj.batch_id, pj.batch_index, c.payload
            FROM projection_jobs pj
@@ -153,23 +156,25 @@ async fn claim_one(state: &AppState, user: Option<Uuid>) -> Result<Option<Claime
            WHERE pj.state IN ('pending', 'retry')
              AND pj.available_at <= now()
              AND ($1::uuid IS NULL OR pj.user_id = $1)
-           ORDER BY pj.available_at, pj.created_at
+             AND ($2::uuid IS NULL OR pj.batch_id = $2)
+           ORDER BY pj.available_at, pj.created_at, pj.batch_index
            FOR UPDATE OF pj SKIP LOCKED
            LIMIT 1"#,
     )
     .bind(user)
-    .fetch_optional(&mut *connection)
+    .bind(batch)
+    .fetch_optional(&mut *transaction)
     .await?;
     let Some(row) = row else {
-        sqlx::query("ROLLBACK").execute(&mut *connection).await?;
+        transaction.rollback().await?;
         return Ok(None);
     };
     let mut job = ClaimedJob {
-        user_id: row.get("user_id"),
-        batch_id: row.get("batch_id"),
-        batch_index: row.get("batch_index"),
-        payload: row.get("payload"),
-        connection,
+        user_id: row.try_get("user_id")?,
+        batch_id: row.try_get("batch_id")?,
+        batch_index: row.try_get("batch_index")?,
+        payload: row.try_get("payload")?,
+        transaction,
     };
     sqlx::query(
         "UPDATE projection_jobs SET leased_by = $4, leased_until = now() + interval '30 seconds', updated_at = now() WHERE user_id = $1 AND batch_id = $2 AND batch_index = $3",
@@ -178,7 +183,7 @@ async fn claim_one(state: &AppState, user: Option<Uuid>) -> Result<Option<Claime
     .bind(job.batch_id)
     .bind(job.batch_index)
     .bind(state.instance_id)
-    .execute(&mut *job.connection)
+    .execute(&mut *job.transaction)
     .await?;
     Ok(Some(job))
 }
@@ -193,28 +198,28 @@ async fn finish_job(
         Ok(()) => {
             sqlx::query("DELETE FROM projection_jobs WHERE user_id = $1 AND batch_id = $2 AND batch_index = $3 AND leased_by = $4")
                 .bind(job.user_id).bind(job.batch_id).bind(job.batch_index).bind(state.instance_id)
-                .execute(&mut *job.connection).await?;
+                .execute(&mut *job.transaction).await?;
         }
         Err(error) if is_serialization_failure(&error) => {
             sqlx::query("UPDATE projection_jobs SET state = 'retry', available_at = now() + interval '1 second', leased_by = NULL, leased_until = NULL, last_error = $4, updated_at = now() WHERE user_id = $1 AND batch_id = $2 AND batch_index = $3 AND leased_by = $5")
                 .bind(job.user_id).bind(job.batch_id).bind(job.batch_index).bind(error.to_string()).bind(state.instance_id)
-                .execute(&mut *job.connection).await?;
+                .execute(&mut *job.transaction).await?;
         }
         Err(error) => {
             let permanent = is_permanent_database_failure(&error);
             sqlx::query("UPDATE projection_jobs SET attempts = attempts + 1, state = CASE WHEN $4 OR attempts + 1 >= 5 THEN 'dead_letter' ELSE 'retry' END, available_at = now() + make_interval(secs => LEAST(16, (1 << LEAST(attempts, 4)))::double precision), leased_by = NULL, leased_until = NULL, last_error = $5, updated_at = now() WHERE user_id = $1 AND batch_id = $2 AND batch_index = $3 AND leased_by = $6")
                 .bind(job.user_id).bind(job.batch_id).bind(job.batch_index).bind(permanent).bind(error.to_string()).bind(state.instance_id)
-                .execute(&mut *job.connection).await?;
+                .execute(&mut *job.transaction).await?;
         }
     }
-    sqlx::query("COMMIT").execute(&mut *job.connection).await?;
+    job.transaction.commit().await?;
     Ok(())
 }
 
 // md:fn drain_available
 pub async fn drain_available(state: &AppState, user: Option<Uuid>, limit: usize) {
     for _ in 0..limit {
-        let job = match claim_one(state, user).await {
+        let job = match claim_one(state, user, None).await {
             Ok(Some(job)) => job,
             Ok(None) => break,
             Err(error) => {
@@ -230,6 +235,40 @@ pub async fn drain_available(state: &AppState, user: Option<Uuid>, limit: usize)
         };
         if let Err(error) = finish_job(state, job, result).await {
             tracing::warn!(%error, "projection job state update failed");
+        }
+    }
+}
+
+// md:fn drain_batch
+pub async fn drain_batch(state: &AppState, user_id: Uuid, batch_id: Uuid) {
+    if let Err(error) = sqlx::query(
+        "UPDATE projection_jobs SET available_at = now(), updated_at = now() WHERE user_id = $1 AND batch_id = $2 AND state IN ('pending', 'retry')",
+    )
+    .bind(user_id)
+    .bind(batch_id)
+    .execute(state.store.pool())
+    .await
+    {
+        tracing::warn!(%error, %user_id, %batch_id, "duplicate batch projection scheduling failed");
+        return;
+    }
+    loop {
+        let job = match claim_one(state, Some(user_id), Some(batch_id)).await {
+            Ok(Some(job)) => job,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%error, %user_id, %batch_id, "duplicate batch projection claim failed");
+                break;
+            }
+        };
+        let result = match serde_json::from_value(job.payload.clone()) {
+            Ok(change) => apply_change(&state.store, job.user_id, change).await,
+            Err(error) => Err(AppError::Internal(format!(
+                "invalid projection payload: {error}"
+            ))),
+        };
+        if let Err(error) = finish_job(state, job, result).await {
+            tracing::warn!(%error, %user_id, %batch_id, "duplicate batch projection state update failed");
         }
     }
 }
@@ -256,9 +295,11 @@ pub async fn reconcile(
            WHERE ($1::uuid IS NULL OR c.user_id = $1)
              AND ($2::timestamptz IS NULL OR c.received_at >= $2)
              AND ($3::timestamptz IS NULL OR c.received_at < $3)
+             AND c.payload->>'op' NOT IN ('note_create', 'note_update', 'note_delete')
            ON CONFLICT (user_id, batch_id, batch_index) DO UPDATE
            SET state = 'pending', attempts = 0, available_at = now(), leased_by = NULL,
-               leased_until = NULL, last_error = NULL, updated_at = now()"#,
+               leased_until = NULL, last_error = NULL, updated_at = now()
+           WHERE projection_jobs.state = 'dead_letter'"#,
     )
     .bind(user)
     .bind(from)
@@ -270,7 +311,7 @@ pub async fn reconcile(
 
 // md:fn stats
 pub async fn stats(store: &Store) -> Result<ProjectionQueueStats, AppError> {
-    let row = sqlx::query("SELECT COUNT(*) FILTER (WHERE state IN ('pending', 'retry')) AS outstanding, COUNT(*) FILTER (WHERE state = 'retry') AS retrying, COUNT(*) FILTER (WHERE state = 'dead_letter') AS dead_lettered, COALESCE(EXTRACT(EPOCH FROM now() - MIN(created_at) FILTER (WHERE state IN ('pending', 'retry')))::bigint, 0) AS oldest FROM projection_jobs")
+    let row = sqlx::query("SELECT COUNT(*) FILTER (WHERE pj.state IN ('pending', 'retry')) AS outstanding, COUNT(*) FILTER (WHERE pj.state = 'retry') AS retrying, COUNT(*) FILTER (WHERE pj.state = 'dead_letter') AS dead_lettered, COALESCE(EXTRACT(EPOCH FROM now() - MIN(c.received_at) FILTER (WHERE pj.state IN ('pending', 'retry')))::bigint, 0) AS oldest FROM projection_jobs pj JOIN changes c USING (user_id, batch_id, batch_index)")
         .fetch_one(store.pool()).await?;
     Ok(ProjectionQueueStats {
         outstanding: row.get("outstanding"),
