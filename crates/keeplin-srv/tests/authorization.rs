@@ -1088,7 +1088,7 @@ async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool)
         .await
         .unwrap();
     sqlx::query(
-        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; RETURN NEW; END $$",
+        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); RETURN NEW; END $$",
     )
     .execute(&pool)
     .await
@@ -1142,12 +1142,12 @@ async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool)
         .execute(&mut *blocker)
         .await
         .unwrap();
+    assert!(left.await.unwrap().unwrap());
     sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
         .bind(right_id)
         .execute(&mut *blocker)
         .await
         .unwrap();
-    assert!(left.await.unwrap().unwrap());
     assert!(right.await.unwrap().unwrap());
     let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
         .fetch_one(&pool)
@@ -1198,12 +1198,13 @@ async fn sync_notebook_writers_roll_back_post_mutation_failures(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    let deletion_vv = VersionVector::from([("rollback-test".to_string(), 1)]);
     assert!(store
         .delete_notebook(
             user.id,
             deleted.id,
-            Utc::now(),
-            &VersionVector::new(),
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
             "rollback-test",
         )
         .await
