@@ -1933,6 +1933,10 @@ impl Store {
         tag: &keeplin_core::models::Tag,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(tag.id)
+            .execute(&mut *tx)
+            .await?;
         if let Some(row) =
             sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
@@ -2040,6 +2044,14 @@ impl Store {
         last_writer: &str,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, $2::text, $3::text), 0))",
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM note_tags
              WHERE user_id = $1 AND note_id = $2 AND tag_id = $3 FOR UPDATE",

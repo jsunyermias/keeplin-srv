@@ -3708,6 +3708,10 @@ genuinely unknown ID.
         tag: &keeplin_core::models::Tag,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(tag.id)
+            .execute(&mut *tx)
+            .await?;
         if let Some(row) =
             sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
@@ -3752,13 +3756,13 @@ genuinely unknown ID.
     }
 ```
 
-**What it does** — Applies the tenant-scoped conflict pattern for tags. `system` (issue #128) is persisted as `$9` and
+**What it does** — Applies the tenant-scoped conflict pattern for tags. A transaction-scoped advisory lock on the tag ID serializes the absent-row read with the conflict write, so concurrent first inserts cannot replace the deterministic LWW winner in physical commit order. `system` (issue #128) is persisted as `$9` and
 refreshed on conflict (`system = EXCLUDED.system`), so a `TagUpdate` that flips the flag
 converges like any other field. The whole core `Tag` reaches here via `materialize`, so the
 flag rides the existing `TagCreate`/`TagUpdate` changes with no new op. A foreign-ID conflict
 is a no-op reported like a fresh insert, while a losing same-tenant version remains `false`.
 
-**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+**Dependencies** — `pg_advisory_xact_lock` — serializes all writers for one tag ID through transaction end; expects `hashtextextended` to derive the same key for every writer of that entity. `sqlx` queries run on `self.pool` against the Postgres schema in `migrations/`; expects the `tags(id)` primary key and conflict update to remain in the same transaction as the guarded read.
 
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
@@ -3851,6 +3855,14 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         last_writer: &str,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, $2::text, $3::text), 0))",
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM note_tags
              WHERE user_id = $1 AND note_id = $2 AND tag_id = $3 FOR UPDATE",
@@ -3894,9 +3906,9 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
     }
 ```
 
-**What it does** — the association is itself versioned and soft-deletable: add = `deleted_at NULL`, remove = `deleted_at = updated_at`.
+**What it does** — The association is itself versioned and soft-deletable: add = `deleted_at NULL`, remove = `deleted_at = updated_at`. A transaction-scoped advisory lock derived from `(user_id, note_id, tag_id)` closes the absent-row race before the guarded read, preserving deterministic LWW selection under concurrent first inserts.
 
-**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+**Dependencies** — `pg_advisory_xact_lock` — serializes all writers for one user/note/tag tuple through transaction end; expects the concatenated fixed-width UUIDs to derive the same `hashtextextended` key for that tuple. `sqlx` queries run on `self.pool` against the Postgres schema in `migrations/`; expects the composite primary key and conflict update to remain in the guarded transaction.
 
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 

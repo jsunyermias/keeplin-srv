@@ -1516,6 +1516,88 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
 
 ---
 
+## fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary
+
+**Identification** — projection-boundary commit-time serialization retry test; marker `// md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("commit-40001@example.com", "hash", "commit 40001")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE commit_40001_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_two_notebook_commits() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('commit_40001_attempts') <= 2 THEN RAISE EXCEPTION USING ERRCODE = '40001'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_two_notebook_commits AFTER INSERT ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_two_notebook_commits()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let notebook = Notebook::new("commit-time serialization retry");
+    let device = store.create_device(user.id, "commit 40001").await.unwrap();
+    let batch_id = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "commit 40001",
+            batch_id,
+            &[serde_json::to_value(Change::NotebookCreate {
+                notebook: notebook.clone(),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_available(&state, Some(user.id), 1).await;
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM commit_40001_attempts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 3);
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM notebooks WHERE id = $1)")
+            .bind(notebook.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(batch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+```
+
+**What it does** — Raises SQLSTATE `40001` from an initially deferred constraint trigger on the first two notebook transaction commits, then proves one projection drain retries both commit failures inside the three-attempt bound, materializes the notebook, and deletes the queue job. Moving retry handling to statement execution only or consuming the durable job-attempt counter kills the three-trigger-attempt and completed-job assertions.
+
+**Dependencies** — `Store::append_changes` and `projection::drain_available` — carry one notebook job through the production projection boundary; expects serialization failures returned by `Transaction::commit` to reach `apply_change`. PostgreSQL deferred constraint triggers and sequences — distinguish commit-time failure and retain rollback-independent attempt evidence.
+
+**Used by** — C-F3 projection-boundary retry evidence.
+
+**Repeated context** — The trigger is deferred to transaction end, so its `40001` cannot originate from the notebook insert statement.
+
+---
+
 ## fn sync_notebook_writer_retries_under_a_real_ssi_conflict
 
 **Identification** — production-boundary PostgreSQL SSI-conflict test; marker `// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict`.
@@ -1666,6 +1748,382 @@ async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
 **Used by** — ADR 0005 row 6 evidence.
 
 **Repeated context** — This is a real serialization failure observed and recovered by the application boundary, not a raised `40001` or the HTTP injection seam.
+
+---
+
+## fn projection_jobs_replay_safely_after_projection_commit
+
+**Identification** — projection crash-window replay test; marker `// md:fn projection_jobs_replay_safely_after_projection_commit`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn projection_jobs_replay_safely_after_projection_commit
+#[sqlx::test(migrations = "../../migrations")]
+async fn projection_jobs_replay_safely_after_projection_commit(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("projection-replay@example.com", "hash", "projection replay")
+        .await
+        .unwrap();
+    let device = store
+        .create_device(user.id, "projection replay")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE projection_delete_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_first_projection_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('projection_delete_attempts') = 1 THEN RAISE EXCEPTION 'simulated cancellation after projection commit'; END IF; RETURN OLD; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_first_projection_delete AFTER DELETE ON projection_jobs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_first_projection_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bytes = b"replayed resource bytes".to_vec();
+    let mut resource = Resource::new(
+        SYSTEM_RESOURCE_NOTE_ID,
+        "replayed resource",
+        "application/octet-stream",
+        "replayed.bin",
+        bytes.len() as u64,
+    );
+    resource.vv = VersionVector::from([("resource-device".to_string(), 1)]);
+    resource.last_writer = "resource-device".into();
+    let resource_batch = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "projection replay",
+            resource_batch,
+            &[serde_json::to_value(Change::ResourceCreate {
+                resource: resource.clone(),
+                data: Some(bytes.clone()),
+            })
+            .unwrap()],
+        )
+        .await
+        .unwrap();
+    let state = AppState::new(authorization_test_config(), pool.clone());
+    projection::drain_batch(&state, user.id, resource_batch).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM projection_delete_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store.get_resource_blob(resource.id).await.unwrap().unwrap(),
+        bytes
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM resources WHERE id = $1")
+            .bind(resource.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String, i64, String)>(
+            "SELECT title, mime_type, file_name, size, last_writer FROM resources WHERE id = $1 AND user_id = $2"
+        )
+        .bind(resource.id)
+        .bind(user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (
+            resource.title.clone(),
+            resource.mime_type.clone(),
+            resource.file_name.clone(),
+            resource.size as i64,
+            resource.last_writer.clone()
+        )
+    );
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(resource_batch)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+
+    sqlx::query("ALTER SEQUENCE projection_delete_attempts RESTART WITH 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tag = Tag::new("replayed tag");
+    tag.vv = VersionVector::from([("tag-device".to_string(), 1)]);
+    tag.last_writer = "tag-device".into();
+    let tag_batch = Uuid::new_v4();
+    store
+        .append_changes(
+            user.id,
+            device.id,
+            "projection replay",
+            tag_batch,
+            &[serde_json::to_value(Change::TagCreate { tag: tag.clone() }).unwrap()],
+        )
+        .await
+        .unwrap();
+    projection::drain_batch(&state, user.id, tag_batch).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM projection_delete_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tags WHERE id = $1")
+            .bind(tag.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, bool, String)>(
+            "SELECT title, system, last_writer FROM tags WHERE id = $1 AND user_id = $2"
+        )
+        .bind(tag.id)
+        .bind(user.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (tag.title.clone(), tag.system, tag.last_writer.clone())
+    );
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM projection_jobs WHERE user_id = $1 AND batch_id = $2)"
+    )
+    .bind(user.id)
+    .bind(tag_batch)
+    .fetch_one(&pool)
+    .await
+    .unwrap());
+}
+```
+
+**What it does** — Uses a deferred projection-job delete trigger to abort the first claim transaction after a resource or guarded tag projection has committed. The production drain loop then reclaims and applies that same job before its second acknowledgement succeeds. The sequence value proves two delete attempts occurred, while exact bytes, field values, single-row counts, and empty-queue assertions prove replay has the effect of one application. Making resource projection append bytes, incrementing a persisted field, or inserting an additional entity on replay kills those assertions.
+
+**Dependencies** — `Store::append_changes` and `projection::drain_batch` — create and fully drain real durable jobs; expects the looping drain to reclaim a job whose first acknowledgement rolls back. PostgreSQL deferred constraint triggers and `projection_delete_attempts` — reproduce cancellation at the exact commit boundary and expose both acknowledgement attempts; expects projection writes to commit independently before job deletion.
+
+**Used by** — projection durability and at-least-once delivery evidence.
+
+**Repeated context** — A committed projection and its durable queue acknowledgement are separate transactions, so every projection kind must tolerate replay.
+
+---
+
+## fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners
+
+**Identification** — absent-row LWW serialization test for tags and note-tag associations; marker `// md:fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("absent-lww@example.com", "hash", "absent lww")
+        .await
+        .unwrap();
+    let timestamp = Utc::now();
+    let mut low_tag = Tag::new("low tag");
+    low_tag.updated_at = timestamp;
+    low_tag.vv = VersionVector::from([("low".to_string(), 1)]);
+    low_tag.last_writer = "a".into();
+    let mut high_tag = low_tag.clone();
+    high_tag.title = "high tag".into();
+    high_tag.vv = VersionVector::from([("high".to_string(), 1)]);
+    high_tag.last_writer = "z".into();
+    sqlx::query(
+        "CREATE FUNCTION block_low_tag_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.last_writer = 'a' THEN PERFORM pg_advisory_xact_lock(910001); END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER block_low_tag_insert BEFORE INSERT ON tags FOR EACH ROW EXECUTE FUNCTION block_low_tag_insert()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(910001)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let tag_id = low_tag.id;
+    let low_store = store.clone();
+    let low_user = user.id;
+    let low = tokio::spawn(async move { low_store.upsert_tag(low_user, &low_tag).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let high_store = store.clone();
+    let high_user = user.id;
+    let high = tokio::spawn(async move { high_store.upsert_tag(high_user, &high_tag).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 2 || high.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(910001)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(low.await.unwrap().unwrap());
+    assert!(high.await.unwrap().unwrap());
+    let tag_writer: String = sqlx::query_scalar("SELECT last_writer FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tag_writer, "z");
+
+    sqlx::query(
+        "CREATE FUNCTION block_low_note_tag_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.last_writer = 'a' THEN PERFORM pg_advisory_xact_lock(910002); END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER block_low_note_tag_insert BEFORE INSERT ON note_tags FOR EACH ROW EXECUTE FUNCTION block_low_note_tag_insert()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let note_id = Uuid::new_v4();
+    let note_tag_id = Uuid::new_v4();
+    sqlx::query("SELECT pg_advisory_lock(910002)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let low_store = store.clone();
+    let low_vv = VersionVector::from([("low".to_string(), 1)]);
+    let note_user = user.id;
+    let low = tokio::spawn(async move {
+        low_store
+            .upsert_note_tag(
+                note_user,
+                note_id,
+                note_tag_id,
+                timestamp,
+                None,
+                &low_vv,
+                "a",
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let high_store = store.clone();
+    let high_vv = VersionVector::from([("high".to_string(), 1)]);
+    let high = tokio::spawn(async move {
+        high_store
+            .upsert_note_tag(
+                note_user,
+                note_id,
+                note_tag_id,
+                timestamp,
+                None,
+                &high_vv,
+                "z",
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting >= 2 || high.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(910002)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(low.await.unwrap().unwrap());
+    assert!(high.await.unwrap().unwrap());
+    let note_tag_writer: String = sqlx::query_scalar(
+        "SELECT last_writer FROM note_tags WHERE user_id = $1 AND note_id = $2 AND tag_id = $3",
+    )
+    .bind(user.id)
+    .bind(note_id)
+    .bind(note_tag_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(note_tag_writer, "z");
+}
+```
+
+**What it does** — Parks the lower-tiebreak insert after its absent-row read while the higher-tiebreak writer contends for the same logical entity, then proves both tag and note-tag materialization select `last_writer = z`. Removing either entity advisory lock lets the higher writer commit first and the delayed lower writer overwrite it through `ON CONFLICT`, killing the corresponding assertion.
+
+**Dependencies** — `Store::upsert_tag` and `Store::upsert_note_tag` — exercise production LWW resolution; expects each method to serialize the absent-row read and conflict write on a stable entity key. PostgreSQL advisory locks and triggers — force the losing physical commit order; expects session locks to remain held until explicitly released.
+
+**Used by** — deterministic cross-applier convergence evidence.
+
+**Repeated context** — A unique constraint prevents duplicate rows but cannot by itself preserve the deterministic version-vector and `(timestamp, device_id)` winner when the conflict update is unconditional.
 
 ---
 
@@ -7536,7 +7994,10 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13aa | `fn changed_password_is_reverified_for_delete_account` | `// md:fn changed_password_is_reverified_for_delete_account` |
 | 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
+| 13ba | `fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary` | `// md:fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary` |
 | 13c | `fn sync_notebook_writer_retries_under_a_real_ssi_conflict` | `// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict` |
+| 13ca | `fn projection_jobs_replay_safely_after_projection_commit` | `// md:fn projection_jobs_replay_safely_after_projection_commit` |
+| 13cb | `fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners` | `// md:fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners` |
 | 13cc | `fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state` | `// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state` |
 | 13cd | `fn sync_notebook_writers_do_not_retry_non_serialization_failures` | `// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures` |
 | 13d | `fn target_principals_are_reverified_in_share_and_transfer_transactions` | `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions` |
