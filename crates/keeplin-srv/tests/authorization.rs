@@ -934,12 +934,14 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             1,
             "{handler} must have exactly one SERIALIZABLE retry boundary"
         );
-        let boundary = body
-            .split(&format!("serializable(state.clone(), \"{handler}\","))
-            .nth(1)
+        let boundary_start = body
+            .find(&format!("serializable(state.clone(), \"{handler}\","))
             .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
+        let call_line = &body[body[..boundary_start].rfind('\n').unwrap() + 1..boundary_start];
+        let indentation = &call_line[..call_line.len() - call_line.trim_start().len()];
+        let boundary = &body[boundary_start..];
         let boundary_end = boundary
-            .find(&format!("\n    .await{};", "?"))
+            .find(&format!("\n{indentation}.await{};", "?"))
             .unwrap_or_else(|| panic!("{handler} has no awaited SERIALIZABLE boundary terminator"));
         let boundary = &boundary[..boundary_end];
         assert!(

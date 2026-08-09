@@ -1164,12 +1164,14 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             1,
             "{handler} must have exactly one SERIALIZABLE retry boundary"
         );
-        let boundary = body
-            .split(&format!("serializable(state.clone(), \"{handler}\","))
-            .nth(1)
+        let boundary_start = body
+            .find(&format!("serializable(state.clone(), \"{handler}\","))
             .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
+        let call_line = &body[body[..boundary_start].rfind('\n').unwrap() + 1..boundary_start];
+        let indentation = &call_line[..call_line.len() - call_line.trim_start().len()];
+        let boundary = &body[boundary_start..];
         let boundary_end = boundary
-            .find(&format!("\n    .await{};", "?"))
+            .find(&format!("\n{indentation}.await{};", "?"))
             .unwrap_or_else(|| panic!("{handler} has no awaited SERIALIZABLE boundary terminator"));
         let boundary = &boundary[..boundary_end];
         assert!(
@@ -1201,7 +1203,11 @@ handler to route its matching `_on` mutation through the common serializable bou
 target-principal handlers to re-read that target after entering the boundary, and requires both
 synchronization notebook writers to retry their complete transaction at SERIALIZABLE. It also
 requires `delete_account` to perform Argon2 verification before entering the boundary and to compare
-the re-read hash with the verified hash inside it.
+the re-read hash with the verified hash inside it. Behavioural isolation evidence deliberately
+covers 1 of the 11 direct participants (`upsert_notebook`); the other synchronization writer and all
+nine HTTP handlers are pinned structurally, while the handler rollback matrix separately proves that
+their mutations remain on the transaction connection. This must not be reported as behavioural
+isolation mutation coverage across the complete participant set.
 
 **Dependencies** — `SERIALIZABLE_INVARIANT_HANDLERS` — supplies the accepted set; expects ADR 0002
 scope to remain stable. `http.rs` source — supplies handler bodies; expects markers to delimit them.
@@ -1210,7 +1216,8 @@ scope to remain stable. `http.rs` source — supplies handler bodies; expects ma
 
 **Repeated context** — Replacing any one boundary call with a weaker isolation helper is the
 killing mutation. This is intentionally a source-shape guard rather than a Rust parser: it requires
-exactly one named boundary and fails loudly if rustfmt changes the awaited terminator shape.
+exactly one named boundary and derives the awaited terminator indentation from each call so both
+assignment layouts used by the handlers remain covered.
 
 ---
 
