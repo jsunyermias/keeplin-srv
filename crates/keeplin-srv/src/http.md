@@ -2956,7 +2956,9 @@ async fn delete_share(
 
 **What it does** — `DELETE /api/notes/:id/share/:user_id`: a `share_write` grantee
 can revoke anyone; anyone can remove **themselves** (leaving a share); otherwise
-`403`.
+`403`. Deletion is intentionally idempotent after authorization: an absent share still
+returns `200 {"ok":true}`, while the store's `deleted` flag ensures only removal of an
+existing row emits a revocation notification.
 
 **Dependencies** — `resolve_note_access`; `Store::delete_share`, whose boolean result prevents notices for absent rows. **Used by** —
 routed in `router`.

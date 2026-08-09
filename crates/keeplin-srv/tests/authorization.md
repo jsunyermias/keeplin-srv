@@ -2187,6 +2187,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .unwrap_or(DEFAULT_SEED);
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let _peer_token = register_and_login(addr, "stress-peer@example.com").await;
     let target_token = register_and_login(addr, "stress-target@example.com").await;
     let owner = state
         .store
@@ -2200,19 +2201,39 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .await
         .unwrap()
         .unwrap();
-    let note = state
+    let peer = state
         .store
-        .create_note(None, "hook-free contention", owner.id)
+        .get_user_by_email("stress-peer@example.com")
         .await
+        .unwrap()
         .unwrap();
-    state
-        .store
-        .create_or_update_share(note.id, target.id, Capabilities::READ)
-        .await
-        .unwrap();
+    let mut notes = Vec::with_capacity(98);
+    for index in 0..98 {
+        let title = format!("hook-free contention {index}");
+        let note = state
+            .store
+            .create_note(None, &title, owner.id)
+            .await
+            .unwrap();
+        state
+            .store
+            .create_or_update_share(note.id, target.id, Capabilities::READ)
+            .await
+            .unwrap();
+        notes.push(note);
+    }
 
     let mut schedule = (0..REQUESTS)
-        .map(|index| (if index < 4 { 2 } else { index % 2 }, 0_u64))
+        .map(|index| {
+            let operation = if index < 98 {
+                0
+            } else if index < 196 {
+                1
+            } else {
+                2
+            };
+            (operation, index % 98, 0_u64)
+        })
         .collect::<Vec<_>>();
     let mut random = seed;
     for index in (1..schedule.len()).rev() {
@@ -2222,7 +2243,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         let other = (random as usize) % (index + 1);
         schedule.swap(index, other);
     }
-    for (_, delay) in &mut schedule {
+    for (_, _, delay) in &mut schedule {
         random ^= random << 13;
         random ^= random >> 7;
         random ^= random << 17;
@@ -2231,18 +2252,20 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
 
     let client = reqwest::Client::new();
     let mut requests = Vec::with_capacity(REQUESTS);
-    for (operation, delay) in schedule {
+    for (operation, index, delay) in schedule {
         let client = client.clone();
         let owner_token = owner_token.clone();
         let target_token = target_token.clone();
+        let note_id = notes[index].id;
         requests.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            match operation {
+            let response = match operation {
                 0 => {
+                    let target_id = if index < 49 { peer.id } else { target.id };
                     client
-                        .post(format!("http://{addr}/api/notes/{}/transfer", note.id))
+                        .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
                         .bearer_auth(owner_token)
-                        .json(&json!({"user_id": target.id}))
+                        .json(&json!({"user_id": target_id}))
                         .send()
                         .await
                 }
@@ -2250,7 +2273,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                     client
                         .delete(format!(
                             "http://{addr}/api/notes/{}/share/{}",
-                            note.id, target.id
+                            note_id, target.id
                         ))
                         .bearer_auth(owner_token)
                         .json(&json!({}))
@@ -2265,21 +2288,63 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                         .send()
                         .await
                 }
-            }
+            };
+            (operation, index, response)
         }));
     }
+    let mut status_histogram = BTreeMap::new();
     for request in requests {
-        let response = request
-            .await
-            .unwrap_or_else(|error| panic!("seed {seed}: request task failed: {error}"))
-            .unwrap_or_else(|error| panic!("seed {seed}: request failed: {error}"));
+        let (operation, index, response) = request.await.unwrap_or_else(|error| {
+            panic!(
+                "mix seed {seed}: request task failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+            )
+        });
+        let response = response.unwrap_or_else(|error| {
+            panic!("mix seed {seed}: request failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}")
+        });
+        let operation = match operation {
+            0 if index < 49 => "stable_transfer",
+            0 => "contested_transfer",
+            1 => "share_delete",
+            _ => "account_delete",
+        };
+        *status_histogram
+            .entry((operation, response.status().as_u16()))
+            .or_insert(0) += 1;
         assert!(
-            !response.status().is_server_error(),
-            "seed {seed}: request returned {}",
-            response.status()
+            !response.status().is_server_error()
+                || (operation == "stable_transfer" && response.status().as_u16() == 503),
+            "mix seed {seed}: request returned {}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}",
+            response.status(),
         );
     }
+    eprintln!(
+        "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let stable_successes = status_histogram
+        .get(&("stable_transfer", 200))
+        .copied()
+        .unwrap_or(0);
+    let stable_exhaustions = status_histogram
+        .get(&("stable_transfer", 503))
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        stable_successes + stable_exhaustions,
+        49,
+        "mix seed {seed}: stable transfers must return 200 or the designed retry-exhaustion 503; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        stable_successes >= 1,
+        "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
 
+    let dangling_share_note: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN notes note ON note.id = share.note_id WHERE note.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let dangling_share: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
     )
@@ -2293,23 +2358,27 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
     .await
     .unwrap();
     assert!(
+        !dangling_share_note,
+        "mix seed {seed}: a surviving share has no note; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
         !dangling_share,
-        "seed {seed}: a surviving share has no principal"
+        "mix seed {seed}: a surviving share has no principal; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
     assert!(
         !dangling_owner,
-        "seed {seed}: a surviving note has no owner"
+        "mix seed {seed}: a surviving note has no owner; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
 }
 ```
 
-**What it does** — Launches exactly 200 real HTTP requests against one note and target principal: 98 ownership transfers, 98 direct-share deletions, and four target-account deletions. Keeping account deletion plural while limiting its Argon2 password checks makes the contention meaningful without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation order and adds up to seven milliseconds of launch jitter without using test hooks. Every response must be non-5xx, and direct database checks reject any surviving share without a principal or note without an owner. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise seed `149004` is used, and every failure reports the effective seed.
+**What it does** — Launches exactly 200 real HTTP requests against 98 independently owned notes: 98 ownership transfers, 98 distinct direct-share deletions, and four target-account deletions. The first 49 transfers target a peer account that remains live, while the other 49 target the account being deleted. Thus the same run combines a non-degenerate write-path control cohort with the target-principal race. A stable transfer may return `503` when ADR 0002's three-attempt serializable retry bound is exhausted; all 49 stable transfers must be either `200` or that designed `503`, and at least one must return `200` to prove the control cohort completed the write path. No higher success floor is claimed because the accepted decision defines a retry bound, not a success-rate guarantee under this unscripted contention. Each share deletion addresses a different row, so repeated 200 responses no longer merely exercise the endpoint's intentional idempotence; a deletion may still lose legitimately to ownership transfer or the target account's cascade. Keeping account deletion plural while limiting its Argon2 password checks creates repeated target races without turning the regression into a CPU load test. A deterministic xorshift schedule shuffles the operation order and adds up to seven milliseconds of launch jitter without using test hooks. It emits separate stable- and contested-transfer status histograms and repeats the accumulated histogram in every request or invariant panic. Other server errors fail the test, and direct database checks reject any surviving share without its note or principal and any note without its owner. `KEEPLIN_STRESS_SEED` accepts a decimal `u64`; otherwise mix seed `149004` is used. Output identifies it as a mix seed and warns that a failure is not replayable from the seed alone.
 
-**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention. PostgreSQL foreign keys and the final anti-join queries provide whole-database validation; expects: all surviving principals and owners remain resolvable.
+**Dependencies** — `spawn_authorization_state`, `register_and_login`, and production HTTP routes provide the uninstrumented request paths; expects: transfers, share deletion, and cascading account deletion preserve HTTP and referential-integrity contracts under contention, with stable transfers exposing only success or ADR 0002's bounded-retry exhaustion. `Store::{create_note, create_or_update_share}` creates one contested unit per transfer/delete pair; expects: each note and share is independent so one committed mutation cannot make the remaining workload vacuous. `BTreeMap` records stable per-operation status counts; expects: the stable-transfer cohort is distinguishable from contested refusals and remains available for successful-run output and failure diagnostics. PostgreSQL foreign keys and the final anti-join queries provide whole-database validation; expects: every surviving share resolves both its note and principal, and every surviving note resolves its owner.
 
 **Used by** — issue #149 concurrency regression suite.
 
-**Repeated context** — The seeded launch schedule is reproducible, while executor and PostgreSQL scheduling remain intentionally uncontrolled so the test exercises natural contention rather than a scripted interleaving.
+**Repeated context** — The seed reproduces only the operation mix, shuffle, and launch delays. It does not control Tokio polling, connection acquisition, PostgreSQL lock order, or transaction winners, so a failure is not replayable by seed alone. Reproducing the interleaving would require explicit handler checkpoints or barriers plus control of database progress; that belongs in the focused deterministic interleaving tests and would defeat this test's purpose as a hook-free natural-contention probe.
 
 ---
 

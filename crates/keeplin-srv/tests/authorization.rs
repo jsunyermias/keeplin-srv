@@ -1723,6 +1723,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .unwrap_or(DEFAULT_SEED);
     let (addr, state) = spawn_authorization_state(pool.clone()).await;
     let owner_token = register_and_login(addr, "stress-owner@example.com").await;
+    let _peer_token = register_and_login(addr, "stress-peer@example.com").await;
     let target_token = register_and_login(addr, "stress-target@example.com").await;
     let owner = state
         .store
@@ -1736,19 +1737,39 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         .await
         .unwrap()
         .unwrap();
-    let note = state
+    let peer = state
         .store
-        .create_note(None, "hook-free contention", owner.id)
+        .get_user_by_email("stress-peer@example.com")
         .await
+        .unwrap()
         .unwrap();
-    state
-        .store
-        .create_or_update_share(note.id, target.id, Capabilities::READ)
-        .await
-        .unwrap();
+    let mut notes = Vec::with_capacity(98);
+    for index in 0..98 {
+        let title = format!("hook-free contention {index}");
+        let note = state
+            .store
+            .create_note(None, &title, owner.id)
+            .await
+            .unwrap();
+        state
+            .store
+            .create_or_update_share(note.id, target.id, Capabilities::READ)
+            .await
+            .unwrap();
+        notes.push(note);
+    }
 
     let mut schedule = (0..REQUESTS)
-        .map(|index| (if index < 4 { 2 } else { index % 2 }, 0_u64))
+        .map(|index| {
+            let operation = if index < 98 {
+                0
+            } else if index < 196 {
+                1
+            } else {
+                2
+            };
+            (operation, index % 98, 0_u64)
+        })
         .collect::<Vec<_>>();
     let mut random = seed;
     for index in (1..schedule.len()).rev() {
@@ -1758,7 +1779,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
         let other = (random as usize) % (index + 1);
         schedule.swap(index, other);
     }
-    for (_, delay) in &mut schedule {
+    for (_, _, delay) in &mut schedule {
         random ^= random << 13;
         random ^= random >> 7;
         random ^= random << 17;
@@ -1767,18 +1788,20 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
 
     let client = reqwest::Client::new();
     let mut requests = Vec::with_capacity(REQUESTS);
-    for (operation, delay) in schedule {
+    for (operation, index, delay) in schedule {
         let client = client.clone();
         let owner_token = owner_token.clone();
         let target_token = target_token.clone();
+        let note_id = notes[index].id;
         requests.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            match operation {
+            let response = match operation {
                 0 => {
+                    let target_id = if index < 49 { peer.id } else { target.id };
                     client
-                        .post(format!("http://{addr}/api/notes/{}/transfer", note.id))
+                        .post(format!("http://{addr}/api/notes/{note_id}/transfer"))
                         .bearer_auth(owner_token)
-                        .json(&json!({"user_id": target.id}))
+                        .json(&json!({"user_id": target_id}))
                         .send()
                         .await
                 }
@@ -1786,7 +1809,7 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                     client
                         .delete(format!(
                             "http://{addr}/api/notes/{}/share/{}",
-                            note.id, target.id
+                            note_id, target.id
                         ))
                         .bearer_auth(owner_token)
                         .json(&json!({}))
@@ -1801,21 +1824,63 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
                         .send()
                         .await
                 }
-            }
+            };
+            (operation, index, response)
         }));
     }
+    let mut status_histogram = BTreeMap::new();
     for request in requests {
-        let response = request
-            .await
-            .unwrap_or_else(|error| panic!("seed {seed}: request task failed: {error}"))
-            .unwrap_or_else(|error| panic!("seed {seed}: request failed: {error}"));
+        let (operation, index, response) = request.await.unwrap_or_else(|error| {
+            panic!(
+                "mix seed {seed}: request task failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+            )
+        });
+        let response = response.unwrap_or_else(|error| {
+            panic!("mix seed {seed}: request failed: {error}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}")
+        });
+        let operation = match operation {
+            0 if index < 49 => "stable_transfer",
+            0 => "contested_transfer",
+            1 => "share_delete",
+            _ => "account_delete",
+        };
+        *status_histogram
+            .entry((operation, response.status().as_u16()))
+            .or_insert(0) += 1;
         assert!(
-            !response.status().is_server_error(),
-            "seed {seed}: request returned {}",
-            response.status()
+            !response.status().is_server_error()
+                || (operation == "stable_transfer" && response.status().as_u16() == 503),
+            "mix seed {seed}: request returned {}; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}",
+            response.status(),
         );
     }
+    eprintln!(
+        "mix seed {seed} (reproduces the operation mix and launch delays, not the interleaving): status histogram: {status_histogram:?}"
+    );
+    let stable_successes = status_histogram
+        .get(&("stable_transfer", 200))
+        .copied()
+        .unwrap_or(0);
+    let stable_exhaustions = status_histogram
+        .get(&("stable_transfer", 503))
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        stable_successes + stable_exhaustions,
+        49,
+        "mix seed {seed}: stable transfers must return 200 or the designed retry-exhaustion 503; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
+    assert!(
+        stable_successes >= 1,
+        "mix seed {seed}: at least one stable transfer must complete the write path; the seed fixes the mix, not the interleaving; status histogram: {status_histogram:?}"
+    );
 
+    let dangling_share_note: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN notes note ON note.id = share.note_id WHERE note.id IS NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let dangling_share: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM note_shares share LEFT JOIN users principal ON principal.id = share.user_id WHERE principal.id IS NULL)",
     )
@@ -1829,12 +1894,16 @@ async fn mixed_transfer_share_and_account_deletion_stress_preserves_referential_
     .await
     .unwrap();
     assert!(
+        !dangling_share_note,
+        "mix seed {seed}: a surviving share has no note; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
+    );
+    assert!(
         !dangling_share,
-        "seed {seed}: a surviving share has no principal"
+        "mix seed {seed}: a surviving share has no principal; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
     assert!(
         !dangling_owner,
-        "seed {seed}: a surviving note has no owner"
+        "mix seed {seed}: a surviving note has no owner; the seed fixes the mix, not the interleaving, so this failure is not replayable by seed alone; status histogram: {status_histogram:?}"
     );
 }
 
