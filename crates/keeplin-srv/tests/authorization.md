@@ -1385,71 +1385,178 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
 
 ---
 
-## fn postgres_serializable_isolation_detects_a_real_ssi_conflict
+## fn sync_notebook_writer_retries_a_real_serialization_failure
 
-**Identification** — controlled PostgreSQL SSI capability test; marker `// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict`.
+**Identification** — production-boundary PostgreSQL serialization-retry test; marker `// md:fn sync_notebook_writer_retries_a_real_serialization_failure`.
 
 **Code** — complete and verbatim:
 
 ```rust
-// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict
+// md:fn sync_notebook_writer_retries_a_real_serialization_failure
 #[sqlx::test(migrations = "../../migrations")]
-async fn postgres_serializable_isolation_detects_a_real_ssi_conflict(pool: PgPool) {
-    sqlx::query("CREATE TABLE ssi_probe (id integer PRIMARY KEY, value integer NOT NULL)")
+async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("real-ssi@example.com", "hash", "real ssi")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE real_ssi_attempts")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO ssi_probe VALUES (1, 0), (2, 0)")
-        .execute(&pool)
+    sqlx::query(
+        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER rendezvous_real_ssi BEFORE INSERT ON notebooks FOR EACH ROW EXECUTE FUNCTION rendezvous_real_ssi()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let left_notebook = Notebook::new("real serialization retry left");
+    let right_notebook = Notebook::new("real serialization retry right");
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(left_notebook.id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    let mut left = pool.begin().await.unwrap();
-    let mut right = pool.begin().await.unwrap();
-    for transaction in [&mut left, &mut right] {
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut **transaction)
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(right_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let user_id = user.id;
+    let left_store = store.clone();
+    let left_id = left_notebook.id;
+    let left =
+        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
+    let right_store = store.clone();
+    let right_id = right_notebook.id;
+    let right =
+        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+            )
+            .fetch_one(&pool)
             .await
             .unwrap();
-    }
-    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 1")
-        .fetch_one(&mut *left)
+            if waiting >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(left_id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 2")
-        .fetch_one(&mut *right)
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(right_id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 1")
-        .execute(&mut *right)
+    assert!(left.await.unwrap().unwrap());
+    assert!(right.await.unwrap().unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
+        .fetch_one(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 2")
-        .execute(&mut *left)
-        .await
-        .unwrap();
-    let left_result = left.commit().await;
-    let right_result = right.commit().await;
-    let codes = [left_result, right_result]
-        .into_iter()
-        .filter_map(Result::err)
-        .filter_map(|error| {
-            error
-                .as_database_error()
-                .and_then(|database| database.code())
-                .map(|code| code.into_owned())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(codes, ["40001"]);
+    assert_eq!(attempts, 3);
 }
 ```
 
-**What it does** — Constructs a two-transaction read/write dependency cycle and requires PostgreSQL to abort one commit with `40001`.
+**What it does** — Sends two concurrent notebook inserts through `Store::upsert_notebook`, parks both after their serializable snapshots, and creates a predicate-read/write dependency cycle. PostgreSQL aborts one real transaction and the production boundary retries it, producing three durable sequence increments for two successful calls.
 
 **Dependencies** — PostgreSQL SERIALIZABLE transactions — detect the dangerous structure; expects both participants to join SSI.
 
-**Used by** — ADR 0002 row 4 evidence.
+**Used by** — ADR 0005 row 6 evidence.
 
-**Repeated context** — This is a real SSI conflict, not the application injection seam.
+**Repeated context** — This is a real serialization failure observed and recovered by the application boundary, not a raised `40001` or the HTTP injection seam.
+
+---
+
+## fn sync_notebook_writers_roll_back_post_mutation_failures
+
+**Identification** — synchronization-writer rollback test; marker `// md:fn sync_notebook_writers_roll_back_post_mutation_failures`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn sync_notebook_writers_roll_back_post_mutation_failures
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_roll_back_post_mutation_failures(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-rollback@example.com", "hash", "sync rollback")
+        .await
+        .unwrap();
+    let inserted = Notebook::new("failed insert");
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_insert_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_insert_after AFTER INSERT ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_insert_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(entity_snapshot(&pool, "notebooks", inserted.id).await, None);
+    sqlx::query("DROP TRIGGER fail_notebook_insert_after ON notebooks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("failed delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    let before = entity_snapshot(&pool, "notebooks", deleted.id).await;
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_delete_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_delete_after AFTER UPDATE ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_delete_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            Utc::now(),
+            &VersionVector::new(),
+            "rollback-test",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", deleted.id).await,
+        before
+    );
+}
+```
+
+**What it does** — Raises non-retryable failures from row-level `AFTER INSERT` and `AFTER UPDATE` triggers, after PostgreSQL has executed each synchronization mutation, and proves both the new-row upsert and the tombstone update roll back completely.
+
+**Dependencies** — `Store::{upsert_notebook, delete_notebook}` and PostgreSQL `AFTER` triggers; expects each writer to keep mutation and commit inside the same transaction.
+
+**Used by** — ADR 0005 row 6 rollback evidence.
+
+**Repeated context** — The journal/materialization atomicity decision remains keeplin-srv#75; this test covers only the notebook projection transaction decided here.
 
 ---
 
@@ -3160,27 +3267,30 @@ async fn authed_json(
 
 ## fn entity_snapshot
 
-**Identification** — byte-stable projection snapshot helper; marker `// md:fn entity_snapshot`.
+**Identification** — `async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String>`; marker `// md:fn entity_snapshot`.
 
 **Code** — complete and verbatim:
 
 ```rust
 // md:fn entity_snapshot
-async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
+async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String> {
     let query = format!("SELECT to_jsonb(t)::text FROM {table} t WHERE id = $1");
     sqlx::query_scalar(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .unwrap()
 }
 ```
 
-**What it does** — Serializes a complete database row to deterministic JSON text for exact before/after comparison.
+**What it does** — Serializes a complete database row to JSON text for exact before/after comparison, returning `None` when the row is absent so tests compare both presence and content.
 
-**Dependencies** — PostgreSQL `to_jsonb` exposes every column; expects the entity table to have an `id` column.
+**Dependencies** —
 
-**Used by** — `cross_tenant_store_mutations_leave_victim_unchanged`.
+- PostgreSQL `to_jsonb` — exposes every column in the selected row; expects the entity table to have an `id` column.
+- `sqlx::query_scalar`, `QueryScalar::bind`, and `QueryScalar::fetch_optional` — execute the dynamically selected snapshot query; expect a matching row to decode as `String` and absence to remain `None`.
+
+**Used by** — authorization rollback and cross-tenant isolation tests in this module that compare an entity's complete presence and content before and after a failed operation.
 
 **Repeated context** — The comparison covers all projection fields, not only user-visible values.
 
@@ -3438,6 +3548,10 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .create_note(None, "rollback transfer", owner.id)
         .await
         .unwrap();
+    store
+        .create_or_update_share(transfer_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
     let create_share_notebook = Notebook::new("rollback create notebook share");
     assert!(store
         .upsert_notebook(owner.id, &create_share_notebook)
@@ -3457,6 +3571,19 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .upsert_notebook(owner.id, &transfer_notebook)
         .await
         .unwrap());
+    store
+        .create_or_update_notebook_share(transfer_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note_share_before =
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await;
+    let transfer_notebook_share_before = relation_snapshot(
+        store.pool(),
+        "notebook_shares",
+        "notebook_id",
+        transfer_notebook.id,
+    )
+    .await;
     let client = reqwest::Client::new();
     let cases = [
         (
@@ -3537,6 +3664,20 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
             before
         );
     }
+    assert_eq!(
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await,
+        transfer_note_share_before
+    );
+    assert_eq!(
+        relation_snapshot(
+            store.pool(),
+            "notebook_shares",
+            "notebook_id",
+            transfer_notebook.id,
+        )
+        .await,
+        transfer_notebook_share_before
+    );
     let owner_before = entity_snapshot(store.pool(), "users", owner.id).await;
     state.http_test_hooks.inject_failure_after_mutation();
     let failed = authed_json(
@@ -6287,7 +6428,8 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 13aa | `fn changed_password_is_reverified_for_delete_account` | `// md:fn changed_password_is_reverified_for_delete_account` |
 | 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
-| 13c | `fn postgres_serializable_isolation_detects_a_real_ssi_conflict` | `// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict` |
+| 13c | `fn sync_notebook_writer_retries_a_real_serialization_failure` | `// md:fn sync_notebook_writer_retries_a_real_serialization_failure` |
+| 13cc | `fn sync_notebook_writers_roll_back_post_mutation_failures` | `// md:fn sync_notebook_writers_roll_back_post_mutation_failures` |
 | 13d | `fn target_principals_are_reverified_in_share_and_transfer_transactions` | `// md:fn target_principals_are_reverified_in_share_and_transfer_transactions` |
 | 13d1 | `fn revoked_share_authority_is_reverified_for_create_share` | `// md:fn revoked_share_authority_is_reverified_for_create_share` |
 | 13d2 | `fn revoked_ownership_is_reverified_for_transfer_ownership` | `// md:fn revoked_ownership_is_reverified_for_transfer_ownership` |

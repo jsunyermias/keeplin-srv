@@ -1075,54 +1075,143 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .unwrap());
 }
 
-// md:fn postgres_serializable_isolation_detects_a_real_ssi_conflict
+// md:fn sync_notebook_writer_retries_a_real_serialization_failure
 #[sqlx::test(migrations = "../../migrations")]
-async fn postgres_serializable_isolation_detects_a_real_ssi_conflict(pool: PgPool) {
-    sqlx::query("CREATE TABLE ssi_probe (id integer PRIMARY KEY, value integer NOT NULL)")
+async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("real-ssi@example.com", "hash", "real ssi")
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE real_ssi_attempts")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO ssi_probe VALUES (1, 0), (2, 0)")
-        .execute(&pool)
+    sqlx::query(
+        "CREATE FUNCTION rendezvous_real_ssi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('real_ssi_attempts'); PERFORM pg_advisory_xact_lock(hashtext(NEW.id::text)); PERFORM count(*) FROM notebooks WHERE id <> NEW.id; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER rendezvous_real_ssi BEFORE INSERT ON notebooks FOR EACH ROW EXECUTE FUNCTION rendezvous_real_ssi()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let left_notebook = Notebook::new("real serialization retry left");
+    let right_notebook = Notebook::new("real serialization retry right");
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(left_notebook.id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    let mut left = pool.begin().await.unwrap();
-    let mut right = pool.begin().await.unwrap();
-    for transaction in [&mut left, &mut right] {
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut **transaction)
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        .bind(right_notebook.id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let user_id = user.id;
+    let left_store = store.clone();
+    let left_id = left_notebook.id;
+    let left =
+        tokio::spawn(async move { left_store.upsert_notebook(user_id, &left_notebook).await });
+    let right_store = store.clone();
+    let right_id = right_notebook.id;
+    let right =
+        tokio::spawn(async move { right_store.upsert_notebook(user_id, &right_notebook).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+            )
+            .fetch_one(&pool)
             .await
             .unwrap();
-    }
-    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 1")
-        .fetch_one(&mut *left)
+            if waiting >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(left_id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    let _: i32 = sqlx::query_scalar("SELECT value FROM ssi_probe WHERE id = 2")
-        .fetch_one(&mut *right)
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+        .bind(right_id)
+        .execute(&mut *blocker)
         .await
         .unwrap();
-    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 1")
-        .execute(&mut *right)
+    assert!(left.await.unwrap().unwrap());
+    assert!(right.await.unwrap().unwrap());
+    let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM real_ssi_attempts")
+        .fetch_one(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE ssi_probe SET value = 1 WHERE id = 2")
-        .execute(&mut *left)
+    assert_eq!(attempts, 3);
+}
+
+// md:fn sync_notebook_writers_roll_back_post_mutation_failures
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_roll_back_post_mutation_failures(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user("sync-rollback@example.com", "hash", "sync rollback")
         .await
         .unwrap();
-    let left_result = left.commit().await;
-    let right_result = right.commit().await;
-    let codes = [left_result, right_result]
-        .into_iter()
-        .filter_map(Result::err)
-        .filter_map(|error| {
-            error
-                .as_database_error()
-                .and_then(|database| database.code())
-                .map(|code| code.into_owned())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(codes, ["40001"]);
+    let inserted = Notebook::new("failed insert");
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_insert_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_insert_after AFTER INSERT ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_insert_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(entity_snapshot(&pool, "notebooks", inserted.id).await, None);
+    sqlx::query("DROP TRIGGER fail_notebook_insert_after ON notebooks")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("failed delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    let before = entity_snapshot(&pool, "notebooks", deleted.id).await;
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_delete_after() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'post mutation failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER fail_notebook_delete_after AFTER UPDATE ON notebooks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notebook_delete_after()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            Utc::now(),
+            &VersionVector::new(),
+            "rollback-test",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        entity_snapshot(&pool, "notebooks", deleted.id).await,
+        before
+    );
 }
 
 // md:fn target_principals_are_reverified_in_share_and_transfer_transactions
@@ -2377,11 +2466,11 @@ async fn authed_json(
 }
 
 // md:fn entity_snapshot
-async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> String {
+async fn entity_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Option<String> {
     let query = format!("SELECT to_jsonb(t)::text FROM {table} t WHERE id = $1");
     sqlx::query_scalar(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .unwrap()
 }
@@ -2577,6 +2666,10 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .create_note(None, "rollback transfer", owner.id)
         .await
         .unwrap();
+    store
+        .create_or_update_share(transfer_note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
     let create_share_notebook = Notebook::new("rollback create notebook share");
     assert!(store
         .upsert_notebook(owner.id, &create_share_notebook)
@@ -2596,6 +2689,19 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
         .upsert_notebook(owner.id, &transfer_notebook)
         .await
         .unwrap());
+    store
+        .create_or_update_notebook_share(transfer_notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let transfer_note_share_before =
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await;
+    let transfer_notebook_share_before = relation_snapshot(
+        store.pool(),
+        "notebook_shares",
+        "notebook_id",
+        transfer_notebook.id,
+    )
+    .await;
     let client = reqwest::Client::new();
     let cases = [
         (
@@ -2676,6 +2782,20 @@ async fn serializable_post_mutation_failure_rolls_back(pool: PgPool) {
             before
         );
     }
+    assert_eq!(
+        relation_snapshot(store.pool(), "note_shares", "note_id", transfer_note.id).await,
+        transfer_note_share_before
+    );
+    assert_eq!(
+        relation_snapshot(
+            store.pool(),
+            "notebook_shares",
+            "notebook_id",
+            transfer_notebook.id,
+        )
+        .await,
+        transfer_notebook_share_before
+    );
     let owner_before = entity_snapshot(store.pool(), "users", owner.id).await;
     state.http_test_hooks.inject_failure_after_mutation();
     let failed = authed_json(
