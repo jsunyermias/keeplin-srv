@@ -767,7 +767,7 @@ async fn guarded_writer_inventory_unions_source_and_catalog(pool: PgPool) {
             .into_iter()
             .map(str::to_string)
             .collect(),
-        "catalog cascade closure is table-level: it does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
+        "catalog cascade closure walks both FK directions, conservatively including parents; it is table-level and does not map users back to delete_user, follow trigger bodies recursively, dynamic SQL, writable views, rules, or called database functions"
     );
     let trigger_tables: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT relation.relname FROM pg_trigger trigger_row JOIN pg_class relation ON relation.oid = trigger_row.tgrelid WHERE NOT trigger_row.tgisinternal AND relation.relname = ANY($1)",
@@ -928,11 +928,20 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
             .split(concat!("// ", "md:"))
             .next()
             .unwrap();
+        assert_eq!(
+            body.matches(&format!("serializable(state.clone(), \"{handler}\","))
+                .count(),
+            1,
+            "{handler} must have exactly one SERIALIZABLE retry boundary"
+        );
         let boundary = body
             .split(&format!("serializable(state.clone(), \"{handler}\","))
             .nth(1)
             .unwrap_or_else(|| panic!("{handler} has no SERIALIZABLE retry boundary"));
-        let boundary = boundary.split("\n    .await?;").next().unwrap();
+        let boundary_end = boundary
+            .find(&format!("\n    .await{};", "?"))
+            .unwrap_or_else(|| panic!("{handler} has no awaited SERIALIZABLE boundary terminator"));
+        let boundary = &boundary[..boundary_end];
         assert!(
             boundary.contains(mutation),
             "{handler} must execute {mutation} inside the SERIALIZABLE retry closure"
@@ -1075,9 +1084,9 @@ async fn sync_notebook_writers_do_not_retry_a_fourth_time(pool: PgPool) {
     .unwrap());
 }
 
-// md:fn sync_notebook_writer_retries_a_real_serialization_failure
+// md:fn sync_notebook_writer_retries_under_a_real_ssi_conflict
 #[sqlx::test(migrations = "../../migrations")]
-async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool) {
+async fn sync_notebook_writer_retries_under_a_real_ssi_conflict(pool: PgPool) {
     let store = Store::new(pool.clone());
     let user = store
         .create_user("real-ssi@example.com", "hash", "real ssi")
@@ -1124,8 +1133,10 @@ async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool)
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted AND locks.objid IN (hashtext($1::text), hashtext($2::text))",
             )
+            .bind(left_id)
+            .bind(right_id)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -1156,9 +1167,11 @@ async fn sync_notebook_writer_retries_a_real_serialization_failure(pool: PgPool)
     assert_eq!(attempts, 3);
 }
 
-// md:fn sync_notebook_writers_roll_back_post_mutation_failures
+// md:fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state
 #[sqlx::test(migrations = "../../migrations")]
-async fn sync_notebook_writers_roll_back_post_mutation_failures(pool: PgPool) {
+async fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state(
+    pool: PgPool,
+) {
     let store = Store::new(pool.clone());
     let user = store
         .create_user("sync-rollback@example.com", "hash", "sync rollback")
@@ -1212,6 +1225,73 @@ async fn sync_notebook_writers_roll_back_post_mutation_failures(pool: PgPool) {
     assert_eq!(
         entity_snapshot(&pool, "notebooks", deleted.id).await,
         before
+    );
+}
+
+// md:fn sync_notebook_writers_do_not_retry_non_serialization_failures
+#[sqlx::test(migrations = "../../migrations")]
+async fn sync_notebook_writers_do_not_retry_non_serialization_failures(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let user = store
+        .create_user(
+            "sync-non-retryable@example.com",
+            "hash",
+            "sync non retryable",
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE SEQUENCE non_retryable_attempts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION fail_notebook_constraint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('non_retryable_attempts'); RAISE EXCEPTION USING ERRCODE = '23505'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_notebook_constraint BEFORE INSERT OR UPDATE ON notebooks FOR EACH ROW EXECUTE FUNCTION fail_notebook_constraint()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let inserted = Notebook::new("non-retryable insert");
+    assert!(store.upsert_notebook(user.id, &inserted).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("ALTER TABLE notebooks DISABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Notebook::new("non-retryable delete");
+    assert!(store.upsert_notebook(user.id, &deleted).await.unwrap());
+    sqlx::query("ALTER TABLE notebooks ENABLE TRIGGER fail_notebook_constraint")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deletion_vv = VersionVector::from([("non-retryable".to_string(), 1)]);
+    assert!(store
+        .delete_notebook(
+            user.id,
+            deleted.id,
+            deleted.updated_at + chrono::Duration::seconds(1),
+            &deletion_vv,
+            "non-retryable",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_value FROM non_retryable_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
     );
 }
 
@@ -1333,6 +1413,130 @@ async fn target_principals_are_reverified_in_share_and_transfer_transactions(poo
             "{handler} accepted a target deleted after its preliminary lookup"
         );
     }
+}
+
+// md:fn target_principal_recheck_locks_the_user_until_transaction_end
+#[sqlx::test(migrations = "../../migrations")]
+async fn target_principal_recheck_locks_the_user_until_transaction_end(pool: PgPool) {
+    let store = Store::new(pool.clone());
+    let target = store
+        .create_user("target-lock@example.com", "old hash", "target lock")
+        .await
+        .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    store
+        .get_user_by_id_on(&mut transaction, target.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let update_store = store.clone();
+    let update = tokio::spawn(async move {
+        update_store
+            .update_password(target.id, "new hash")
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query = 'UPDATE users SET password_hash = $2 WHERE id = $1' AND wait_event_type = 'Lock')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!update.is_finished());
+    transaction.rollback().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), update)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+// md:fn successful_transfers_remove_target_shares
+#[sqlx::test(migrations = "../../migrations")]
+async fn successful_transfers_remove_target_shares(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool).await;
+    let owner_token = register_and_login(addr, "transfer-cleanup-owner@example.com").await;
+    let _target_token = register_and_login(addr, "transfer-cleanup-target@example.com").await;
+    let owner = state
+        .store
+        .get_user_by_email("transfer-cleanup-owner@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let target = state
+        .store
+        .get_user_by_email("transfer-cleanup-target@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let note = state
+        .store
+        .create_note(None, "transfer cleanup note", owner.id)
+        .await
+        .unwrap();
+    state
+        .store
+        .create_or_update_share(note.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notes/{}/transfer", note.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_share(note.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let notebook = Notebook::new("transfer cleanup notebook");
+    assert!(state
+        .store
+        .upsert_notebook(owner.id, &notebook)
+        .await
+        .unwrap());
+    state
+        .store
+        .create_or_update_notebook_share(notebook.id, target.id, Capabilities::READ)
+        .await
+        .unwrap();
+    let response = authed_json(
+        &client,
+        reqwest::Method::POST,
+        addr,
+        &format!("/api/notebooks/{}/transfer", notebook.id),
+        &owner_token,
+        json!({"user_id": target.id}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert!(state
+        .store
+        .get_notebook_share(notebook.id, target.id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // md:fn revoked_share_authority_is_reverified_for_create_share

@@ -356,7 +356,7 @@ impl Store {
     ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
-               FROM users WHERE id = $1"#,
+               FROM users WHERE id = $1 FOR UPDATE"#,
         )
         .bind(id)
         .fetch_optional(conn)

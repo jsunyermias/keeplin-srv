@@ -909,7 +909,7 @@ credential verification and transfer-target resolution; the hash is never serial
     ) -> Result<Option<User>, AppError> {
         let user = sqlx::query_as::<_, User>(
             r#"SELECT id, email, password_hash, display_name, created_at, email_verified_at
-               FROM users WHERE id = $1"#,
+               FROM users WHERE id = $1 FOR UPDATE"#,
         )
         .bind(id)
         .fetch_optional(conn)
@@ -918,7 +918,10 @@ credential verification and transfer-target resolution; the hash is never serial
     }
 ```
 
-**What it does** — straightforward lookups (include `password_hash` for verification; it is never serialised).
+**What it does** — Looks up the complete account, including the non-serialized `password_hash`, and
+locks the selected row until the caller's transaction ends. The lock makes a concurrent
+READ COMMITTED account update visible to serializable target-principal gates that mutate only
+other relations; the pool-backed wrapper holds it only for its single autocommit statement.
 
 **Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
 
