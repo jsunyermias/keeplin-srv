@@ -847,27 +847,44 @@ async fn put_resource_data(
     Path(id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if !state.store.resource_owned_by(id, user.user_id).await? {
-        return Err(AppError::NotFound);
-    }
     let limit = state.config.max_user_storage_bytes;
     if limit > 0 {
+        let mut tx = state.store.lock_blob_quota(user.user_id).await?;
+        if !state
+            .store
+            .resource_owned_by_on(&mut tx, id, user.user_id)
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
         let others = state
             .store
-            .user_blob_bytes_excluding(user.user_id, id)
+            .user_blob_bytes_excluding_on(&mut tx, user.user_id, id)
             .await?;
         if others + body.len() as i64 > limit {
             return Err(AppError::QuotaExceeded(format!(
                 "storage limit reached ({limit} bytes)"
             )));
         }
-    }
-    let written = state
-        .store
-        .put_resource_blob(user.user_id, id, &body)
-        .await?;
-    if !written {
-        return Err(AppError::NotFound);
+        let written = state
+            .store
+            .put_resource_blob_on(&mut *tx, user.user_id, id, &body)
+            .await?;
+        if !written {
+            return Err(AppError::NotFound);
+        }
+        tx.commit().await?;
+    } else {
+        if !state.store.resource_owned_by(id, user.user_id).await? {
+            return Err(AppError::NotFound);
+        }
+        let written = state
+            .store
+            .put_resource_blob(user.user_id, id, &body)
+            .await?;
+        if !written {
+            return Err(AppError::NotFound);
+        }
     }
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
@@ -932,12 +949,23 @@ async fn create_note(
 ) -> Result<Json<Note>, AppError> {
     let limit = state.config.max_notes_per_user;
     if limit > 0 {
-        let count = state.store.count_live_notes_for_user(user.user_id).await?;
+        let mut tx = state.store.lock_note_quota(user.user_id).await?;
+        let count = state
+            .store
+            .count_live_notes_for_user_on(&mut *tx, user.user_id)
+            .await?;
         if count >= limit {
             return Err(AppError::QuotaExceeded(format!(
                 "note limit reached ({limit})"
             )));
         }
+        let note = state
+            .store
+            .create_note_on(&mut *tx, body.id, &body.title, user.user_id)
+            .await?;
+        crate::store::Store::initialize_note_order_on(&mut *tx, note.id, user.user_id).await?;
+        tx.commit().await?;
+        return Ok(Json(note));
     }
     let note = state
         .store
@@ -1981,10 +2009,24 @@ async fn import_note(
     user: AuthedUser,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, AppError> {
+    let limit = state.config.max_notes_per_user;
+    let mut tx = state.store.lock_note_quota(user.user_id).await?;
+    if limit > 0 {
+        let count = state
+            .store
+            .count_live_notes_for_user_on(&mut *tx, user.user_id)
+            .await?;
+        if count >= limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "note limit reached ({limit})"
+            )));
+        }
+    }
     let note = state
         .store
-        .create_note(None, &body.title, user.user_id)
+        .create_note_on(&mut *tx, None, &body.title, user.user_id)
         .await?;
+    crate::store::Store::initialize_note_order_on(&mut *tx, note.id, user.user_id).await?;
     let writer = user.device_id.to_string();
     let now = chrono::Utc::now();
     let lines: Vec<&str> = body.body.split('\n').collect();
@@ -1995,7 +2037,7 @@ async fn import_note(
         let line_id = Uuid::new_v4();
         state
             .store
-            .insert_line(line_id, note.id, content, &line_vv, &writer, now)
+            .insert_line_on(&mut *tx, line_id, note.id, content, &line_vv, &writer, now)
             .await?;
         order.push(line_id);
     }
@@ -2005,8 +2047,9 @@ async fn import_note(
     )]);
     state
         .store
-        .set_note_order(note.id, &order, &order_vv, &writer, now)
+        .set_note_order_on(&mut *tx, note.id, &order, &order_vv, &writer, now)
         .await?;
+    tx.commit().await?;
 
     Ok(Json(ImportResponse {
         note_id: note.id,

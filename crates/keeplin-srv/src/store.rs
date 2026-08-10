@@ -7,6 +7,31 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
+// md:AdvisoryLockDomain
+#[derive(Clone, Copy)]
+enum AdvisoryLockDomain {
+    NoteOrder,
+    TagProjection,
+    NoteTagProjection,
+    ResourceProjection,
+    NoteQuota,
+    BlobQuota,
+}
+
+// md:impl AdvisoryLockDomain
+impl AdvisoryLockDomain {
+    fn name(self) -> &'static str {
+        match self {
+            Self::NoteOrder => "note-order",
+            Self::TagProjection => "tag-projection",
+            Self::NoteTagProjection => "note-tag-projection",
+            Self::ResourceProjection => "resource-projection",
+            Self::NoteQuota => "note-quota",
+            Self::BlobQuota => "blob-quota",
+        }
+    }
+}
+
 // md:PageCursor
 #[derive(Debug, Clone, Copy)]
 pub struct PageCursor {
@@ -884,29 +909,59 @@ impl Store {
         owner_id: Uuid,
     ) -> Result<Note, AppError> {
         let mut tx = self.pool.begin().await?;
+        let note = self.create_note_on(&mut *tx, id, title, owner_id).await?;
+        Self::initialize_note_order_on(&mut *tx, note.id, owner_id).await?;
+        tx.commit().await?;
+        Ok(note)
+    }
+
+    // md:impl Store > fn create_note_on
+    pub async fn create_note_on<'e, E>(
+        &self,
+        exec: E,
+        id: Option<Uuid>,
+        title: &str,
+        owner_id: Uuid,
+    ) -> Result<Note, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let encrypted_title = self.cipher.encrypt(title)?;
         let mut note = sqlx::query_as::<_, Note>(&format!(
             "INSERT INTO notes (id, title, owner_id) VALUES ($1, $2, $3) RETURNING {NOTE_COLS}"
         ))
         .bind(id.unwrap_or_else(Uuid::new_v4))
-        .bind(self.cipher.encrypt(title)?)
+        .bind(encrypted_title)
         .bind(owner_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(exec)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict,
             _ => AppError::from(e),
         })?;
         note.title = title.to_string();
+        note.title = title.to_string();
+        Ok(note)
+    }
+
+    // md:impl Store > fn initialize_note_order_on
+    pub async fn initialize_note_order_on<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        owner_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         sqlx::query(
             r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
                VALUES ($1, '[]', now(), '{}', $2)"#,
         )
-        .bind(note.id)
+        .bind(note_id)
         .bind(owner_id.to_string())
-        .execute(&mut *tx)
+        .execute(exec)
         .await?;
-        tx.commit().await?;
-        Ok(note)
+        Ok(())
     }
 
     // md:impl Store > fn get_note
@@ -1637,10 +1692,61 @@ impl Store {
         note_id: Uuid,
     ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(note_id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteOrder,
+            note_id.to_string(),
+        )
+        .await?;
+        Ok(tx)
+    }
+
+    // md:impl Store > fn acquire_advisory_lock_on
+    async fn acquire_advisory_lock_on<'e, E>(
+        exec: E,
+        domain: AdvisoryLockDomain,
+        key: String,
+    ) -> Result<(), AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, ':', $2::text), 0))",
+        )
+        .bind(domain.name())
+        .bind(key)
+        .execute(exec)
+        .await?;
+        Ok(())
+    }
+
+    // md:impl Store > fn lock_note_quota
+    pub async fn lock_note_quota(
+        &self,
+        user_id: Uuid,
+    ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteQuota,
+            user_id.to_string(),
+        )
+        .await?;
+        Ok(tx)
+    }
+
+    // md:impl Store > fn lock_blob_quota
+    pub async fn lock_blob_quota(
+        &self,
+        user_id: Uuid,
+    ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::BlobQuota,
+            user_id.to_string(),
+        )
+        .await?;
         Ok(tx)
     }
 
@@ -1933,10 +2039,12 @@ impl Store {
         tag: &keeplin_core::models::Tag,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(tag.id)
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::TagProjection,
+            tag.id.to_string(),
+        )
+        .await?;
         if let Some(row) =
             sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
@@ -2044,13 +2152,11 @@ impl Store {
         last_writer: &str,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, $2::text, $3::text), 0))",
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteTagProjection,
+            format!("{user_id}:{note_id}:{tag_id}"),
         )
-        .bind(user_id)
-        .bind(note_id)
-        .bind(tag_id)
-        .execute(&mut *tx)
         .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM note_tags
@@ -2164,10 +2270,12 @@ impl Store {
     ) -> Result<bool, AppError> {
         let incoming_ts = resource.deleted_at.unwrap_or(resource.created_at);
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(resource.id)
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::ResourceProjection,
+            resource.id.to_string(),
+        )
+        .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
@@ -2279,6 +2387,21 @@ impl Store {
         resource_id: Uuid,
         data: &[u8],
     ) -> Result<bool, AppError> {
+        self.put_resource_blob_on(&self.pool, user_id, resource_id, data)
+            .await
+    }
+
+    // md:impl Store > fn put_resource_blob_on
+    pub async fn put_resource_blob_on<'e, E>(
+        &self,
+        exec: E,
+        user_id: Uuid,
+        resource_id: Uuid,
+        data: &[u8],
+    ) -> Result<bool, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let result = sqlx::query(
             r#"INSERT INTO resource_blobs (resource_id, data)
                SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
@@ -2287,7 +2410,7 @@ impl Store {
         .bind(resource_id)
         .bind(user_id)
         .bind(data)
-        .execute(&self.pool)
+        .execute(exec)
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -2528,11 +2651,24 @@ impl Store {
 
     // md:impl Store > fn count_live_notes_for_user
     pub async fn count_live_notes_for_user(&self, user_id: Uuid) -> Result<i64, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.count_live_notes_for_user_on(&mut *conn, user_id).await
+    }
+
+    // md:impl Store > fn count_live_notes_for_user_on
+    pub async fn count_live_notes_for_user_on<'e, E>(
+        &self,
+        exec: E,
+        user_id: Uuid,
+    ) -> Result<i64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM notes WHERE owner_id = $1 AND deleted_at IS NULL",
         )
         .bind(user_id)
-        .fetch_one(&self.pool)
+        .fetch_one(exec)
         .await?;
         Ok(count)
     }

@@ -87,6 +87,7 @@ impl AppError {
     fn client_message(&self) -> String {
         match self {
             AppError::Database(_) | AppError::Internal(_) => "internal error".to_string(),
+            AppError::QuotaExceeded(message) => message.clone(),
             other => other.to_string(),
         }
     }

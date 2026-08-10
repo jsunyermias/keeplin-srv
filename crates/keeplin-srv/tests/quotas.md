@@ -205,15 +205,7 @@ returning the HTTP status code (the tests assert 200 vs 507).
 ```rust
 // md:fn post_note
 async fn post_note(addr: SocketAddr, token: &str) -> u16 {
-    reqwest::Client::new()
-        .post(format!("http://{addr}/api/notes"))
-        .bearer_auth(token)
-        .json(&json!({ "title": "n" }))
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
+    post_note_response(addr, token).await.status().as_u16()
 }
 ```
 
@@ -222,6 +214,62 @@ async fn post_note(addr: SocketAddr, token: &str) -> u16 {
 **Repeated context** — none.
 
 ---
+
+## fn post_note_response
+
+**Identification** — HTTP helper returning the complete response; marker `// md:fn post_note_response`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn post_note_response
+async fn post_note_response(addr: SocketAddr, token: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/api/notes"))
+        .bearer_auth(token)
+        .json(&json!({ "title": "n" }))
+        .send()
+        .await
+        .unwrap()
+}
+```
+
+**What it does** — Sends note creation while preserving status and body for wire-contract assertions.
+
+**Dependencies** — `reqwest::Client::send` — performs the request; expects the response to retain its exact bytes.
+
+**Used by** — quota refusal and concurrency tests.
+
+**Repeated context** — Quota refusal bodies are compatibility surfaces.
+
+---
+
+## fn import_note
+
+**Identification** — HTTP import test helper; marker `// md:fn import_note`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn import_note
+async fn import_note(addr: SocketAddr, token: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/api/import"))
+        .bearer_auth(token)
+        .json(&json!({ "title": "imported", "body": "one\ntwo" }))
+        .send()
+        .await
+        .unwrap()
+}
+```
+
+**What it does** — Sends a two-line authenticated note import and returns the full response for status and body assertions.
+
+**Dependencies** — `reqwest` — performs the request; expects `/api/import` to preserve the quota refusal contract.
+
+**Used by** — import quota tests.
+
+**Repeated context** — imports create counted notes.
 
 ## fn device
 
@@ -328,6 +376,33 @@ tests.
 ```rust
 // md:fn put_blob
 async fn put_blob(addr: SocketAddr, token: &str, id: Uuid, len: usize) -> u16 {
+    put_blob_response(addr, token, id, len)
+        .await
+        .status()
+        .as_u16()
+}
+```
+
+**Dependencies** — `reqwest`. **Used by** — the storage-quota tests.
+
+**Repeated context** — none.
+
+---
+
+## fn put_blob_response
+
+**Identification** — HTTP blob helper returning the complete response; marker `// md:fn put_blob_response`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn put_blob_response
+async fn put_blob_response(
+    addr: SocketAddr,
+    token: &str,
+    id: Uuid,
+    len: usize,
+) -> reqwest::Response {
     reqwest::Client::new()
         .put(format!("http://{addr}/api/resources/{id}/data"))
         .bearer_auth(token)
@@ -335,12 +410,178 @@ async fn put_blob(addr: SocketAddr, token: &str, id: Uuid, len: usize) -> u16 {
         .send()
         .await
         .unwrap()
-        .status()
-        .as_u16()
 }
 ```
 
-**Dependencies** — `reqwest`. **Used by** — the storage-quota tests.
+**What it does** — Uploads bytes while preserving the response for concurrent assertions.
+
+**Dependencies** — `reqwest::Client::send` — performs the request; expects completion only after the handler transaction resolves.
+
+**Used by** — blob quota concurrency tests.
+
+**Repeated context** — Stored bytes, not metadata size, consume this quota.
+
+---
+
+## fn install_quota_barrier
+
+**Identification** — PostgreSQL trigger-barrier helper; marker `// md:fn install_quota_barrier`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn install_quota_barrier
+async fn install_quota_barrier(pool: &PgPool, table: &str) {
+    sqlx::query(
+        "CREATE FUNCTION quota_write_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(7100003); RETURN NEW; END $$",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER quota_write_barrier BEFORE INSERT OR UPDATE ON {table} FOR EACH ROW EXECUTE FUNCTION quota_write_barrier()"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+```
+
+**What it does** — Installs a transaction-scoped advisory-lock barrier immediately before a quota-bearing write.
+
+**Dependencies** — `sqlx::query` — installs the function and trigger; expects the per-test database to isolate their names.
+
+**Used by** — deterministic ADR 0003 rendezvous tests.
+
+**Repeated context** — The barrier is test-only and sits between the deciding read and write.
+
+---
+
+## fn wait_for_barrier
+
+**Identification** — bounded lock-observation helper; marker `// md:fn wait_for_barrier`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn wait_for_barrier
+async fn wait_for_barrier(pool: &PgPool, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted AND locks.objid = 7100003",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+```
+
+**What it does** — Polls `pg_locks` until the requested number of writers has reached the forced barrier, failing after five seconds.
+
+**Dependencies** — `pg_locks` — exposes waiting advisory locks; expects database filtering to exclude other test databases.
+
+**Used by** — deterministic quota concurrency tests.
+
+**Repeated context** — Timeout failure is mutation evidence for an over-coarse production key.
+
+---
+
+## fn wait_for_advisory_waiters
+
+**Identification** — bounded global advisory-wait observation helper; marker `// md:fn wait_for_advisory_waiters`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn wait_for_advisory_waiters
+async fn wait_for_advisory_waiters(pool: &PgPool, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND NOT locks.granted",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+```
+
+**What it does** — Waits until both the write-barrier participant and the serialized same-user request are visibly blocked.
+
+**Dependencies** — `pg_locks` — exposes every waiting advisory request in the isolated database; expects a five-second timeout to turn a missing interleaving into a failure.
+
+**Used by** — same-user note and blob serialization tests.
+
+**Repeated context** — This removes scheduler luck from the rendezvous.
+
+---
+
+## fn hold_barrier
+
+**Identification** — barrier owner helper; marker `// md:fn hold_barrier`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn hold_barrier
+async fn hold_barrier(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(7100003)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    blocker
+}
+```
+
+**What it does** — Holds the test advisory lock on a dedicated session.
+
+**Dependencies** — `pg_advisory_lock` — blocks trigger participants; expects session ownership until explicit release.
+
+**Used by** — deterministic quota concurrency tests.
+
+**Repeated context** — Session locks require explicit release.
+
+---
+
+## fn release_barrier
+
+**Identification** — barrier release helper; marker `// md:fn release_barrier`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn release_barrier
+async fn release_barrier(mut blocker: sqlx::pool::PoolConnection<sqlx::Postgres>) {
+    sqlx::query("SELECT pg_advisory_unlock(7100003)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+}
+```
+
+**What it does** — Releases and returns the session that owns the test barrier.
+
+**Dependencies** — `pg_advisory_unlock` — releases the exact test key; expects the same session that acquired it.
+
+**Used by** — deterministic quota concurrency tests.
 
 **Repeated context** — none.
 
@@ -415,6 +656,450 @@ async fn note_quota_blocks_creation_past_the_limit(pool: PgPool) {
 
 **Repeated context** — The count is of **live owned** notes
 (`count_live_notes_for_user`) — soft-deleted notes don't consume quota.
+
+---
+
+## fn note_quota_blocks_import_past_the_limit
+
+**Identification** — import bypass regression test; marker `// md:fn note_quota_blocks_import_past_the_limit`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn note_quota_blocks_import_past_the_limit
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_quota_blocks_import_past_the_limit(pool: PgPool) {
+    let addr = spawn(pool, quota_config(0, 1)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+
+    assert_eq!(import_note(addr, &token).await.status().as_u16(), 200);
+    let create_refusal = post_note_response(addr, &token).await;
+    let import_refusal = import_note(addr, &token).await;
+    assert_eq!(create_refusal.status().as_u16(), 507);
+    assert_eq!(import_refusal.status().as_u16(), 507);
+    let create_body = create_refusal.bytes().await.unwrap();
+    let import_body = import_refusal.bytes().await.unwrap();
+    assert_eq!(create_body, import_body);
+    assert_eq!(
+        import_body.as_ref(),
+        br#"{"error":"note limit reached (1)"}"#
+    );
+}
+```
+
+**What it does** — Fills a one-note quota through import, then proves the formerly unguarded path returns the established byte-level 507 refusal.
+
+**Dependencies** — `import_note` — exercises the real endpoint; expects the second call to create no note or lines.
+
+**Used by** — PostgreSQL integration suite.
+
+**Repeated context** — the synchronization-path refusal remains deferred.
+
+## fn quota_write_inventory_is_complete
+
+**Identification** — production write and advisory-lock structural inventory; marker `// md:fn quota_write_inventory_is_complete`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn quota_write_inventory_is_complete
+#[test]
+fn quota_write_inventory_is_complete() {
+    let http = include_str!("../src/http.rs");
+    let sync = include_str!("../src/sync.rs");
+    let projection = include_str!("../src/projection.rs");
+    let store = include_str!("../src/store.rs");
+
+    assert_eq!(http.matches(".create_note(").count(), 1);
+    assert_eq!(http.matches(".create_note_on(").count(), 2);
+    assert!(http.matches("lock_note_quota").count() >= 2);
+    assert_eq!(http.matches(".put_resource_blob(").count(), 1);
+    assert_eq!(http.matches(".put_resource_blob_on(").count(), 1);
+    assert!(http.contains("lock_blob_quota"));
+    assert_eq!(projection.matches(".apply_resource_create(").count(), 1);
+    assert!(!sync.contains("lock_blob_quota"));
+    assert!(!projection.contains("lock_blob_quota"));
+    assert_eq!(
+        store.matches("pg_advisory_xact_lock").count(),
+        1,
+        "all production advisory locks must use the shared domain constructor"
+    );
+    for domain in [
+        "NoteOrder",
+        "TagProjection",
+        "NoteTagProjection",
+        "ResourceProjection",
+        "NoteQuota",
+        "BlobQuota",
+    ] {
+        assert!(store.contains(domain), "missing lock domain {domain}");
+    }
+    assert!(store.contains("count_live_notes_for_user_on"));
+    assert!(!http.contains("count_live_notes_for_user(user.user_id)"));
+    assert!(!http.contains("user_blob_bytes_excluding(user.user_id, id)"));
+    assert!(!http.contains("run_serializable"));
+    let note_quota = store
+        .split("// md:impl Store > fn lock_note_quota")
+        .nth(1)
+        .unwrap()
+        .split(&["//", " md:"].concat())
+        .next()
+        .unwrap();
+    let blob_quota = store
+        .split("// md:impl Store > fn lock_blob_quota")
+        .nth(1)
+        .unwrap()
+        .split(&["//", " md:"].concat())
+        .next()
+        .unwrap();
+    assert!(note_quota.contains("AdvisoryLockDomain::NoteQuota"));
+    assert!(!note_quota.contains("AdvisoryLockDomain::NoteOrder"));
+    assert!(blob_quota.contains("AdvisoryLockDomain::BlobQuota"));
+    for marker in ["// md:fn create_note", "// md:fn import_note"] {
+        let handler = http
+            .split(marker)
+            .nth(1)
+            .unwrap()
+            .split(&["//", " md:"].concat())
+            .next()
+            .unwrap();
+        assert!(
+            handler.find("lock_note_quota").unwrap()
+                < handler.find("count_live_notes_for_user_on").unwrap()
+        );
+    }
+    let blob_handler = http
+        .split("// md:fn put_resource_data")
+        .nth(1)
+        .unwrap()
+        .split(&["//", " md:"].concat())
+        .next()
+        .unwrap();
+    assert!(
+        blob_handler.find("lock_blob_quota").unwrap()
+            < blob_handler.find("user_blob_bytes_excluding_on").unwrap()
+    );
+}
+```
+
+**What it does** — Pins HTTP counted-object call sites, the explicitly deferred sync blob site, executor-aware quota reads, six named lock domains, the single production advisory-lock constructor, and absence of ADR 0002 retries.
+
+**Dependencies** — `include_str!` — reads production sources at compile time; expects literal call sites and domain variants to remain inventory-visible.
+
+**Used by** — non-database test suite and mutation evidence for ADR 0003 rows 1, 7, 11, 11b, 13, and 15.
+
+**Repeated context** — any new counted-object write must be classified before this inventory changes.
+
+## fn concurrent_blob_quota_writes_serialize_before_the_deciding_read
+
+**Identification** — ADR 0003 rows 4 and 6 concurrency test; marker `// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_blob_quota_writes_serialize_before_the_deciding_read(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(100, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let left_id = seed_resource(addr, &token, &dev).await;
+    let right_id = seed_resource(addr, &token, &dev).await;
+    install_quota_barrier(&pool, "resource_blobs").await;
+    let blocker = hold_barrier(&pool).await;
+    let left_token = token.clone();
+    let left = tokio::spawn(async move { put_blob_response(addr, &left_token, left_id, 60).await });
+    wait_for_barrier(&pool, 1).await;
+    let right_token = token.clone();
+    let right =
+        tokio::spawn(async move { put_blob_response(addr, &right_token, right_id, 60).await });
+    wait_for_advisory_waiters(&pool, 2).await;
+    assert!(!right.is_finished());
+    release_barrier(blocker).await;
+    let left = left.await.unwrap();
+    let right = right.await.unwrap();
+    let mut statuses = [left.status().as_u16(), right.status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 507]);
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(octet_length(data)), 0) FROM resource_blobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 60);
+}
+```
+
+**What it does** — Forces two same-user blob writes across the read/write boundary and proves only one jointly-over-limit write commits.
+
+**Dependencies** — `install_quota_barrier` — forces the interleaving; expects the first writer to retain its quota lock while blocked.
+
+**Used by** — ADR 0003 verification matrix rows 4 and 6.
+
+**Repeated context** — Moving the production lock after the aggregate read makes both writes commit and this test fail.
+
+---
+
+## fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body
+
+**Identification** — ADR 0003 rows 5, 6, and 12 test; marker `// md:fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 1)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    install_quota_barrier(&pool, "notes").await;
+    let blocker = hold_barrier(&pool).await;
+    let left_token = token.clone();
+    let left = tokio::spawn(async move { post_note_response(addr, &left_token).await });
+    wait_for_barrier(&pool, 1).await;
+    let right_token = token.clone();
+    let right = tokio::spawn(async move { post_note_response(addr, &right_token).await });
+    wait_for_advisory_waiters(&pool, 2).await;
+    assert!(!right.is_finished());
+    release_barrier(blocker).await;
+    let responses = [left.await.unwrap(), right.await.unwrap()];
+    let mut success = 0;
+    let mut contended_refusal = None;
+    for response in responses {
+        if response.status().as_u16() == 200 {
+            success += 1;
+        } else {
+            assert_eq!(response.status().as_u16(), 507);
+            contended_refusal = Some(response.bytes().await.unwrap());
+        }
+    }
+    assert_eq!(success, 1);
+    let uncontended = post_note_response(addr, &token).await;
+    assert_eq!(uncontended.status().as_u16(), 507);
+    assert_eq!(
+        contended_refusal.unwrap(),
+        uncontended.bytes().await.unwrap()
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+}
+```
+
+**What it does** — Forces same-user note creation contention, proves exactly one commit, and compares contended and uncontended refusal bytes.
+
+**Dependencies** — `post_note_response` — preserves wire bytes; expects both refusal paths to use `AppError` serialization.
+
+**Used by** — ADR 0003 verification matrix rows 5, 6, and 12.
+
+**Repeated context** — The established body omits the error variant's display prefix.
+
+---
+
+## fn quota_locks_are_scoped_by_user
+
+**Identification** — ADR 0003 rows 8 and 9 concurrency test; marker `// md:fn quota_locks_are_scoped_by_user`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn quota_locks_are_scoped_by_user
+#[sqlx::test(migrations = "../../migrations")]
+async fn quota_locks_are_scoped_by_user(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 1)).await;
+    register(addr, "a@example.com").await;
+    register(addr, "b@example.com").await;
+    let left_token = login(addr, "a@example.com", "dev-a").await;
+    let right_token = login(addr, "b@example.com", "dev-b").await;
+    install_quota_barrier(&pool, "notes").await;
+    let blocker = hold_barrier(&pool).await;
+    let left = tokio::spawn(async move { post_note_response(addr, &left_token).await });
+    let right = tokio::spawn(async move { post_note_response(addr, &right_token).await });
+    wait_for_barrier(&pool, 2).await;
+    release_barrier(blocker).await;
+    assert_eq!(left.await.unwrap().status().as_u16(), 200);
+    assert_eq!(right.await.unwrap().status().as_u16(), 200);
+}
+```
+
+**What it does** — Proves two users both reach the between-read-and-write barrier concurrently.
+
+**Dependencies** — `wait_for_barrier` — requires two waiters; expects a constant production key mutation to time out.
+
+**Used by** — ADR 0003 verification matrix rows 8 and 9.
+
+**Repeated context** — Quota serialization is per user.
+
+---
+
+## fn note_and_blob_quota_locks_use_distinct_domains
+
+**Identification** — ADR 0003 row 10 concurrency test; marker `// md:fn note_and_blob_quota_locks_use_distinct_domains`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn note_and_blob_quota_locks_use_distinct_domains
+#[sqlx::test(migrations = "../../migrations")]
+async fn note_and_blob_quota_locks_use_distinct_domains(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(100, 1)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let resource_id = seed_resource(addr, &token, &dev).await;
+    install_quota_barrier(&pool, "notes").await;
+    sqlx::query("CREATE TRIGGER blob_quota_write_barrier BEFORE INSERT OR UPDATE ON resource_blobs FOR EACH ROW EXECUTE FUNCTION quota_write_barrier()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let blocker = hold_barrier(&pool).await;
+    let note_token = token.clone();
+    let note = tokio::spawn(async move { post_note_response(addr, &note_token).await });
+    let blob_token = token.clone();
+    let blob =
+        tokio::spawn(async move { put_blob_response(addr, &blob_token, resource_id, 50).await });
+    wait_for_barrier(&pool, 2).await;
+    release_barrier(blocker).await;
+    assert_eq!(note.await.unwrap().status().as_u16(), 200);
+    assert_eq!(blob.await.unwrap().status().as_u16(), 200);
+}
+```
+
+**What it does** — Proves one user's note and blob writers both reach their write barriers without cross-quota blocking.
+
+**Dependencies** — `AdvisoryLockDomain` production behavior — expects note and blob quotas to hash distinct domain names.
+
+**Used by** — ADR 0003 verification matrix row 10.
+
+**Repeated context** — Independent quota dimensions must not create false sharing.
+
+---
+
+## fn failed_quota_lock_wait_is_internal_and_retryable
+
+**Identification** — ADR 0003 row 14 recovery test; marker `// md:fn failed_quota_lock_wait_is_internal_and_retryable`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn failed_quota_lock_wait_is_internal_and_retryable
+#[sqlx::test(migrations = "../../migrations")]
+async fn failed_quota_lock_wait_is_internal_and_retryable(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 1)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'a@example.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut blocker = pool.acquire().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_lock(hashtextextended(concat('note-quota', ':', $1::text), 0))",
+    )
+    .bind(user_id.to_string())
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    let max = pool.options().get_max_connections();
+    let mut reserved = Vec::new();
+    for _ in 1..max {
+        reserved.push(pool.acquire().await.unwrap());
+    }
+    let mut request_connection = reserved.pop().unwrap();
+    sqlx::query("SET lock_timeout = '100ms'")
+        .execute(&mut *request_connection)
+        .await
+        .unwrap();
+    drop(request_connection);
+    let failed = post_note_response(addr, &token).await;
+    assert_eq!(failed.status().as_u16(), 500);
+    assert_ne!(failed.status().as_u16(), 507);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE owner_id = $1")
+        .bind(user_id)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query(
+        "SELECT pg_advisory_unlock(hashtextextended(concat('note-quota', ':', $1::text), 0))",
+    )
+    .bind(user_id.to_string())
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    drop(reserved);
+    drop(blocker);
+    assert_eq!(post_note(addr, &token).await, 200);
+}
+```
+
+**What it does** — Forces a quota lock timeout, checks the internal response and empty aggregate, then releases contention and retries successfully.
+
+**Dependencies** — PostgreSQL `lock_timeout` — aborts the wait; expects transaction rollback and `AppError::Database` mapping to 500.
+
+**Used by** — ADR 0003 verification matrix row 14.
+
+**Repeated context** — A lock failure is not evidence that the user exceeded quota.
+
+---
+
+## fn failure_between_quota_read_and_write_rolls_back_and_releases_lock
+
+**Identification** — ADR 0003 row 16 recovery test; marker `// md:fn failure_between_quota_read_and_write_rolls_back_and_releases_lock`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn failure_between_quota_read_and_write_rolls_back_and_releases_lock
+#[sqlx::test(migrations = "../../migrations")]
+async fn failure_between_quota_read_and_write_rolls_back_and_releases_lock(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 1)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'a@example.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE FUNCTION fail_quota_note_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected quota write failure'; END $$")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_quota_note_write BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION fail_quota_note_write()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(post_note(addr, &token).await, 500);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notes WHERE owner_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let locks: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks locks JOIN pg_database database ON database.oid = locks.database WHERE database.datname = current_database() AND locks.locktype = 'advisory' AND locks.granted")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(locks, 0);
+    sqlx::query("DROP TRIGGER fail_quota_note_write ON notes")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(post_note(addr, &token).await, 200);
+}
+```
+
+**What it does** — Injects a write failure after the deciding read and verifies no note or transaction lock survives rollback before a successful retry.
+
+**Dependencies** — PostgreSQL trigger exceptions — abort the handler transaction; expects transaction-scoped advisory locks to release automatically.
+
+**Used by** — ADR 0003 verification matrix row 16.
+
+**Repeated context** — The deciding read, write, and lock share one transaction.
 
 ---
 
@@ -565,11 +1250,27 @@ this companion.
 | 4 | `fn register` | `// md:fn register` |
 | 5 | `fn login` | `// md:fn login` |
 | 6 | `fn post_note` | `// md:fn post_note` |
+| 6a | `fn post_note_response` | `// md:fn post_note_response` |
+| 6a | `fn import_note` | `// md:fn import_note` |
 | 7 | `fn device` | `// md:fn device` |
 | 8 | `fn seed_resource` | `// md:fn seed_resource` |
 | 9 | `fn put_blob` | `// md:fn put_blob` |
+| 9a | `fn put_blob_response` | `// md:fn put_blob_response` |
+| 9b | `fn install_quota_barrier` | `// md:fn install_quota_barrier` |
+| 9c | `fn wait_for_barrier` | `// md:fn wait_for_barrier` |
+| 9ca | `fn wait_for_advisory_waiters` | `// md:fn wait_for_advisory_waiters` |
+| 9d | `fn hold_barrier` | `// md:fn hold_barrier` |
+| 9e | `fn release_barrier` | `// md:fn release_barrier` |
 | 10 | `fn registration_can_be_disabled` | `// md:fn registration_can_be_disabled` |
 | 11 | `fn note_quota_blocks_creation_past_the_limit` | `// md:fn note_quota_blocks_creation_past_the_limit` |
+| 11a | `fn note_quota_blocks_import_past_the_limit` | `// md:fn note_quota_blocks_import_past_the_limit` |
+| 11b | `fn quota_write_inventory_is_complete` | `// md:fn quota_write_inventory_is_complete` |
+| 11c | `fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` | `// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` |
+| 11d | `fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` | `// md:fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` |
+| 11e | `fn quota_locks_are_scoped_by_user` | `// md:fn quota_locks_are_scoped_by_user` |
+| 11f | `fn note_and_blob_quota_locks_use_distinct_domains` | `// md:fn note_and_blob_quota_locks_use_distinct_domains` |
+| 11g | `fn failed_quota_lock_wait_is_internal_and_retryable` | `// md:fn failed_quota_lock_wait_is_internal_and_retryable` |
+| 11h | `fn failure_between_quota_read_and_write_rolls_back_and_releases_lock` | `// md:fn failure_between_quota_read_and_write_rolls_back_and_releases_lock` |
 | 12 | `fn note_quota_disabled_by_default` | `// md:fn note_quota_disabled_by_default` |
 | 13 | `fn storage_quota_blocks_upload_over_the_limit` | `// md:fn storage_quota_blocks_upload_over_the_limit` |
 | 14 | `fn storage_quota_isolated_per_user` | `// md:fn storage_quota_isolated_per_user` |

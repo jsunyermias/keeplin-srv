@@ -244,6 +244,7 @@ changing a variant's status is a breaking API change.
     fn client_message(&self) -> String {
         match self {
             AppError::Database(_) | AppError::Internal(_) => "internal error".to_string(),
+            AppError::QuotaExceeded(message) => message.clone(),
             other => other.to_string(),
         }
     }
@@ -252,10 +253,13 @@ changing a variant's status is a breaking API change.
 **What it does** — The message placed in the JSON body. `Database(_)` and `Internal(_)`
 collapse to the generic `"internal error"` so their detail — which can name
 tables/columns/constraints — is never leaked in a response (issue #46); the full error
-is logged server-side by `into_response` instead. Every other variant keeps its
-specific, safe `Display` string.
+is logged server-side by `into_response` instead. `QuotaExceeded` emits its inner
+message without the enum's `Display` prefix, preserving the established quota refusal
+body across every handler. Every other variant keeps its specific, safe `Display` string.
 
-**Dependencies** — `AppError`'s `Display` (thiserror-derived, this file).
+**Dependencies** — `AppError`'s `Display` — renders safe variants; expects
+`QuotaExceeded` to remain an explicit inner-message exception so its wire body does not
+inherit the diagnostic prefix.
 
 **Used by** — `into_response` (this file) only; private, no external callers.
 
