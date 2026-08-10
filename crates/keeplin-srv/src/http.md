@@ -1034,10 +1034,27 @@ async fn login(
         state.store.clear_login_failures(&email).await?;
     }
 
-    let device = state
-        .store
-        .create_device(user.id, &body.device_name)
-        .await?;
+    let verified_password_hash = user.password_hash.clone();
+    let device_name = body.device_name;
+    let device = serializable(state.clone(), "login", |state, conn| {
+        let verified_password_hash = verified_password_hash.clone();
+        let device_name = device_name.clone();
+        Box::pin(async move {
+            let stored = state
+                .store
+                .get_user_by_id_on(conn, user.id)
+                .await?
+                .ok_or(AppError::InvalidToken)?;
+            if stored.password_hash != verified_password_hash {
+                return Err(AppError::InvalidToken);
+            }
+            state
+                .store
+                .create_device_on(conn, user.id, &device_name)
+                .await
+        })
+    })
+    .await?;
 
     let token = auth::create_token(
         user.id,
@@ -1073,19 +1090,22 @@ async fn login(
 5. `EMAIL_VERIFICATION_REQUIRED` and unverified → `400 email not verified` —
    checked only **after** the password succeeded, so it reveals nothing to a caller
    without the credentials (issue #49).
-6. Success: clear the email's failure history, create the device row
-   (`user_devices`), mint the JWT (`TOKEN_TTL_DAYS`), return `{token, device_id}`.
+6. Success: clear the email's failure history, capture the verified hash, then enter the bounded
+   serializable retry helper. Re-read the user and refuse with `401 InvalidToken` if a concurrent
+   password reset replaced that hash; otherwise create the device row in the same transaction.
+7. After commit, mint the JWT (`TOKEN_TTL_DAYS`) and return `{token, device_id}`. Existing tokens
+   are unaffected; serializable retry exhaustion returns `503 ServiceUnavailable`.
 
 **Dependencies** — `normalize_email` (this file); `auth::{verify_password,
 dummy_password_hash, create_token}`; `Store::{login_locked, record_login_failure,
-get_user_by_email, clear_login_failures, create_device}`.
+get_user_by_email, get_user_by_id_on, clear_login_failures, create_device_on}`; `serializable`.
 
 **Used by** — routed in `router` (rate-limited, unauthenticated).
 
 **Repeated context** — Uniform-failure discipline (issue #32): unknown email and
 wrong password are indistinguishable in status, body **and** timing. The device row
-created here is the anchor of revocation: deleting it kills the token on every
-surface.
+created here is the anchor of revocation: deleting it kills the token on every surface. Argon2
+verification remains outside the transaction and is not repeated on serialization retries.
 
 ---
 

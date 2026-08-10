@@ -477,10 +477,27 @@ async fn login(
         state.store.clear_login_failures(&email).await?;
     }
 
-    let device = state
-        .store
-        .create_device(user.id, &body.device_name)
-        .await?;
+    let verified_password_hash = user.password_hash.clone();
+    let device_name = body.device_name;
+    let device = serializable(state.clone(), "login", |state, conn| {
+        let verified_password_hash = verified_password_hash.clone();
+        let device_name = device_name.clone();
+        Box::pin(async move {
+            let stored = state
+                .store
+                .get_user_by_id_on(conn, user.id)
+                .await?
+                .ok_or(AppError::InvalidToken)?;
+            if stored.password_hash != verified_password_hash {
+                return Err(AppError::InvalidToken);
+            }
+            state
+                .store
+                .create_device_on(conn, user.id, &device_name)
+                .await
+        })
+    })
+    .await?;
 
     let token = auth::create_token(
         user.id,

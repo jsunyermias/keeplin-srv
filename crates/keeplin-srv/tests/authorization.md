@@ -652,7 +652,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
-    HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
+    HandlerInterleaving { handler: "login", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_login") },
     HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
     HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
     HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
@@ -914,6 +914,7 @@ const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
     "delete_notebook_share",
     "transfer_notebook",
     "delete_account",
+    "login",
 ];
 
 fn routed_handlers(source: &str) -> Vec<String> {
@@ -953,7 +954,7 @@ no check verifies. The inventory excludes credential and token reads at the unau
 `login`, `reset_request`, `verify_confirm`, and `reset_confirm` entry points from ADR 0002's
 authorization seam. It classifies `entity_history` as response materialization deferred to phase 3,
 not an authorization input. It also records the executor-aware authorization reads and ADR 0002's
-exact nine-handler serializable invariant set as data without enabling that isolation level in
+exact ten-handler serializable invariant set as data without enabling that isolation level in
 phase 1. `TARGET_PRINCIPAL_REREAD_HANDOFF` also records that the four target-principal writers read
 `users` inside their serializable transactions, creating SIREAD dependencies that issue #145's
 quota conflict matrix must include.
@@ -1292,6 +1293,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "delete_notebook_share",
         "transfer_notebook",
         "delete_account",
+        "login",
     ]
     .into_iter()
     .collect();
@@ -1313,6 +1315,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "delete_notebook_share_on",
         "set_notebook_owner_on",
         "delete_user_on",
+        "create_device_on",
     ];
     for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
@@ -1362,14 +1365,14 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
 }
 ```
 
-**What it does** — Keeps the exact nine-handler SERIALIZABLE set explicit, requires each
+**What it does** — Keeps the exact ten-handler SERIALIZABLE set explicit, requires each
 handler to route its matching `_on` mutation through the common serializable boundary, requires
 target-principal handlers to re-read that target after entering the boundary, and requires both
 synchronization notebook writers to retry their complete transaction at SERIALIZABLE. It also
 requires `delete_account` to perform Argon2 verification before entering the boundary and to compare
 the re-read hash with the verified hash inside it. Behavioural isolation evidence deliberately
 covers 1 of the 11 direct participants (`upsert_notebook`); the other synchronization writer and all
-nine HTTP handlers are pinned structurally, while the handler rollback matrix separately proves that
+ten HTTP handlers are pinned structurally, while the handler rollback matrix separately proves that
 their mutations remain on the transaction connection. This must not be reported as behavioural
 isolation mutation coverage across the complete participant set.
 
@@ -1454,6 +1457,107 @@ operation; expects a changed hash to map to `AppError::InvalidToken` and HTTP 40
 
 **Repeated context** — Credential hashing stays outside the database transaction; only the exact
 verified hash is carried into it.
+
+---
+
+## fn changed_password_is_reverified_for_login
+
+**Identification** — deterministic login/reset credential interleaving test; marker `// md:fn changed_password_is_reverified_for_login`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn changed_password_is_reverified_for_login
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn changed_password_is_reverified_for_login(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let client = reqwest::Client::new();
+    let email = "login-password-race@example.com";
+    let registered = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": email, "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), 200);
+    let user = state.store.get_user_by_email(email).await.unwrap().unwrap();
+    let (reset_token, _) = state
+        .store
+        .create_email_token(
+            user.id,
+            keeplin_srv::mail::MailKind::PasswordReset,
+            state.config.email_token_ttl_secs,
+        )
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("login", "before_operation")
+        .await;
+    let login_request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/api/login"))
+            .json(&json!({
+                "email": email,
+                "password": "password123",
+                "device_name": "racing-login"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("login", "before_operation")
+        .await;
+    let reset = client
+        .post(format!("http://{addr}/api/account/reset/confirm"))
+        .json(&json!({ "token": reset_token, "new_password": "changed123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset.status(), 200);
+    state.http_test_hooks.resume();
+    let login = login_request.await.unwrap();
+    let status = login.status();
+    if status == 200 {
+        let body: Value = login.json().await.unwrap();
+        let token = body["token"].as_str().unwrap();
+        let authenticated = client
+            .get(format!("http://{addr}/api/devices"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), 401);
+    }
+    assert_eq!(status, 401);
+    let device_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_devices WHERE user_id = $1")
+            .bind(user.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(device_count, 0);
+}
+```
+
+**What it does** — Registers an account, parks an old-password login immediately before its
+serializable operation, completes password reset and device revocation, then resumes the login. It
+requires HTTP 401 and zero device rows; a defensive branch also rejects any accidentally returned
+token as unusable.
+
+**Dependencies** — `HttpTestHooks::pause_at`, `wait_until_reached`, and `resume` — force reset to
+commit after Argon2 verification but before the transactional re-read; expects the checkpoint to
+precede the operation closure. `Store::create_email_token` and `reset_confirm` — drive the real reset
+handler without mail delivery; expect reset to replace the password hash and revoke devices.
+
+**Used by** — `MUTATING_HANDLER_INTERLEAVINGS` names this case as the login refusal evidence and the
+credential-hash guard's killing mutation.
+
+**Repeated context** — Existing tokens are unchanged by this mechanism; only the concurrently
+in-flight login based on the replaced credential is refused.
 
 ---
 
@@ -8793,6 +8897,7 @@ No exact-commit graph was available. Relationships below are authored inference.
 | 12 | `fn owner_note_access_does_not_acquire_a_connection` | `// md:fn owner_note_access_does_not_acquire_a_connection` |
 | 13 | `fn serializable_invariant_inventory_is_exact_and_enforced` | `// md:fn serializable_invariant_inventory_is_exact_and_enforced` |
 | 13aa | `fn changed_password_is_reverified_for_delete_account` | `// md:fn changed_password_is_reverified_for_delete_account` |
+| 13ab | `fn changed_password_is_reverified_for_login` | `// md:fn changed_password_is_reverified_for_login` |
 | 13a | `fn sync_notebook_writers_retry_real_40001_within_the_bound` | `// md:fn sync_notebook_writers_retry_real_40001_within_the_bound` |
 | 13b | `fn sync_notebook_writers_do_not_retry_a_fourth_time` | `// md:fn sync_notebook_writers_do_not_retry_a_fourth_time` |
 | 13b1 | `fn cross_tenant_newer_resource_projection_is_permanently_rejected` | `// md:fn cross_tenant_newer_resource_projection_is_permanently_rejected` |
