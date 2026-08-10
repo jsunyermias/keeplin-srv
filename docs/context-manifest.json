@@ -80,6 +80,62 @@
     {
       "companion": {
         "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/src/bin/reconcile-projections.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": [
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A journaled change retains an outstanding or dead-lettered job until projection succeeds."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A database row lock excludes concurrent application of one job."
+          }
+        ]
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "Overview",
+          "fn main"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`crates/keeplin-srv/src/bin/reconcile-projections.rs` — durable projection queue support"
+      },
+      "risk": {
+        "basis": [
+          "database"
+        ],
+        "origin": "INFERRED",
+        "value": "persistence"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/src/bin/reconcile-projections.rs"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test -p keeplin-srv"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
         "value": "crates/keeplin-srv/src/bin/reencrypt.md"
       },
       "cross_repo_contracts": {
@@ -1123,6 +1179,73 @@
     {
       "companion": {
         "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/src/projection.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": [
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A journaled change retains an outstanding or dead-lettered job until projection succeeds."
+          },
+          {
+            "basis": "authored-invariant",
+            "origin": "INFERRED",
+            "value": "A database row lock excludes concurrent application of one job."
+          }
+        ]
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": [
+          "Overview",
+          "ProjectionQueueStats",
+          "ClaimedJob",
+          "fn is_serialization_failure",
+          "fn is_permanent_database_failure",
+          "fn apply_change",
+          "fn claim_one",
+          "fn finish_job",
+          "fn drain_available",
+          "fn drain_batch",
+          "fn worker",
+          "fn reconcile",
+          "fn stats"
+        ]
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`crates/keeplin-srv/src/projection.rs` — durable projection queue support"
+      },
+      "risk": {
+        "basis": [
+          "database"
+        ],
+        "origin": "INFERRED",
+        "value": "persistence"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "crates/keeplin-srv/src/projection.rs"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test -p keeplin-srv"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
         "value": "crates/keeplin-srv/src/protocol.md"
       },
       "cross_repo_contracts": {
@@ -1665,6 +1788,7 @@
           "impl Store > fn delete_tag",
           "impl Store > fn upsert_note_tag",
           "impl Store > fn upsert_resource_meta",
+          "impl Store > fn apply_resource_create",
           "impl Store > fn delete_resource",
           "impl Store > fn put_resource_blob",
           "impl Store > fn get_resource_blob",
@@ -1758,7 +1882,6 @@
           "fn deliver_backlog",
           "fn relay_loop",
           "fn handle_incoming",
-          "fn materialize",
           "fn changes_frame"
         ]
       },
@@ -1872,6 +1995,8 @@
           "Overview",
           "CapturedLogs",
           "impl Write for CapturedLogs",
+          "fn prometheus_metrics_expose_projection_queue_series",
+          "fn note_tag_projection_failure_retries_and_remains_claimable",
           "impl CapturedLogs",
           "fn capturing_subscriber",
           "authorization_case_inventory",
@@ -1884,7 +2009,16 @@
           "fn changed_password_is_reverified_for_delete_account",
           "fn sync_notebook_writers_retry_real_40001_within_the_bound",
           "fn sync_notebook_writers_do_not_retry_a_fourth_time",
+          "fn cross_tenant_newer_resource_projection_is_permanently_rejected",
+          "fn reconcile_enqueues_materializing_resource_change",
+          "fn concurrent_raw_resource_appliers_preserve_metadata_blob_atomicity",
+          "fn mixed_projection_batch_keeps_per_index_terminal_states",
+          "fn normal_projection_latency_stays_within_fixed_budget",
+          "fn duplicate_batch_request_completes_outstanding_projection_work",
+          "fn sync_notebook_writer_retries_commit_time_40001_at_projection_boundary",
           "fn sync_notebook_writer_retries_under_a_real_ssi_conflict",
+          "fn projection_jobs_replay_safely_after_projection_commit",
+          "fn concurrent_absent_tag_and_note_tag_choose_deterministic_winners",
           "fn sync_notebook_writers_propagate_post_mutation_failures_without_partial_state",
           "fn sync_notebook_writers_do_not_retry_non_serialization_failures",
           "fn target_principals_are_reverified_in_share_and_transfer_transactions",
@@ -3474,6 +3608,90 @@
       "source": {
         "origin": "EXTRACTED",
         "value": "migrations/0017_direct_note_shares.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0018_projection_jobs.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0018_projection_jobs.sql` — durable journal projection queue"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0018_projection_jobs.sql"
+      },
+      "tests": {
+        "origin": "INFERRED",
+        "value": [
+          "cargo test --workspace"
+        ]
+      }
+    },
+    {
+      "companion": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0019_drop_redundant_projection_index.md"
+      },
+      "cross_repo_contracts": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "direct_dependencies": [],
+      "direct_dependents": [],
+      "high_risk_dependents": [],
+      "invariants": {
+        "origin": "INFERRED",
+        "value": []
+      },
+      "markers": {
+        "origin": "EXTRACTED",
+        "value": []
+      },
+      "purpose": {
+        "origin": "EXTRACTED",
+        "value": "`0019_drop_redundant_projection_index.sql` — remove duplicate queue index"
+      },
+      "risk": {
+        "basis": [
+          "migration"
+        ],
+        "origin": "INFERRED",
+        "value": "migration"
+      },
+      "source": {
+        "origin": "EXTRACTED",
+        "value": "migrations/0019_drop_redundant_projection_index.sql"
       },
       "tests": {
         "origin": "INFERRED",

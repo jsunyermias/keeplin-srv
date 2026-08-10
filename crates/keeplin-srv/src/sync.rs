@@ -264,14 +264,17 @@ async fn handle_incoming(
         .append_changes(user_id, device_id, sync_device_id, batch_id, &changes)
         .await?;
     if inserted.is_empty() {
-        tracing::debug!(%device_id, %batch_id, "duplicate batch ignored");
+        crate::projection::drain_batch(state, user_id, batch_id).await;
+        tracing::debug!(%device_id, %batch_id, "duplicate batch projection work checked");
         return Ok(());
     }
     tracing::info!(%user_id, %device_id, %batch_id, count = inserted.len(), "batch persisted");
 
-    materialize(state, user_id, &changes).await;
-
-    let frame = changes_frame(changes.iter());
+    let inserted_changes: Vec<_> = inserted
+        .iter()
+        .map(|(_, payload)| payload.clone())
+        .collect();
+    let frame = changes_frame(inserted_changes.iter());
     let _ = tx.send(FanoutMsg::Batch(Arc::new(FanoutBatch {
         origin: device_id,
         frame,
@@ -283,116 +286,8 @@ async fn handle_incoming(
             &format!("{}:{}", user_id, state.instance_id),
         )
         .await;
+    crate::projection::drain_available(state, Some(user_id), 64).await;
     Ok(())
-}
-
-// md:fn materialize
-async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Value]) {
-    use keeplin_core::models::Change;
-    for payload in changes {
-        let change: Change = match serde_json::from_value(payload.clone()) {
-            Ok(change) => change,
-            Err(_) => continue,
-        };
-        let result = match change {
-            Change::NotebookCreate { notebook } | Change::NotebookUpdate { notebook } => state
-                .store
-                .upsert_notebook(user_id, &notebook)
-                .await
-                .map(drop),
-            Change::NotebookDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_notebook(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::TagCreate { tag } | Change::TagUpdate { tag } => {
-                state.store.upsert_tag(user_id, &tag).await.map(drop)
-            }
-            Change::TagDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_tag(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::NoteTagAdd {
-                note_id,
-                tag_id,
-                updated_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .upsert_note_tag(
-                    user_id,
-                    note_id,
-                    tag_id,
-                    updated_at,
-                    None,
-                    &vv,
-                    &last_writer,
-                )
-                .await
-                .map(drop),
-            Change::NoteTagRemove {
-                note_id,
-                tag_id,
-                updated_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .upsert_note_tag(
-                    user_id,
-                    note_id,
-                    tag_id,
-                    updated_at,
-                    Some(updated_at),
-                    &vv,
-                    &last_writer,
-                )
-                .await
-                .map(drop),
-            Change::ResourceCreate { resource, data } => {
-                match state.store.upsert_resource_meta(user_id, &resource).await {
-                    Ok(true) => match data {
-                        Some(bytes) => state
-                            .store
-                            .put_resource_blob(user_id, resource.id, &bytes)
-                            .await
-                            .map(drop),
-                        None => Ok(()),
-                    },
-                    Ok(false) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
-            Change::ResourceDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_resource(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {
-                Ok(())
-            }
-        };
-        if let Err(e) = result {
-            tracing::warn!(error = %e, %user_id, "materialize: failed to apply change");
-        }
-    }
 }
 
 // md:fn changes_frame

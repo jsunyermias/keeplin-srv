@@ -62,7 +62,7 @@ The wire protocol — exactly what the client's `DbBackend::connect_ws` /
 `Change` payloads are treated as **opaque JSON**: the relay stores and forwards them
 without interpreting keeplin-core's model, so client-side model evolution never
 requires a server change. On top of that pass-through, the relay **materialises** the
-entities the server owns (see `fn materialize`); anything it does not model stays
+entities the server owns through durable projection jobs; anything it does not model stays
 opaque.
 
 Delivery guarantees: every accepted batch is persisted to the journal **before**
@@ -72,7 +72,7 @@ successful send. Because the client's `apply_change` is idempotent, the relay pr
 
 **Dependencies** — `axum` WebSocket types, `tokio::sync::{broadcast, RwLock}`,
 `serde_json`, `uuid`, `anyhow`, `tracing` (external);
-`keeplin_core::models::Change` (client repo, in `materialize`). Internal:
+`keeplin_core::models::Change` (client repo, in `projection`). Internal:
 `crate::auth` (`verify_token`), `crate::state::AppState`,
 `crate::store::{ChangeRow, UserDevice}` and the journal/cursor/materialisation
 methods of `store.rs`, `crate::bus::CH_SYNC_BATCH` (`bus.rs`).
@@ -690,14 +690,17 @@ async fn handle_incoming(
         .append_changes(user_id, device_id, sync_device_id, batch_id, &changes)
         .await?;
     if inserted.is_empty() {
-        tracing::debug!(%device_id, %batch_id, "duplicate batch ignored");
+        crate::projection::drain_batch(state, user_id, batch_id).await;
+        tracing::debug!(%device_id, %batch_id, "duplicate batch projection work checked");
         return Ok(());
     }
     tracing::info!(%user_id, %device_id, %batch_id, count = inserted.len(), "batch persisted");
 
-    materialize(state, user_id, &changes).await;
-
-    let frame = changes_frame(changes.iter());
+    let inserted_changes: Vec<_> = inserted
+        .iter()
+        .map(|(_, payload)| payload.clone())
+        .collect();
+    let frame = changes_frame(inserted_changes.iter());
     let _ = tx.send(FanoutMsg::Batch(Arc::new(FanoutBatch {
         origin: device_id,
         frame,
@@ -709,6 +712,7 @@ async fn handle_incoming(
             &format!("{}:{}", user_id, state.instance_id),
         )
         .await;
+    crate::projection::drain_available(state, Some(user_id), 64).await;
     Ok(())
 }
 ```
@@ -724,7 +728,7 @@ the connection; an empty `changes` array is ignored. Then:
    journal-first persistence, deduped per user by `(batch_id, batch_index)`.
    An empty insert result = a duplicate re-send of a batch already journaled: it
    was (or will be) delivered from the journal, so it is **not** fanned out twice.
-3. `materialize` — upsert the server-owned domain entities carried in the batch
+3. `projection::drain_available` — apply durable jobs derived from inserted journal rows
    (idempotent; failures logged, not fatal — the journal still holds the batch for
    relay, and a later change re-converges).
 4. Fan out locally: one pre-serialised `changes_frame` in a `FanoutBatch` tagged
@@ -734,7 +738,7 @@ the connection; an empty `changes` array is ignored. Then:
    sibling replicas wake this user's devices to re-scan (issue #45); our own bus
    listener ignores it by origin.
 
-**Dependencies** — `materialize`, `changes_frame`, `FanoutBatch`/`FanoutMsg`
+**Dependencies** — `projection::drain_available`, `changes_frame`, `FanoutBatch`/`FanoutMsg`
 (this file); `Store::{append_changes, notify}` (`store.rs`);
 `bus::CH_SYNC_BATCH` (`bus.rs`); `serde_json`, `uuid`.
 
@@ -744,167 +748,6 @@ the connection; an empty `changes` array is ignored. Then:
 `(user, batch_id, batch_index)`; materialisation resolves by version vector (a
 re-applied change is a no-op); client `apply_change` is idempotent. That triple is
 why every recovery path may freely re-deliver.
-
----
-
-## fn materialize
-
-**Identification** — private async function; marker `// md:fn materialize`.
-
-**Code** — complete and verbatim:
-
-```rust
-// md:fn materialize
-async fn materialize(state: &AppState, user_id: Uuid, changes: &[serde_json::Value]) {
-    use keeplin_core::models::Change;
-    for payload in changes {
-        let change: Change = match serde_json::from_value(payload.clone()) {
-            Ok(change) => change,
-            Err(_) => continue,
-        };
-        let result = match change {
-            Change::NotebookCreate { notebook } | Change::NotebookUpdate { notebook } => state
-                .store
-                .upsert_notebook(user_id, &notebook)
-                .await
-                .map(drop),
-            Change::NotebookDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_notebook(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::TagCreate { tag } | Change::TagUpdate { tag } => {
-                state.store.upsert_tag(user_id, &tag).await.map(drop)
-            }
-            Change::TagDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_tag(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::NoteTagAdd {
-                note_id,
-                tag_id,
-                updated_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .upsert_note_tag(
-                    user_id,
-                    note_id,
-                    tag_id,
-                    updated_at,
-                    None,
-                    &vv,
-                    &last_writer,
-                )
-                .await
-                .map(drop),
-            Change::NoteTagRemove {
-                note_id,
-                tag_id,
-                updated_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .upsert_note_tag(
-                    user_id,
-                    note_id,
-                    tag_id,
-                    updated_at,
-                    Some(updated_at),
-                    &vv,
-                    &last_writer,
-                )
-                .await
-                .map(drop),
-            Change::ResourceCreate { resource, data } => {
-                match state.store.upsert_resource_meta(user_id, &resource).await {
-                    Ok(true) => match data {
-                        Some(bytes) => state
-                            .store
-                            .put_resource_blob(user_id, resource.id, &bytes)
-                            .await
-                            .map(drop),
-                        None => Ok(()),
-                    },
-                    Ok(false) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
-            Change::ResourceDelete {
-                id,
-                deleted_at,
-                vv,
-                last_writer,
-            } => state
-                .store
-                .delete_resource(user_id, id, deleted_at, &vv, &last_writer)
-                .await
-                .map(drop),
-            Change::NoteCreate { .. } | Change::NoteUpdate { .. } | Change::NoteDelete { .. } => {
-                Ok(())
-            }
-        };
-        if let Err(e) = result {
-            tracing::warn!(error = %e, %user_id, "materialize: failed to apply change");
-        }
-    }
-}
-```
-
-**What it does** — Parses each relayed payload as a keeplin-core `Change` and
-materialises the domain entities the server owns, making the server their source of
-truth (the client DB is a cache; a wiped device rehydrates from REST). Mapping:
-
-- `NotebookCreate`/`NotebookUpdate` → `store.upsert_notebook`;
-  `NotebookDelete` → `store.delete_notebook` (soft-delete: `deleted_at` + vv).
-- `TagCreate`/`TagUpdate` → `store.upsert_tag`; `TagDelete` → `store.delete_tag`.
-- `NoteTagAdd` → `store.upsert_note_tag(…, deleted_at: None, …)`;
-  `NoteTagRemove` → the same upsert with `deleted_at: Some(updated_at)` — the
-  association is itself a versioned, soft-deletable entity.
-- `ResourceCreate` → `store.upsert_resource_meta`; if the change still carries the
-  binary inline (`data: Some`), store it to `resource_blobs` — backward
-  compatibility with older clients; new clients upload via
-  `PUT /api/resources/:id/data` and send `data: None`. The blob is stored only when
-  the tenant-scoped meta upsert reports the incoming version won (`Ok(true)`), and the
-  blob statement independently requires that the same `user_id` owns the metadata.
-- `ResourceDelete` → `store.delete_resource`.
-- **`Note*` changes → explicitly skipped, and anything unparseable is discarded before the
-  match**: notes are materialised by
-  the collaborative channel, and unknown payloads preserve the opaque-relay
-  behaviour. The match is deliberately exhaustive, so adding a core `Change` variant fails
-  compilation until its relay behavior and authorization cases are registered.
-
-Each store call first scopes both conflict reads and writes by the authenticated session's
-`user_id`, then resolves by version vector against that tenant's stored row using
-keeplin-core's `note_log::resolve`, so the server converges to the **same winner**
-every client computes. Failures are logged (`warn`) and the loop continues.
-
-**Dependencies** — `keeplin_core::models::Change` (client repo);
-`Store::{upsert_notebook, delete_notebook, upsert_tag, delete_tag, upsert_note_tag,
-upsert_resource_meta, put_resource_blob, delete_resource}` (`store.rs`).
-
-**Used by** — `handle_incoming` (this file) only. Exercised by
-`tests/materialize.rs`.
-
-**Repeated context** — **Version vectors + LWW, restated**: every materialised
-entity row stores `(vv, updated_at/deleted_at, last_writer)`; an incoming change
-wins if its vv dominates, loses if dominated, and ties break deterministically by
-`(timestamp, actor id)` — so replicas converge without locks. **Soft-delete**:
-deletions set `deleted_at` and keep the row (tombstone) so they replicate; REST
-serves live rows and the journal serves history.
 
 ---
 
@@ -959,7 +802,7 @@ this companion.
 - `deliver_backlog()` — defined here (EXTRACTED; 1 cross-file edge(s))
 - `relay_loop()` — defined here (EXTRACTED; 1 cross-file edge(s))
 - `handle_incoming()` — defined here (EXTRACTED; 1 cross-file edge(s))
-- `materialize()` — defined here (EXTRACTED; 1 cross-file edge(s))
+- `projection::drain_available()` — called here to reduce read-after-write latency (INFERRED)
 - `FanoutBatch` — defined here (EXTRACTED; file-local)
 - `FanoutMsg` — defined here (EXTRACTED; file-local)
 
@@ -999,5 +842,4 @@ and carrying its marker in the code:
 | 14 | `fn deliver_backlog` | `// md:fn deliver_backlog` | fn deliver_backlog |
 | 15 | `fn relay_loop` | `// md:fn relay_loop` | fn relay_loop |
 | 16 | `fn handle_incoming` | `// md:fn handle_incoming` | fn handle_incoming |
-| 17 | `fn materialize` | `// md:fn materialize` | fn materialize |
 | 18 | `fn changes_frame` | `// md:fn changes_frame` | fn changes_frame |

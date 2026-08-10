@@ -990,9 +990,23 @@ async fn a_never_connected_device_does_not_block_pruning(pool: PgPool) {
         )
         .await
         .unwrap();
-    let max = *seqs.last().unwrap();
+    let max = seqs.last().unwrap().0;
     store.advance_cursor(connected.id, max).await.unwrap();
 
+    let pruned = store
+        .prune_delivered_changes(Utc::now() + Duration::hours(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        pruned, 0,
+        "an unfinished projection job must retain its journal row"
+    );
+    sqlx::query("DELETE FROM projection_jobs WHERE user_id = $1 AND batch_id = $2")
+        .bind(u.id)
+        .bind(batch)
+        .execute(store.pool())
+        .await
+        .unwrap();
     let pruned = store
         .prune_delivered_changes(Utc::now() + Duration::hours(1))
         .await

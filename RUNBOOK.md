@@ -9,6 +9,37 @@ recreate the service anywhere.
 The server applies its own schema migrations at startup (`sqlx::migrate!`), so a fresh binary against
 an empty database is ready with no extra step.
 
+## Durable projection queue
+
+Every replica runs an in-process projection worker at a 250 ms cadence. Normal projection latency
+has a fixed p99 budget of 5 seconds. The bounded backoff keeps one transient retry below the fixed
+60 second worst-case budget.
+
+Monitor `keeplin_projection_jobs_outstanding`, `keeplin_projection_jobs_retrying`,
+`keeplin_projection_jobs_dead_lettered`, and `keeplin_projection_oldest_outstanding_seconds` at
+`GET /api/metrics?format=prometheus`. Alert on any dead letter, an oldest age above 5 seconds in the
+normal regime, or sustained outstanding growth. Inspect `last_error`, `attempts`, `available_at`,
+and lease columns in `projection_jobs`; never delete queue rows manually because they retain their
+journal input against pruning.
+
+Re-drive without broadcasting:
+
+```bash
+cargo run -p keeplin-srv --bin reconcile-projections -- --user USER_UUID
+cargo run -p keeplin-srv --bin reconcile-projections -- --from 2026-08-01T00:00:00Z --to 2026-08-02T00:00:00Z
+```
+
+Options may be combined; with none, every retained materializing journal change is re-derived. The
+command runs all forward migrations before reconciliation, resets matching dead letters without
+resetting active retry budgets, drains work, and prints queue counts. Do not run it when preserving
+an older schema for a rollback rehearsal. Counts are aggregate; inspect `last_error` for the input
+that failed. Before rollback, run an unscoped reconciliation and require outstanding, retrying, and
+dead-lettered counts to be zero (`outstanding` already includes `retrying`; checking both makes the
+gate explicit).
+
+The server and reconciliation binaries require `DB_MAX_CONNECTIONS >= 2`: one connection may hold
+a projection claim while the projection transaction acquires another.
+
 ## What to back up
 
 | Item | Where | Notes |

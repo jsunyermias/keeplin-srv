@@ -1436,9 +1436,9 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
         sync_device_id: &str,
         batch_id: Uuid,
         payloads: &[serde_json::Value],
-    ) -> Result<Vec<i64>, AppError> {
+    ) -> Result<Vec<(i64, serde_json::Value)>, AppError> {
         let mut tx = self.pool.begin().await?;
-        let mut seqs = Vec::with_capacity(payloads.len());
+        let mut inserted = Vec::with_capacity(payloads.len());
         for (idx, payload) in payloads.iter().enumerate() {
             let row = sqlx::query(
                 r#"INSERT INTO changes
@@ -1456,11 +1456,21 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
             .fetch_optional(&mut *tx)
             .await?;
             if let Some(row) = row {
-                seqs.push(row.get::<i64, _>("seq"));
+                sqlx::query(
+                    r#"INSERT INTO projection_jobs (user_id, batch_id, batch_index)
+                       VALUES ($1, $2, $3)
+                       ON CONFLICT (user_id, batch_id, batch_index) DO NOTHING"#,
+                )
+                .bind(user_id)
+                .bind(batch_id)
+                .bind(idx as i32)
+                .execute(&mut *tx)
+                .await?;
+                inserted.push((row.get::<i64, _>("seq"), payload.clone()));
             }
         }
         tx.commit().await?;
-        Ok(seqs)
+        Ok(inserted)
     }
 ```
 
@@ -1671,6 +1681,12 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
                      FROM user_devices d
                      JOIN device_cursors dc ON dc.device_id = d.id
                      WHERE d.user_id = c.user_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM projection_jobs pj
+                     WHERE pj.user_id = c.user_id
+                       AND pj.batch_id = c.batch_id
+                       AND pj.batch_index = c.batch_index
                  )"#,
         )
         .bind(older_than)
@@ -3514,31 +3530,13 @@ the server-side hook where the note delete is applied.
         user_id: Uuid,
         nb: &keeplin_core::models::Notebook,
     ) -> Result<bool, AppError> {
-        for attempt in 1..=3 {
-            let mut tx = self.pool.begin().await?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-                .execute(&mut *tx)
-                .await?;
-            let result = self.upsert_notebook_on(&mut tx, user_id, nb).await;
-            match result {
-                Ok(value) => match tx.commit().await {
-                    Ok(()) => return Ok(value),
-                    Err(error)
-                        if error.as_database_error().and_then(|e| e.code()).as_deref()
-                            == Some("40001") => {}
-                    Err(error) => return Err(error.into()),
-                },
-                Err(AppError::Database(sqlx::Error::Database(database)))
-                    if database.code().as_deref() == Some("40001") => {}
-                Err(error) => return Err(error),
-            }
-            if attempt == 3 {
-                return Err(AppError::Internal(
-                    "serializable notebook write retry exhausted".into(),
-                ));
-            }
-        }
-        unreachable!()
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let value = self.upsert_notebook_on(&mut tx, user_id, nb).await?;
+        tx.commit().await?;
+        Ok(value)
     }
 
     pub async fn upsert_notebook_on(
@@ -3621,33 +3619,15 @@ still returns `false` before the insert.
         vv: &VersionVector,
         last_writer: &str,
     ) -> Result<bool, AppError> {
-        for attempt in 1..=3 {
-            let mut tx = self.pool.begin().await?;
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-                .execute(&mut *tx)
-                .await?;
-            let result = self
-                .delete_notebook_on(&mut tx, user_id, id, deleted_at, vv, last_writer)
-                .await;
-            match result {
-                Ok(value) => match tx.commit().await {
-                    Ok(()) => return Ok(value),
-                    Err(error)
-                        if error.as_database_error().and_then(|e| e.code()).as_deref()
-                            == Some("40001") => {}
-                    Err(error) => return Err(error.into()),
-                },
-                Err(AppError::Database(sqlx::Error::Database(database)))
-                    if database.code().as_deref() == Some("40001") => {}
-                Err(error) => return Err(error),
-            }
-            if attempt == 3 {
-                return Err(AppError::Internal(
-                    "serializable notebook write retry exhausted".into(),
-                ));
-            }
-        }
-        unreachable!()
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let value = self
+            .delete_notebook_on(&mut tx, user_id, id, deleted_at, vv, last_writer)
+            .await?;
+        tx.commit().await?;
+        Ok(value)
     }
 
     pub async fn delete_notebook_on(
@@ -3728,6 +3708,10 @@ genuinely unknown ID.
         tag: &keeplin_core::models::Tag,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(tag.id)
+            .execute(&mut *tx)
+            .await?;
         if let Some(row) =
             sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
@@ -3772,13 +3756,13 @@ genuinely unknown ID.
     }
 ```
 
-**What it does** — Applies the tenant-scoped conflict pattern for tags. `system` (issue #128) is persisted as `$9` and
+**What it does** — Applies the tenant-scoped conflict pattern for tags. A transaction-scoped advisory lock on the tag ID serializes the absent-row read with the conflict write, so concurrent first inserts cannot replace the deterministic LWW winner in physical commit order. `system` (issue #128) is persisted as `$9` and
 refreshed on conflict (`system = EXCLUDED.system`), so a `TagUpdate` that flips the flag
 converges like any other field. The whole core `Tag` reaches here via `materialize`, so the
 flag rides the existing `TagCreate`/`TagUpdate` changes with no new op. A foreign-ID conflict
 is a no-op reported like a fresh insert, while a losing same-tenant version remains `false`.
 
-**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+**Dependencies** — `pg_advisory_xact_lock` — serializes all writers for one tag ID through transaction end; expects `hashtextextended` to derive the same key for every writer of that entity. `sqlx` queries run on `self.pool` against the Postgres schema in `migrations/`; expects the `tags(id)` primary key and conflict update to remain in the same transaction as the guarded read.
 
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
@@ -3871,6 +3855,14 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         last_writer: &str,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, $2::text, $3::text), 0))",
+        )
+        .bind(user_id)
+        .bind(note_id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM note_tags
              WHERE user_id = $1 AND note_id = $2 AND tag_id = $3 FOR UPDATE",
@@ -3914,9 +3906,9 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
     }
 ```
 
-**What it does** — the association is itself versioned and soft-deletable: add = `deleted_at NULL`, remove = `deleted_at = updated_at`.
+**What it does** — The association is itself versioned and soft-deletable: add = `deleted_at NULL`, remove = `deleted_at = updated_at`. A transaction-scoped advisory lock derived from `(user_id, note_id, tag_id)` closes the absent-row race before the guarded read, preserving deterministic LWW selection under concurrent first inserts.
 
-**Dependencies** — `sqlx` query (`query!` / `query_as!`) run on `self.pool` or a passed executor against the Postgres schema in `migrations/`; human-readable columns cross `self.cipher` (`encrypt`/`decrypt`) where applicable. Expects the referenced tables/columns to exist and the row shape to match the mapped struct.
+**Dependencies** — `pg_advisory_xact_lock` — serializes all writers for one user/note/tag tuple through transaction end; expects the concatenated fixed-width UUIDs to derive the same `hashtextextended` key for that tuple. `sqlx` queries run on `self.pool` against the Postgres schema in `migrations/`; expects the composite primary key and conflict update to remain in the guarded transaction.
 
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
@@ -3998,6 +3990,95 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn apply_resource_create
+
+**Identification** — atomic resource projection; marker `// md:impl Store > fn apply_resource_create`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn apply_resource_create
+    pub async fn apply_resource_create(
+        &self,
+        user_id: Uuid,
+        resource: &keeplin_core::models::Resource,
+        data: Option<&[u8]>,
+    ) -> Result<bool, AppError> {
+        let incoming_ts = resource.deleted_at.unwrap_or(resource.created_at);
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(resource.id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(row) = sqlx::query(
+            "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(resource.id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let local_vv = row.get::<Json<VersionVector>, _>("vv").0;
+            if !incoming_wins(
+                &local_vv,
+                row.get("ts"),
+                &row.get::<String, _>("last_writer"),
+                &resource.vv,
+                incoming_ts,
+                &resource.last_writer,
+            ) {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        let metadata = sqlx::query(
+            r#"INSERT INTO resources
+                   (id, user_id, title, mime_type, file_name, size, created_at, deleted_at, vv, last_writer, duration_ms, width, height, note_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+               ON CONFLICT (id) DO UPDATE SET
+                   title = EXCLUDED.title, mime_type = EXCLUDED.mime_type,
+                   file_name = EXCLUDED.file_name, size = EXCLUDED.size,
+                   deleted_at = EXCLUDED.deleted_at, vv = EXCLUDED.vv,
+                   last_writer = EXCLUDED.last_writer, duration_ms = EXCLUDED.duration_ms,
+                   width = EXCLUDED.width, height = EXCLUDED.height, note_id = EXCLUDED.note_id
+               WHERE resources.user_id = EXCLUDED.user_id"#,
+        )
+        .bind(resource.id).bind(user_id).bind(&resource.title).bind(&resource.mime_type)
+        .bind(&resource.file_name).bind(resource.size as i64).bind(resource.created_at)
+        .bind(resource.deleted_at).bind(Json(&resource.vv)).bind(&resource.last_writer)
+        .bind(resource.duration_ms.map(|duration| duration as i64))
+        .bind(resource.dimensions.map(|(width, _)| width as i32))
+        .bind(resource.dimensions.map(|(_, height)| height as i32)).bind(resource.note_id)
+        .execute(&mut *tx).await?;
+        if metadata.rows_affected() != 1 {
+            return Err(AppError::Internal(
+                "invalid projection payload: resource id belongs to another user".into(),
+            ));
+        }
+        if let Some(bytes) = data {
+            sqlx::query(
+                "INSERT INTO resource_blobs (resource_id, data) VALUES ($1, $2) ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data",
+            )
+            .bind(resource.id)
+            .bind(bytes)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+```
+
+**What it does** — Applies resource metadata and optional bytes in one transaction so a crash or competing applier cannot create a mixed version.
+
+**Dependencies** — `incoming_wins` resolves metadata; expects the blob write to commit or roll back with its winning metadata.
+
+**Used by** — `projection::apply_change`.
+
+**Repeated context** — Tenant scope and last-writer resolution are mandatory.
+
+---
 
 ### fn delete_resource
 
@@ -4868,6 +4949,7 @@ this companion.
 | 111 | `fn delete_tag` | `// md:impl Store > fn delete_tag` |
 | 112 | `fn upsert_note_tag` | `// md:impl Store > fn upsert_note_tag` |
 | 113 | `fn upsert_resource_meta` | `// md:impl Store > fn upsert_resource_meta` |
+| 129 | `fn apply_resource_create` | `// md:impl Store > fn apply_resource_create` |
 | 114 | `fn delete_resource` | `// md:impl Store > fn delete_resource` |
 | 115 | `fn put_resource_blob` | `// md:impl Store > fn put_resource_blob` |
 | 116 | `fn get_resource_blob` | `// md:impl Store > fn get_resource_blob` |
