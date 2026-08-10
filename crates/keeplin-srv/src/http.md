@@ -3727,8 +3727,8 @@ async fn import_note(
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, AppError> {
     let limit = state.config.max_notes_per_user;
-    let mut tx = state.store.lock_note_quota(user.user_id).await?;
-    if limit > 0 {
+    let mut tx = if limit > 0 {
+        let mut tx = state.store.lock_note_quota(user.user_id).await?;
         let count = state
             .store
             .count_live_notes_for_user_on(&mut *tx, user.user_id)
@@ -3738,7 +3738,10 @@ async fn import_note(
                 "note limit reached ({limit})"
             )));
         }
-    }
+        tx
+    } else {
+        state.store.pool().begin().await?
+    };
     let note = state
         .store
         .create_note_on(&mut *tx, None, &body.title, user.user_id)
@@ -3776,14 +3779,20 @@ async fn import_note(
 ```
 
 **What it does** — `POST /api/import` (design §10): offline → server migration for
-one note. Creates the note, splits the flat body on `\n` into one versioned line
-per row, and seeds version vectors with the importer's **device** component (the
-same actor collaborative ops are signed with): each line gets
-`{device: 1}`; the order entity gets `{device: line_count}`. Returns
-`{note_id, line_count}`.
+one note. When the note quota is enabled, it takes the user's quota lock before the
+deciding count; when disabled, it starts an ordinary transaction without serializing
+imports for that user. In both cases it atomically creates the note and empty order,
+splits the flat body on `\n` into one versioned line per row, and seeds version vectors
+with the importer's **device** component (the same actor collaborative ops are signed
+with): each line gets `{device: 1}`; the order entity gets `{device: line_count}`.
+Returns `{note_id, line_count}`.
 
-**Dependencies** — `Store::{create_note, insert_line, set_note_order}`;
-`keeplin_core::…::VersionVector`.
+**Dependencies** — `Store::{lock_note_quota, pool, count_live_notes_for_user_on,
+create_note_on, initialize_note_order_on, insert_line_on, set_note_order_on}` — creates
+one transaction, conditionally locks and counts when quota enforcement is enabled, and
+keeps every import write atomic; expects the lock to precede the deciding read and every
+`_on` operation to use the supplied transaction. `keeplin_core::…::VersionVector` —
+constructs line and order clocks; expects the device identifier to be the actor component.
 
 **Used by** — routed in `router`; the test harnesses use it to seed notes.
 

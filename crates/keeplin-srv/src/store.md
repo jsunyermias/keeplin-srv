@@ -1976,7 +1976,6 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
             _ => AppError::from(e),
         })?;
         note.title = title.to_string();
-        note.title = title.to_string();
         Ok(note)
     }
 ```

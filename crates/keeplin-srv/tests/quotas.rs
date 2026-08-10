@@ -354,8 +354,8 @@ fn quota_write_inventory_is_complete() {
         assert!(store.contains(domain), "missing lock domain {domain}");
     }
     assert!(store.contains("count_live_notes_for_user_on"));
-    assert!(!http.contains("count_live_notes_for_user(user.user_id)"));
-    assert!(!http.contains("user_blob_bytes_excluding(user.user_id, id)"));
+    assert!(!http.contains(".count_live_notes_for_user("));
+    assert!(!http.contains(".user_blob_bytes_excluding("));
     assert!(!http.contains("run_serializable"));
     let note_quota = store
         .split("// md:impl Store > fn lock_note_quota")

@@ -940,7 +940,6 @@ impl Store {
             _ => AppError::from(e),
         })?;
         note.title = title.to_string();
-        note.title = title.to_string();
         Ok(note)
     }
 

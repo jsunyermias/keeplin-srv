@@ -2010,8 +2010,8 @@ async fn import_note(
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, AppError> {
     let limit = state.config.max_notes_per_user;
-    let mut tx = state.store.lock_note_quota(user.user_id).await?;
-    if limit > 0 {
+    let mut tx = if limit > 0 {
+        let mut tx = state.store.lock_note_quota(user.user_id).await?;
         let count = state
             .store
             .count_live_notes_for_user_on(&mut *tx, user.user_id)
@@ -2021,7 +2021,10 @@ async fn import_note(
                 "note limit reached ({limit})"
             )));
         }
-    }
+        tx
+    } else {
+        state.store.pool().begin().await?
+    };
     let note = state
         .store
         .create_note_on(&mut *tx, None, &body.title, user.user_id)
