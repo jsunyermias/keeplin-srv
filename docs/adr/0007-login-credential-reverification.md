@@ -1,11 +1,11 @@
 # 0007 — A login must re-verify its credential inside the operation that mints the session
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-10
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#151](https://github.com/jsunyermias/keeplin-srv/issues/151)
-- Acceptance PR: pending
+- Acceptance PR: [keeplin-srv#157](https://github.com/jsunyermias/keeplin-srv/pull/157)
 - Supersedes: [ADR 0005](0005-serializable-participant-set.md) in part — its enumeration of nine
   serializable HTTP handlers becomes ten with the addition of `login`, and only that. ADR 0005's
   invariant 2 (the writer set over note rows, note shares, notebook rows, notebook shares and
