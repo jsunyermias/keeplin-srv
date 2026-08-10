@@ -72,6 +72,63 @@ retention window — the materialised tables, not the journal, are the source of
 
 ---
 
+## AdvisoryLockDomain
+
+**Identification** — private advisory-lock namespace enum; marker `// md:AdvisoryLockDomain`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:AdvisoryLockDomain
+#[derive(Clone, Copy)]
+enum AdvisoryLockDomain {
+    NoteOrder,
+    TagProjection,
+    NoteTagProjection,
+    ResourceProjection,
+    NoteQuota,
+    BlobQuota,
+}
+```
+
+**What it does** — Names every production advisory-lock namespace so unrelated invariants cannot silently share a key space.
+
+**Dependencies** — —.
+
+**Used by** — the shared lock constructor and every production advisory-lock transaction.
+
+**Repeated context** — each transaction may acquire at most one advisory lock.
+
+## impl AdvisoryLockDomain
+
+**Identification** — domain-name mapping; marker `// md:impl AdvisoryLockDomain`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:impl AdvisoryLockDomain
+impl AdvisoryLockDomain {
+    fn name(self) -> &'static str {
+        match self {
+            Self::NoteOrder => "note-order",
+            Self::TagProjection => "tag-projection",
+            Self::NoteTagProjection => "note-tag-projection",
+            Self::ResourceProjection => "resource-projection",
+            Self::NoteQuota => "note-quota",
+            Self::BlobQuota => "blob-quota",
+        }
+    }
+}
+```
+
+**What it does** — Maps each typed domain to a stable discriminator mixed into the hashed lock input.
+
+**Dependencies** — `AdvisoryLockDomain` — supplies the exhaustive variants; expects additions to receive unique names.
+
+**Used by** — `Store::acquire_advisory_lock_on`.
+
+**Repeated context** — changing a name changes lock compatibility across rolling server instances.
+
 ## PageCursor
 
 **Identification** — public struct; marker `// md:PageCursor`.
@@ -1872,27 +1929,8 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
         owner_id: Uuid,
     ) -> Result<Note, AppError> {
         let mut tx = self.pool.begin().await?;
-        let mut note = sqlx::query_as::<_, Note>(&format!(
-            "INSERT INTO notes (id, title, owner_id) VALUES ($1, $2, $3) RETURNING {NOTE_COLS}"
-        ))
-        .bind(id.unwrap_or_else(Uuid::new_v4))
-        .bind(self.cipher.encrypt(title)?)
-        .bind(owner_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict,
-            _ => AppError::from(e),
-        })?;
-        note.title = title.to_string();
-        sqlx::query(
-            r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
-               VALUES ($1, '[]', now(), '{}', $2)"#,
-        )
-        .bind(note.id)
-        .bind(owner_id.to_string())
-        .execute(&mut *tx)
-        .await?;
+        let note = self.create_note_on(&mut *tx, id, title, owner_id).await?;
+        Self::initialize_note_order_on(&mut *tx, note.id, owner_id).await?;
         tx.commit().await?;
         Ok(note)
     }
@@ -1905,6 +1943,86 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn create_note_on
+
+**Identification** — executor-aware note row insert; marker `// md:impl Store > fn create_note_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn create_note_on
+    pub async fn create_note_on<'e, E>(
+        &self,
+        exec: E,
+        id: Option<Uuid>,
+        title: &str,
+        owner_id: Uuid,
+    ) -> Result<Note, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let encrypted_title = self.cipher.encrypt(title)?;
+        let mut note = sqlx::query_as::<_, Note>(&format!(
+            "INSERT INTO notes (id, title, owner_id) VALUES ($1, $2, $3) RETURNING {NOTE_COLS}"
+        ))
+        .bind(id.unwrap_or_else(Uuid::new_v4))
+        .bind(encrypted_title)
+        .bind(owner_id)
+        .fetch_one(exec)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict,
+            _ => AppError::from(e),
+        })?;
+        note.title = title.to_string();
+        Ok(note)
+    }
+```
+
+**What it does** — Inserts and decrypts the returned note on the caller's transaction, preserving conflict mapping.
+
+**Dependencies** — `sqlx::Executor` — runs on the supplied transaction; expects the caller to initialize order and commit or roll back atomically.
+
+**Used by** — `create_note`, HTTP create, and HTTP import.
+
+**Repeated context** — encrypted titles never persist as plaintext.
+
+### fn initialize_note_order_on
+
+**Identification** — executor-aware initial order insert; marker `// md:impl Store > fn initialize_note_order_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn initialize_note_order_on
+    pub async fn initialize_note_order_on<'e, E>(
+        exec: E,
+        note_id: Uuid,
+        owner_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            r#"INSERT INTO note_line_order (note_id, order_json, updated_at, vv, last_writer)
+               VALUES ($1, '[]', now(), '{}', $2)"#,
+        )
+        .bind(note_id)
+        .bind(owner_id.to_string())
+        .execute(exec)
+        .await?;
+        Ok(())
+    }
+```
+
+**What it does** — Creates the empty line-order row on the same transaction as its note.
+
+**Dependencies** — `sqlx::Executor` — executes the insert; expects a matching note row in the transaction.
+
+**Used by** — `create_note`, HTTP create, and HTTP import.
+
+**Repeated context** — a note and its initial order are atomic.
 
 ### fn get_note
 
@@ -3210,10 +3328,12 @@ the server-side hook where the note delete is applied.
         note_id: Uuid,
     ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(note_id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteOrder,
+            note_id.to_string(),
+        )
+        .await?;
         Ok(tx)
     }
 ```
@@ -3225,6 +3345,103 @@ the server-side hook where the note delete is applied.
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn acquire_advisory_lock_on
+
+**Identification** — shared domain-separated lock constructor; marker `// md:impl Store > fn acquire_advisory_lock_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn acquire_advisory_lock_on
+    async fn acquire_advisory_lock_on<'e, E>(
+        exec: E,
+        domain: AdvisoryLockDomain,
+        key: String,
+    ) -> Result<(), AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, ':', $2::text), 0))",
+        )
+        .bind(domain.name())
+        .bind(key)
+        .execute(exec)
+        .await?;
+        Ok(())
+    }
+```
+
+**What it does** — Acquires the sole production transaction advisory lock by hashing a named domain and entity key together.
+
+**Dependencies** — `pg_advisory_xact_lock` and `hashtextextended` — hold a stable transaction-scoped 64-bit lock; expects all production callers to use this constructor.
+
+**Used by** — note order, projection, and quota lock entry points.
+
+**Repeated context** — callers acquire at most one advisory lock per transaction.
+
+### fn lock_note_quota
+
+**Identification** — note-quota transaction opener; marker `// md:impl Store > fn lock_note_quota`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn lock_note_quota
+    pub async fn lock_note_quota(
+        &self,
+        user_id: Uuid,
+    ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteQuota,
+            user_id.to_string(),
+        )
+        .await?;
+        Ok(tx)
+    }
+```
+
+**What it does** — Begins a transaction and serializes one user's note-count decision before returning it.
+
+**Dependencies** — `acquire_advisory_lock_on` — uses `NoteQuota`; expects the deciding read and write to remain on the returned transaction.
+
+**Used by** — HTTP create and import.
+
+**Repeated context** — lock failure is an internal error, not a quota refusal.
+
+### fn lock_blob_quota
+
+**Identification** — blob-quota transaction opener; marker `// md:impl Store > fn lock_blob_quota`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn lock_blob_quota
+    pub async fn lock_blob_quota(
+        &self,
+        user_id: Uuid,
+    ) -> Result<sqlx::Transaction<'static, Postgres>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::BlobQuota,
+            user_id.to_string(),
+        )
+        .await?;
+        Ok(tx)
+    }
+```
+
+**What it does** — Begins a transaction and serializes one user's blob-byte decision before returning it.
+
+**Dependencies** — `acquire_advisory_lock_on` — uses `BlobQuota`; expects the deciding read and blob write to remain on the returned transaction.
+
+**Used by** — HTTP resource upload.
+
+**Repeated context** — note and blob quota domains deliberately differ.
 
 ### fn insert_collab_event
 
@@ -3708,10 +3925,12 @@ genuinely unknown ID.
         tag: &keeplin_core::models::Tag,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(tag.id)
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::TagProjection,
+            tag.id.to_string(),
+        )
+        .await?;
         if let Some(row) =
             sqlx::query("SELECT vv, updated_at, last_writer FROM tags WHERE id = $1 AND user_id = $2 FOR UPDATE")
                 .bind(tag.id)
@@ -3855,13 +4074,11 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         last_writer: &str,
     ) -> Result<bool, AppError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, $2::text, $3::text), 0))",
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::NoteTagProjection,
+            format!("{user_id}:{note_id}:{tag_id}"),
         )
-        .bind(user_id)
-        .bind(note_id)
-        .bind(tag_id)
-        .execute(&mut *tx)
         .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, updated_at, last_writer FROM note_tags
@@ -4007,10 +4224,12 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
     ) -> Result<bool, AppError> {
         let incoming_ts = resource.deleted_at.unwrap_or(resource.created_at);
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(resource.id)
-            .execute(&mut *tx)
-            .await?;
+        Self::acquire_advisory_lock_on(
+            &mut *tx,
+            AdvisoryLockDomain::ResourceProjection,
+            resource.id.to_string(),
+        )
+        .await?;
         if let Some(row) = sqlx::query(
             "SELECT vv, COALESCE(deleted_at, created_at) AS ts, last_writer FROM resources WHERE id = $1 AND user_id = $2 FOR UPDATE",
         )
@@ -4156,17 +4375,8 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
         resource_id: Uuid,
         data: &[u8],
     ) -> Result<bool, AppError> {
-        let result = sqlx::query(
-            r#"INSERT INTO resource_blobs (resource_id, data)
-               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
-               ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
-        )
-        .bind(resource_id)
-        .bind(user_id)
-        .bind(data)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        self.put_resource_blob_on(&self.pool, user_id, resource_id, data)
+            .await
     }
 ```
 
@@ -4177,6 +4387,46 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn put_resource_blob_on
+
+**Identification** — executor-aware blob upsert; marker `// md:impl Store > fn put_resource_blob_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn put_resource_blob_on
+    pub async fn put_resource_blob_on<'e, E>(
+        &self,
+        exec: E,
+        user_id: Uuid,
+        resource_id: Uuid,
+        data: &[u8],
+    ) -> Result<bool, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            r#"INSERT INTO resource_blobs (resource_id, data)
+               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
+               ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
+        )
+        .bind(resource_id)
+        .bind(user_id)
+        .bind(data)
+        .execute(exec)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+```
+
+**What it does** — Replaces a resource blob only for its owning user on the caller's transaction.
+
+**Dependencies** — `sqlx::Executor` — executes the ownership-filtered upsert; expects quota reads to use the same transaction when enabled.
+
+**Used by** — pool wrapper and HTTP quota path.
+
+**Repeated context** — accounting uses stored blob bytes, never client-declared resource size.
 
 ### fn get_resource_blob
 
@@ -4599,13 +4849,8 @@ attachments).
 ```rust
     // md:impl Store > fn count_live_notes_for_user
     pub async fn count_live_notes_for_user(&self, user_id: Uuid) -> Result<i64, AppError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM notes WHERE owner_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(count)
+        let mut conn = self.pool.acquire().await?;
+        self.count_live_notes_for_user_on(&mut *conn, user_id).await
     }
 ```
 
@@ -4616,6 +4861,40 @@ attachments).
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn count_live_notes_for_user_on
+
+**Identification** — executor-aware live-note aggregate; marker `// md:impl Store > fn count_live_notes_for_user_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn count_live_notes_for_user_on
+    pub async fn count_live_notes_for_user_on<'e, E>(
+        &self,
+        exec: E,
+        user_id: Uuid,
+    ) -> Result<i64, AppError>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notes WHERE owner_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(exec)
+        .await?;
+        Ok(count)
+    }
+```
+
+**What it does** — Counts one owner's non-deleted notes on the caller's locked transaction.
+
+**Dependencies** — `sqlx::Executor` — supplies the deciding snapshot; expects quota writes to use that same transaction.
+
+**Used by** — pool wrapper, HTTP create, and HTTP import.
+
+**Repeated context** — soft-deleted notes do not consume quota.
 
 ### fn count_live_notes_in_notebook
 
@@ -4838,6 +5117,8 @@ this companion.
 | # | Block (source order) | Marker in code |
 |---|----------------------|----------------|
 | 1 | `Overview` | `// md:Overview` |
+| 1a | `AdvisoryLockDomain` | `// md:AdvisoryLockDomain` |
+| 1b | `impl AdvisoryLockDomain` | `// md:impl AdvisoryLockDomain` |
 | 2 | `PageCursor` | `// md:PageCursor` |
 | 3 | `impl PageCursor` (container) | `// md:impl PageCursor` |
 | 4 | `fn new` | `// md:impl PageCursor > fn new` |
@@ -4901,6 +5182,8 @@ this companion.
 | 62 | `fn ping` | `// md:impl Store > fn ping` |
 | 63 | `fn counts` | `// md:impl Store > fn counts` |
 | 64 | `fn create_note` | `// md:impl Store > fn create_note` |
+| 64a | `fn create_note_on` | `// md:impl Store > fn create_note_on` |
+| 64b | `fn initialize_note_order_on` | `// md:impl Store > fn initialize_note_order_on` |
 | 65 | `fn get_note` | `// md:impl Store > fn get_note` |
 | 66 | `fn list_notes_for_user` | `// md:impl Store > fn list_notes_for_user` |
 | 67 | `fn update_note_meta` | `// md:impl Store > fn update_note_meta` |
@@ -4934,6 +5217,9 @@ this companion.
 | 96 | `fn pool` | `// md:impl Store > fn pool` |
 | 97 | `fn notify` | `// md:impl Store > fn notify` |
 | 98 | `fn lock_note_order` | `// md:impl Store > fn lock_note_order` |
+| 98a | `fn acquire_advisory_lock_on` | `// md:impl Store > fn acquire_advisory_lock_on` |
+| 98b | `fn lock_note_quota` | `// md:impl Store > fn lock_note_quota` |
+| 98c | `fn lock_blob_quota` | `// md:impl Store > fn lock_blob_quota` |
 | 99 | `fn insert_collab_event` | `// md:impl Store > fn insert_collab_event` |
 | 100 | `fn get_collab_event` | `// md:impl Store > fn get_collab_event` |
 | 101 | `fn prune_collab_events` | `// md:impl Store > fn prune_collab_events` |
@@ -4952,6 +5238,7 @@ this companion.
 | 129 | `fn apply_resource_create` | `// md:impl Store > fn apply_resource_create` |
 | 114 | `fn delete_resource` | `// md:impl Store > fn delete_resource` |
 | 115 | `fn put_resource_blob` | `// md:impl Store > fn put_resource_blob` |
+| 115a | `fn put_resource_blob_on` | `// md:impl Store > fn put_resource_blob_on` |
 | 116 | `fn get_resource_blob` | `// md:impl Store > fn get_resource_blob` |
 | 117 | `fn resource_owned_by` | `// md:impl Store > fn resource_owned_by` |
 | 118 | `fn list_notebooks` | `// md:impl Store > fn list_notebooks` |
@@ -4963,5 +5250,6 @@ this companion.
 | 124 | `fn list_note_tag_ids` | `// md:impl Store > fn list_note_tag_ids` |
 | 125 | `fn user_blob_bytes_excluding` | `// md:impl Store > fn user_blob_bytes_excluding` |
 | 126 | `fn count_live_notes_for_user` | `// md:impl Store > fn count_live_notes_for_user` |
+| 126a | `fn count_live_notes_for_user_on` | `// md:impl Store > fn count_live_notes_for_user_on` |
 | 127 | `fn count_live_notes_in_notebook` | `// md:impl Store > fn count_live_notes_in_notebook` |
 | 128 | `fn count_live_lines_on` | `// md:impl Store > fn count_live_lines_on` |

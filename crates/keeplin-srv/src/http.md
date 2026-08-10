@@ -1865,27 +1865,44 @@ async fn put_resource_data(
     Path(id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if !state.store.resource_owned_by(id, user.user_id).await? {
-        return Err(AppError::NotFound);
-    }
     let limit = state.config.max_user_storage_bytes;
     if limit > 0 {
+        let mut tx = state.store.lock_blob_quota(user.user_id).await?;
+        if !state
+            .store
+            .resource_owned_by_on(&mut tx, id, user.user_id)
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
         let others = state
             .store
-            .user_blob_bytes_excluding(user.user_id, id)
+            .user_blob_bytes_excluding_on(&mut tx, user.user_id, id)
             .await?;
         if others + body.len() as i64 > limit {
             return Err(AppError::QuotaExceeded(format!(
                 "storage limit reached ({limit} bytes)"
             )));
         }
-    }
-    let written = state
-        .store
-        .put_resource_blob(user.user_id, id, &body)
-        .await?;
-    if !written {
-        return Err(AppError::NotFound);
+        let written = state
+            .store
+            .put_resource_blob_on(&mut *tx, user.user_id, id, &body)
+            .await?;
+        if !written {
+            return Err(AppError::NotFound);
+        }
+        tx.commit().await?;
+    } else {
+        if !state.store.resource_owned_by(id, user.user_id).await? {
+            return Err(AppError::NotFound);
+        }
+        let written = state
+            .store
+            .put_resource_blob(user.user_id, id, &body)
+            .await?;
+        if !written {
+            return Err(AppError::NotFound);
+        }
     }
     Ok(Json(serde_json::json!({ "ok": true, "size": body.len() })))
 }
@@ -2041,12 +2058,23 @@ async fn create_note(
 ) -> Result<Json<Note>, AppError> {
     let limit = state.config.max_notes_per_user;
     if limit > 0 {
-        let count = state.store.count_live_notes_for_user(user.user_id).await?;
+        let mut tx = state.store.lock_note_quota(user.user_id).await?;
+        let count = state
+            .store
+            .count_live_notes_for_user_on(&mut *tx, user.user_id)
+            .await?;
         if count >= limit {
             return Err(AppError::QuotaExceeded(format!(
                 "note limit reached ({limit})"
             )));
         }
+        let note = state
+            .store
+            .create_note_on(&mut *tx, body.id, &body.title, user.user_id)
+            .await?;
+        crate::store::Store::initialize_note_order_on(&mut *tx, note.id, user.user_id).await?;
+        tx.commit().await?;
+        return Ok(Json(note));
     }
     let note = state
         .store
@@ -3698,10 +3726,27 @@ async fn import_note(
     user: AuthedUser,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, AppError> {
+    let limit = state.config.max_notes_per_user;
+    let mut tx = if limit > 0 {
+        let mut tx = state.store.lock_note_quota(user.user_id).await?;
+        let count = state
+            .store
+            .count_live_notes_for_user_on(&mut *tx, user.user_id)
+            .await?;
+        if count >= limit {
+            return Err(AppError::QuotaExceeded(format!(
+                "note limit reached ({limit})"
+            )));
+        }
+        tx
+    } else {
+        state.store.pool().begin().await?
+    };
     let note = state
         .store
-        .create_note(None, &body.title, user.user_id)
+        .create_note_on(&mut *tx, None, &body.title, user.user_id)
         .await?;
+    crate::store::Store::initialize_note_order_on(&mut *tx, note.id, user.user_id).await?;
     let writer = user.device_id.to_string();
     let now = chrono::Utc::now();
     let lines: Vec<&str> = body.body.split('\n').collect();
@@ -3712,7 +3757,7 @@ async fn import_note(
         let line_id = Uuid::new_v4();
         state
             .store
-            .insert_line(line_id, note.id, content, &line_vv, &writer, now)
+            .insert_line_on(&mut *tx, line_id, note.id, content, &line_vv, &writer, now)
             .await?;
         order.push(line_id);
     }
@@ -3722,8 +3767,9 @@ async fn import_note(
     )]);
     state
         .store
-        .set_note_order(note.id, &order, &order_vv, &writer, now)
+        .set_note_order_on(&mut *tx, note.id, &order, &order_vv, &writer, now)
         .await?;
+    tx.commit().await?;
 
     Ok(Json(ImportResponse {
         note_id: note.id,
@@ -3733,14 +3779,20 @@ async fn import_note(
 ```
 
 **What it does** — `POST /api/import` (design §10): offline → server migration for
-one note. Creates the note, splits the flat body on `\n` into one versioned line
-per row, and seeds version vectors with the importer's **device** component (the
-same actor collaborative ops are signed with): each line gets
-`{device: 1}`; the order entity gets `{device: line_count}`. Returns
-`{note_id, line_count}`.
+one note. When the note quota is enabled, it takes the user's quota lock before the
+deciding count; when disabled, it starts an ordinary transaction without serializing
+imports for that user. In both cases it atomically creates the note and empty order,
+splits the flat body on `\n` into one versioned line per row, and seeds version vectors
+with the importer's **device** component (the same actor collaborative ops are signed
+with): each line gets `{device: 1}`; the order entity gets `{device: line_count}`.
+Returns `{note_id, line_count}`.
 
-**Dependencies** — `Store::{create_note, insert_line, set_note_order}`;
-`keeplin_core::…::VersionVector`.
+**Dependencies** — `Store::{lock_note_quota, pool, count_live_notes_for_user_on,
+create_note_on, initialize_note_order_on, insert_line_on, set_note_order_on}` — creates
+one transaction, conditionally locks and counts when quota enforcement is enabled, and
+keeps every import write atomic; expects the lock to precede the deciding read and every
+`_on` operation to use the supplied transaction. `keeplin_core::…::VersionVector` —
+constructs line and order clocks; expects the device identifier to be the actor component.
 
 **Used by** — routed in `router`; the test harnesses use it to seed notes.
 
