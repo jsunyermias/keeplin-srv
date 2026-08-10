@@ -560,6 +560,17 @@ impl Store {
         user_id: Uuid,
         device_name: &str,
     ) -> Result<UserDevice, AppError> {
+        let mut conn = self.pool.acquire().await?;
+        self.create_device_on(&mut conn, user_id, device_name).await
+    }
+
+    // md:impl Store > fn create_device_on
+    pub async fn create_device_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        device_name: &str,
+    ) -> Result<UserDevice, AppError> {
         let device = sqlx::query_as::<_, UserDevice>(
             r#"INSERT INTO user_devices (id, user_id, device_name)
                VALUES ($1, $2, $3)
@@ -568,7 +579,7 @@ impl Store {
         .bind(Uuid::new_v4())
         .bind(user_id)
         .bind(device_name)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await?;
         Ok(device)
     }

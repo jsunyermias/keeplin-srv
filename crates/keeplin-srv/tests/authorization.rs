@@ -515,7 +515,7 @@ const MUTATING_HANDLER_INTERLEAVINGS: &[HandlerInterleaving] = &[
     HandlerInterleaving { handler: "delete_notebook_share", transition: "a serialization failure is injected after mutation and before commit", outcome: InterleavingOutcome::Replay(200), case: Some("serializable_two_failures_defer_revocation_notice_until_commit") },
     HandlerInterleaving { handler: "delete_share", transition: "the actor's direct grant is revoked while inherited write access remains before the operation snapshot", outcome: InterleavingOutcome::Refusal(403), case: Some("revoked_note_guard_is_refused_for_delete_share") },
     HandlerInterleaving { handler: "import_note", transition: "none", outcome: InterleavingOutcome::Exempt("authenticated identity is the only operation guard"), case: None },
-    HandlerInterleaving { handler: "login", transition: "none", outcome: InterleavingOutcome::Exempt("credential verification is the operation and there is no earlier authenticated guard"), case: None },
+    HandlerInterleaving { handler: "login", transition: "the account password changes after credential verification and before the operation snapshot", outcome: InterleavingOutcome::Refusal(401), case: Some("changed_password_is_reverified_for_login") },
     HandlerInterleaving { handler: "put_resource_data", transition: "none", outcome: InterleavingOutcome::Exempt("ownership is re-enforced by the blob mutation statement; there is no independently mutable delegated authorization state"), case: None },
     HandlerInterleaving { handler: "register", transition: "none", outcome: InterleavingOutcome::Exempt("public endpoint policy has no mutable per-request authorization state"), case: None },
     HandlerInterleaving { handler: "reset_confirm", transition: "none", outcome: InterleavingOutcome::Exempt("the credential token is consumed atomically as the operation guard"), case: None },
@@ -777,6 +777,7 @@ const SERIALIZABLE_INVARIANT_HANDLERS: &[&str] = &[
     "delete_notebook_share",
     "transfer_notebook",
     "delete_account",
+    "login",
 ];
 
 fn routed_handlers(source: &str) -> Vec<String> {
@@ -1026,6 +1027,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "delete_notebook_share",
         "transfer_notebook",
         "delete_account",
+        "login",
     ]
     .into_iter()
     .collect();
@@ -1047,6 +1049,7 @@ fn serializable_invariant_inventory_is_exact_and_enforced() {
         "delete_notebook_share_on",
         "set_notebook_owner_on",
         "delete_user_on",
+        "create_device_on",
     ];
     for (handler, mutation) in SERIALIZABLE_INVARIANT_HANDLERS.iter().zip(mutations) {
         let body = source
@@ -1139,6 +1142,81 @@ async fn changed_password_is_reverified_for_delete_account(pool: PgPool) {
         .await
         .unwrap()
         .is_some());
+}
+
+// md:fn changed_password_is_reverified_for_login
+#[cfg(debug_assertions)]
+#[sqlx::test(migrations = "../../migrations")]
+async fn changed_password_is_reverified_for_login(pool: PgPool) {
+    let (addr, state) = spawn_authorization_state(pool.clone()).await;
+    let client = reqwest::Client::new();
+    let email = "login-password-race@example.com";
+    let registered = client
+        .post(format!("http://{addr}/api/register"))
+        .json(&json!({ "email": email, "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), 200);
+    let user = state.store.get_user_by_email(email).await.unwrap().unwrap();
+    let (reset_token, _) = state
+        .store
+        .create_email_token(
+            user.id,
+            keeplin_srv::mail::MailKind::PasswordReset,
+            state.config.email_token_ttl_secs,
+        )
+        .await
+        .unwrap();
+    state
+        .http_test_hooks
+        .pause_at("login", "before_operation")
+        .await;
+    let login_request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/api/login"))
+            .json(&json!({
+                "email": email,
+                "password": "password123",
+                "device_name": "racing-login"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    state
+        .http_test_hooks
+        .wait_until_reached("login", "before_operation")
+        .await;
+    let reset = client
+        .post(format!("http://{addr}/api/account/reset/confirm"))
+        .json(&json!({ "token": reset_token, "new_password": "changed123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset.status(), 200);
+    state.http_test_hooks.resume();
+    let login = login_request.await.unwrap();
+    let status = login.status();
+    if status == 200 {
+        let body: Value = login.json().await.unwrap();
+        let token = body["token"].as_str().unwrap();
+        let authenticated = client
+            .get(format!("http://{addr}/api/devices"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), 401);
+    }
+    assert_eq!(status, 401);
+    let device_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_devices WHERE user_id = $1")
+            .bind(user.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(device_count, 0);
 }
 
 // md:fn sync_notebook_writers_retry_real_40001_within_the_bound

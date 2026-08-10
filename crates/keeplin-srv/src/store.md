@@ -1324,17 +1324,8 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
         user_id: Uuid,
         device_name: &str,
     ) -> Result<UserDevice, AppError> {
-        let device = sqlx::query_as::<_, UserDevice>(
-            r#"INSERT INTO user_devices (id, user_id, device_name)
-               VALUES ($1, $2, $3)
-               RETURNING id, user_id, device_name, created_at, last_seen_at"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(device_name)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(device)
+        let mut conn = self.pool.acquire().await?;
+        self.create_device_on(&mut conn, user_id, device_name).await
     }
 ```
 
@@ -1345,6 +1336,46 @@ other relations; the pool-backed wrapper holds it only for its single autocommit
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn create_device_on
+
+**Identification** — executor-aware method of `impl Store`; marker `// md:impl Store > fn create_device_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn create_device_on
+    pub async fn create_device_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        device_name: &str,
+    ) -> Result<UserDevice, AppError> {
+        let device = sqlx::query_as::<_, UserDevice>(
+            r#"INSERT INTO user_devices (id, user_id, device_name)
+               VALUES ($1, $2, $3)
+               RETURNING id, user_id, device_name, created_at, last_seen_at"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(device_name)
+        .fetch_one(conn)
+        .await?;
+        Ok(device)
+    }
+```
+
+**What it does** — Inserts one device row on the caller-provided PostgreSQL connection and returns
+the complete device record, allowing credential re-verification and session creation to share one
+transaction.
+
+**Dependencies** — `sqlx::query_as` and `PgConnection` — execute the device insert on the supplied
+transaction connection; expects the returned columns to remain compatible with `UserDevice`.
+
+**Used by** — `Store::create_device` for pooled inserts and the `login` serializable operation for
+credential-atomic device creation.
+
+**Repeated context** — The generated device id is the revocable session identity carried by the JWT.
 
 ### fn get_device
 
@@ -5166,6 +5197,7 @@ this companion.
 | 46 | `fn mark_email_verified` | `// md:impl Store > fn mark_email_verified` |
 | 47 | `fn prune_email_tokens` | `// md:impl Store > fn prune_email_tokens` |
 | 48 | `fn create_device` | `// md:impl Store > fn create_device` |
+| 48a | `fn create_device_on` | `// md:impl Store > fn create_device_on` |
 | 49 | `fn get_device` | `// md:impl Store > fn get_device` |
 | 50 | `fn list_devices_by_user` | `// md:impl Store > fn list_devices_by_user` |
 | 51 | `fn delete_device` | `// md:impl Store > fn delete_device` |
