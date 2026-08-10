@@ -2767,6 +2767,7 @@
           "fn note_quota_blocks_creation_past_the_limit",
           "fn note_quota_blocks_import_past_the_limit",
           "fn quota_write_inventory_is_complete",
+          "fn quota_paths_do_not_use_serializable_retry_or_service_unavailable",
           "fn concurrent_blob_quota_writes_serialize_before_the_deciding_read",
           "fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body",
           "fn quota_locks_are_scoped_by_user",

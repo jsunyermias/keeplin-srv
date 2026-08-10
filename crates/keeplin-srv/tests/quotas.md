@@ -791,6 +791,53 @@ fn quota_write_inventory_is_complete() {
 
 **Repeated context** — any new counted-object write must be classified before this inventory changes.
 
+## fn quota_paths_do_not_use_serializable_retry_or_service_unavailable
+
+**Identification** — ADR 0003 row 13 structural regression test; marker `// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable
+#[test]
+fn quota_paths_do_not_use_serializable_retry_or_service_unavailable() {
+    let http = include_str!("../src/http.rs");
+
+    for marker in [
+        "// md:fn create_note",
+        "// md:fn import_note",
+        "// md:fn put_resource_data",
+    ] {
+        let handler = http
+            .split(marker)
+            .nth(1)
+            .unwrap()
+            .split(&["//", " md:"].concat())
+            .next()
+            .unwrap();
+        for forbidden in [
+            "serializable(",
+            "AppError::ServiceUnavailable",
+            "StatusCode::SERVICE_UNAVAILABLE",
+            "503",
+        ] {
+            assert!(
+                !handler.contains(forbidden),
+                "quota handler {marker} contains forbidden retry/503 token {forbidden}"
+            );
+        }
+    }
+}
+```
+
+**What it does** — Extracts each quota-bearing HTTP handler by its companion marker and rejects the ADR 0002 retry helper plus the native enum, status constant, and numeric forms of a 503 response. Adding `serializable(state.clone(), ...)` around any listed handler or returning service unavailable makes this test fail; internal-error returns remain allowed.
+
+**Dependencies** — `include_str!` — reads the production HTTP source at compile time; expects each quota handler to retain its unique companion marker and the next marker to delimit its body.
+
+**Used by** — non-database test suite and mutation evidence for ADR 0003 row 13.
+
+**Repeated context** — ADR 0003 deliberately uses advisory-lock waiting with ordinary internal-error recovery rather than ADR 0002's bounded serialization retry and exhaustion response.
+
 ## fn concurrent_blob_quota_writes_serialize_before_the_deciding_read
 
 **Identification** — ADR 0003 rows 4 and 6 concurrency test; marker `// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read`.
@@ -1265,6 +1312,7 @@ this companion.
 | 11 | `fn note_quota_blocks_creation_past_the_limit` | `// md:fn note_quota_blocks_creation_past_the_limit` |
 | 11a | `fn note_quota_blocks_import_past_the_limit` | `// md:fn note_quota_blocks_import_past_the_limit` |
 | 11b | `fn quota_write_inventory_is_complete` | `// md:fn quota_write_inventory_is_complete` |
+| 11ba | `fn quota_paths_do_not_use_serializable_retry_or_service_unavailable` | `// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable` |
 | 11c | `fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` | `// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` |
 | 11d | `fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` | `// md:fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` |
 | 11e | `fn quota_locks_are_scoped_by_user` | `// md:fn quota_locks_are_scoped_by_user` |

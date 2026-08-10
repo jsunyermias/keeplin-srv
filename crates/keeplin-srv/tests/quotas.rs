@@ -400,6 +400,37 @@ fn quota_write_inventory_is_complete() {
     );
 }
 
+// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable
+#[test]
+fn quota_paths_do_not_use_serializable_retry_or_service_unavailable() {
+    let http = include_str!("../src/http.rs");
+
+    for marker in [
+        "// md:fn create_note",
+        "// md:fn import_note",
+        "// md:fn put_resource_data",
+    ] {
+        let handler = http
+            .split(marker)
+            .nth(1)
+            .unwrap()
+            .split(&["//", " md:"].concat())
+            .next()
+            .unwrap();
+        for forbidden in [
+            "serializable(",
+            "AppError::ServiceUnavailable",
+            "StatusCode::SERVICE_UNAVAILABLE",
+            "503",
+        ] {
+            assert!(
+                !handler.contains(forbidden),
+                "quota handler {marker} contains forbidden retry/503 token {forbidden}"
+            );
+        }
+    }
+}
+
 // md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read
 #[sqlx::test(migrations = "../../migrations")]
 async fn concurrent_blob_quota_writes_serialize_before_the_deciding_read(pool: PgPool) {
