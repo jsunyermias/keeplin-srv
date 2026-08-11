@@ -1,11 +1,11 @@
 # 0008 — Sync-path quota and journal cost
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-08-10
 - Decision owners: maintainer of `jsunyermias/keeplin-srv`
 - Scope: keeplin-srv
 - Issue: [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145)
-- Acceptance PR: none — proposed
+- Acceptance PR: [keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158)
 - Supersedes: keeplin-srv ADR 0003 in part (only its property that each transaction acquires at
   most one advisory lock)
 - Superseded by: none
