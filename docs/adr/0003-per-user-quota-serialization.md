@@ -7,7 +7,8 @@
 - Issue: [keeplin-srv#142](https://github.com/jsunyermias/keeplin-srv/issues/142), [keeplin-srv#145](https://github.com/jsunyermias/keeplin-srv/issues/145)
 - Acceptance PR: [keeplin-srv#143](https://github.com/jsunyermias/keeplin-srv/pull/143)
 - Supersedes: none
-- Superseded by: none
+- Superseded by: keeplin-srv ADR 0008 in part (only invariant 5's property that each
+  transaction acquires at most one advisory lock)
 
 ## Context and problem
 
