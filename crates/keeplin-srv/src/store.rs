@@ -2414,7 +2414,7 @@ impl Store {
     {
         let result = sqlx::query(
             r#"INSERT INTO resource_blobs (resource_id, data)
-               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
+               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
         )
         .bind(resource_id)
@@ -2456,6 +2456,23 @@ impl Store {
             .bind(user_id)
             .fetch_optional(conn)
             .await?;
+        Ok(row.is_some())
+    }
+
+    // md:impl Store > fn live_resource_owned_by_on
+    pub async fn live_resource_owned_by_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        resource_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM resources WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(resource_id)
+        .bind(user_id)
+        .fetch_optional(conn)
+        .await?;
         Ok(row.is_some())
     }
 

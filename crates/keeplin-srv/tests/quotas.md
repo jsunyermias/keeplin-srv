@@ -791,6 +791,196 @@ fn quota_write_inventory_is_complete() {
 
 **Repeated context** — any new counted-object write must be classified before this inventory changes.
 
+## fn blob_write_to_tombstoned_resource_is_refused
+
+**Identification** — disabled-quota tombstone-write regression test; marker `// md:fn blob_write_to_tombstoned_resource_is_refused`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn blob_write_to_tombstoned_resource_is_refused
+#[sqlx::test(migrations = "../../migrations")]
+async fn blob_write_to_tombstoned_resource_is_refused(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(put_blob(addr, &token, resource_id, 64).await, 404);
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT octet_length(data)::bigint FROM resource_blobs WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 0);
+}
+```
+
+**What it does** — Tombstones a materialized resource while quota enforcement is disabled, attempts an HTTP blob upload, and requires both a 404 refusal and preservation of the zero-byte blob seeded by synchronization. Reverting the live-resource predicate makes the request return 200 and replaces the seeded blob with the 64-byte request body, killing both assertions.
+
+**Dependencies** —
+- `quota_config` — disables storage quota for this server; expects zero to select the handler's non-quota branch.
+- `seed_resource` — materializes resource metadata and a zero-byte blob through synchronization; expects the returned ID to belong to the authenticated user.
+- `sqlx::query` — tombstones the target directly; expects `resources.deleted_at` to control liveness without deleting metadata.
+- `put_blob` — exercises the HTTP PUT endpoint; expects a refused store write to map to 404.
+- `sqlx::query_scalar` — measures the target's persisted blob length; expects synchronization to have seeded one empty row and a refused HTTP write to leave it unchanged.
+
+**Used by** — PostgreSQL integration suite and predicate-revert mutation check.
+
+**Repeated context** — tombstone-write refusal is independent of quota configuration.
+
+## fn over_limit_blob_write_to_tombstoned_resource_is_not_found
+
+**Identification** — quota-enabled status precedence regression test; marker `// md:fn over_limit_blob_write_to_tombstoned_resource_is_not_found`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn over_limit_blob_write_to_tombstoned_resource_is_not_found
+#[sqlx::test(migrations = "../../migrations")]
+async fn over_limit_blob_write_to_tombstoned_resource_is_not_found(pool: PgPool) {
+    let limit = 100;
+    let addr = spawn(pool.clone(), quota_config(limit, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let live_resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resource_blobs SET data = $2 WHERE resource_id = $1")
+        .bind(live_resource_id)
+        .bind(vec![7u8; limit as usize + 1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tombstoned_resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(tombstoned_resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(put_blob(addr, &token, tombstoned_resource_id, 1).await, 404);
+}
+```
+
+**What it does** — Creates one separate live resource whose persisted 101-byte blob already exceeds the enabled 100-byte limit, tombstones a zero-byte target, then requires PUT on that target to return `404`. Removing the early live-resource gate exposes quota precedence and changes the result to `507`, killing this test.
+
+**Dependencies** —
+- `quota_config` — enables a 100-byte storage limit; expects positive values to select the quota transaction branch.
+- `seed_resource` — creates distinct live and target resources with zero-byte blob rows; expects synchronization to materialize both before direct test setup.
+- `sqlx::query` — makes the separate live blob exceed the limit and tombstones the target; expects direct fixture setup to leave the target blob empty.
+- `put_blob` — exercises the HTTP PUT endpoint; expects the early tombstone decision to precede aggregate quota refusal.
+
+**Used by** — PostgreSQL integration suite and early-gate-revert mutation check.
+
+**Repeated context** — quota accounting remains live-resource-only; the over-limit bytes belong to a separate live resource, not the tombstoned target.
+
+## fn tombstoned_blobs_cannot_exceed_the_storage_limit
+
+**Identification** — measured retained-storage bound regression test; marker `// md:fn tombstoned_blobs_cannot_exceed_the_storage_limit`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn tombstoned_blobs_cannot_exceed_the_storage_limit
+#[sqlx::test(migrations = "../../migrations")]
+async fn tombstoned_blobs_cannot_exceed_the_storage_limit(pool: PgPool) {
+    let limit = 100;
+    let addr = spawn(pool.clone(), quota_config(limit, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind("a@example.com")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    for _ in 0..3 {
+        let resource_id = seed_resource(addr, &token, &dev).await;
+        sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+            .bind(resource_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(put_blob(addr, &token, resource_id, 60).await, 404);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(octet_length(rb.data)), 0) FROM resource_blobs rb JOIN resources r ON r.id = rb.resource_id WHERE r.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(stored <= limit);
+    }
+}
+```
+
+**What it does** — Repeats materialize, tombstone, and refused 60-byte upload cycles under a 100-byte limit. After every attempt it measures all bytes physically held for the user, deliberately without a `deleted_at` filter, and proves the measured total never exceeds the limit. Reverting the predicate makes the first status assertion fail; if statuses were ignored, the second cycle would measure 120 bytes and fail the bound.
+
+**Dependencies** —
+- `quota_config` — enables a 100-byte live-resource storage cap; expects the handler to take its quota transaction branch.
+- `seed_resource` — creates each distinct resource through synchronization; expects resource metadata to materialize before tombstoning.
+- `sqlx::query` — tombstones each target; expects retained metadata to remain joinable to blob storage.
+- `put_blob` — attempts the real HTTP write; expects tombstoned targets to map to 404.
+- `sqlx::query_scalar` — resolves the user and sums `octet_length(resource_blobs.data)` across all that user's resources; expects the unfiltered join to represent physical retained bytes.
+
+**Used by** — PostgreSQL integration suite and predicate-revert mutation check.
+
+**Repeated context** — the production quota aggregate remains live-resource-only; this test measures a broader physical-storage safety property without redefining quota accounting.
+
+## fn tombstoned_resource_blob_remains_readable
+
+**Identification** — retained tombstone-read regression test; marker `// md:fn tombstoned_resource_blob_remains_readable`.
+
+**Code** — complete and verbatim:
+
+```rust
+// md:fn tombstoned_resource_blob_remains_readable
+#[sqlx::test(migrations = "../../migrations")]
+async fn tombstoned_resource_blob_remains_readable(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let resource_id = seed_resource(addr, &token, &dev).await;
+    assert_eq!(put_blob(addr, &token, resource_id, 64).await, 200);
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/resources/{resource_id}/data"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &[7u8; 64]);
+}
+```
+
+**What it does** — Stores a blob while its resource is live, tombstones only the metadata, and proves authenticated GET still returns the exact retained bytes with status 200.
+
+**Dependencies** —
+- `put_blob` — seeds the known byte pattern through the live HTTP write path; expects a 64-byte body filled with byte value seven.
+- `sqlx::query` — tombstones metadata without deleting the blob; expects retention to preserve `resource_blobs`.
+- `reqwest::Client::get` — exercises the HTTP read path; expects ownership authorization to include tombstoned metadata during the retention window.
+- `reqwest::Response::bytes` — reads the returned body; expects byte-for-byte preservation.
+
+**Used by** — PostgreSQL integration suite guarding the intentional GET behavior.
+
+**Repeated context** — resource purge may later reclaim tombstoned blobs, but tombstoning alone retains them for reads.
+
 ## fn quota_paths_do_not_use_serializable_retry_or_service_unavailable
 
 **Identification** — ADR 0003 row 13 structural regression test; marker `// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable`.
@@ -1312,6 +1502,10 @@ this companion.
 | 11 | `fn note_quota_blocks_creation_past_the_limit` | `// md:fn note_quota_blocks_creation_past_the_limit` |
 | 11a | `fn note_quota_blocks_import_past_the_limit` | `// md:fn note_quota_blocks_import_past_the_limit` |
 | 11b | `fn quota_write_inventory_is_complete` | `// md:fn quota_write_inventory_is_complete` |
+| 11bb | `fn blob_write_to_tombstoned_resource_is_refused` | `// md:fn blob_write_to_tombstoned_resource_is_refused` |
+| 11bba | `fn over_limit_blob_write_to_tombstoned_resource_is_not_found` | `// md:fn over_limit_blob_write_to_tombstoned_resource_is_not_found` |
+| 11bc | `fn tombstoned_blobs_cannot_exceed_the_storage_limit` | `// md:fn tombstoned_blobs_cannot_exceed_the_storage_limit` |
+| 11bd | `fn tombstoned_resource_blob_remains_readable` | `// md:fn tombstoned_resource_blob_remains_readable` |
 | 11ba | `fn quota_paths_do_not_use_serializable_retry_or_service_unavailable` | `// md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable` |
 | 11c | `fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` | `// md:fn concurrent_blob_quota_writes_serialize_before_the_deciding_read` |
 | 11d | `fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` | `// md:fn concurrent_note_quota_writes_serialize_and_keep_the_refusal_body` |

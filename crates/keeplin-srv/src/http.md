@@ -1890,7 +1890,7 @@ async fn put_resource_data(
         let mut tx = state.store.lock_blob_quota(user.user_id).await?;
         if !state
             .store
-            .resource_owned_by_on(&mut tx, id, user.user_id)
+            .live_resource_owned_by_on(&mut tx, id, user.user_id)
             .await?
         {
             return Err(AppError::NotFound);
@@ -1929,18 +1929,24 @@ async fn put_resource_data(
 ```
 
 **What it does** — `PUT /api/resources/:id/data`: upload (or replace) a resource's
-binary **out-of-band** — the metadata must already exist for this user (it arrives
-over `/api/sync`; `404` otherwise). The raw body is capped by `MAX_UPLOAD_BYTES`
+binary **out-of-band** — the metadata must already exist, belong to this user, and remain live
+(it arrives over `/api/sync`; `404` otherwise). The live-resource gate precedes quota
+aggregation, so an already-tombstoned target returns `404` even when the user is over limit. The raw body is capped by `MAX_UPLOAD_BYTES`
 (axum layer → `413`). Storage quota (`MAX_USER_STORAGE_BYTES > 0`): sum every
 *other* live blob of the user plus the incoming size — a replacement is measured by
 its new size, not double-counted — and refuse with `507 QuotaExceeded` over the
-limit. Then store the blob through a second owner-scoped statement, preserving the ownership
-invariant even if metadata changes between the preliminary check and the write.
+limit. Then store the blob through a second owner- and liveness-scoped statement, preserving both
+invariants and catching a tombstone committed between the preliminary gate and the write.
 If that second statement affects no row, the handler returns `404` instead of falsely reporting
 that the bytes were stored.
 
-**Dependencies** — `Store::{resource_owned_by, user_blob_bytes_excluding,
-put_resource_blob}`. **Used by** — routed in `router` (raised-limit sub-router).
+**Dependencies** —
+- `Store::live_resource_owned_by_on` — performs the quota-enabled early owner-and-liveness gate; expects tombstoned targets to return `false` before quota aggregation.
+- `Store::resource_owned_by` — performs preliminary ownership authorization when quota is disabled; expects tombstoned metadata to remain visible so the write statement remains the liveness authority in that branch.
+- `Store::user_blob_bytes_excluding_on` — measures other live blob bytes in the locked transaction; expects tombstoned blobs to remain excluded from the accepted quota definition.
+- `Store::{put_resource_blob, put_resource_blob_on}` — performs the final owner-and-liveness-scoped write; expects its in-statement tombstone predicate to catch deletion racing after the early gate.
+
+**Used by** — routed in `router` (raised-limit sub-router).
 
 **Repeated context** — Quota accounting counts **live** blobs only (issue #24), so
 deleting resources actually frees quota.

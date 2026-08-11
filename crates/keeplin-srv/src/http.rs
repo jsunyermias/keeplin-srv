@@ -869,7 +869,7 @@ async fn put_resource_data(
         let mut tx = state.store.lock_blob_quota(user.user_id).await?;
         if !state
             .store
-            .resource_owned_by_on(&mut tx, id, user.user_id)
+            .live_resource_owned_by_on(&mut tx, id, user.user_id)
             .await?
         {
             return Err(AppError::NotFound);
