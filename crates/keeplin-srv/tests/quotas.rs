@@ -400,6 +400,114 @@ fn quota_write_inventory_is_complete() {
     );
 }
 
+// md:fn blob_write_to_tombstoned_resource_is_refused
+#[sqlx::test(migrations = "../../migrations")]
+async fn blob_write_to_tombstoned_resource_is_refused(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(put_blob(addr, &token, resource_id, 64).await, 404);
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT octet_length(data)::bigint FROM resource_blobs WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 0);
+}
+
+// md:fn over_limit_blob_write_to_tombstoned_resource_is_not_found
+#[sqlx::test(migrations = "../../migrations")]
+async fn over_limit_blob_write_to_tombstoned_resource_is_not_found(pool: PgPool) {
+    let limit = 100;
+    let addr = spawn(pool.clone(), quota_config(limit, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let live_resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resource_blobs SET data = $2 WHERE resource_id = $1")
+        .bind(live_resource_id)
+        .bind(vec![7u8; limit as usize + 1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tombstoned_resource_id = seed_resource(addr, &token, &dev).await;
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(tombstoned_resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(put_blob(addr, &token, tombstoned_resource_id, 1).await, 404);
+}
+
+// md:fn tombstoned_blobs_cannot_exceed_the_storage_limit
+#[sqlx::test(migrations = "../../migrations")]
+async fn tombstoned_blobs_cannot_exceed_the_storage_limit(pool: PgPool) {
+    let limit = 100;
+    let addr = spawn(pool.clone(), quota_config(limit, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind("a@example.com")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    for _ in 0..3 {
+        let resource_id = seed_resource(addr, &token, &dev).await;
+        sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+            .bind(resource_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(put_blob(addr, &token, resource_id, 60).await, 404);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(octet_length(rb.data)), 0) FROM resource_blobs rb JOIN resources r ON r.id = rb.resource_id WHERE r.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(stored <= limit);
+    }
+}
+
+// md:fn tombstoned_resource_blob_remains_readable
+#[sqlx::test(migrations = "../../migrations")]
+async fn tombstoned_resource_blob_remains_readable(pool: PgPool) {
+    let addr = spawn(pool.clone(), quota_config(0, 0)).await;
+    register(addr, "a@example.com").await;
+    let token = login(addr, "a@example.com", "dev-a").await;
+    let dev = device(addr, &token).await;
+    let resource_id = seed_resource(addr, &token, &dev).await;
+    assert_eq!(put_blob(addr, &token, resource_id, 64).await, 200);
+    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+        .bind(resource_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/resources/{resource_id}/data"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &[7u8; 64]);
+}
+
 // md:fn quota_paths_do_not_use_serializable_retry_or_service_unavailable
 #[test]
 fn quota_paths_do_not_use_serializable_retry_or_service_unavailable() {

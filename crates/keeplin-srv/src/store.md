@@ -4439,7 +4439,7 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
     {
         let result = sqlx::query(
             r#"INSERT INTO resource_blobs (resource_id, data)
-               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2
+               SELECT id, $3 FROM resources WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                ON CONFLICT (resource_id) DO UPDATE SET data = EXCLUDED.data"#,
         )
         .bind(resource_id)
@@ -4451,13 +4451,13 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
     }
 ```
 
-**What it does** — Replaces a resource blob only for its owning user on the caller's transaction.
+**What it does** — Replaces a resource blob only when its metadata belongs to the caller and remains live. Missing, foreign, and tombstoned resources affect no rows and return `false`; rejecting tombstones applies whether storage quota enforcement is enabled or disabled.
 
-**Dependencies** — `sqlx::Executor` — executes the ownership-filtered upsert; expects quota reads to use the same transaction when enabled.
+**Dependencies** — `sqlx::Executor::execute` — runs the ownership- and liveness-filtered upsert on the supplied executor; expects PostgreSQL `INSERT … SELECT` to report zero affected rows when no live resource matches, and quota reads to use the same transaction when enabled.
 
 **Used by** — pool wrapper and HTTP quota path.
 
-**Repeated context** — accounting uses stored blob bytes, never client-declared resource size.
+**Repeated context** — accounting uses stored blob bytes for live resources, never client-declared resource size. Tombstoned blobs may remain readable until resource purge, but HTTP replacement writes must not add or change retained bytes.
 
 ### fn get_resource_blob
 
@@ -4524,6 +4524,40 @@ is a no-op reported like a fresh insert, while a losing same-tenant version rema
 **Used by** — the relay handlers that route to it (`http.rs` REST endpoints, `sync.rs` change materialisation, `collab.rs` line ops, and the maintenance loops in `main.rs`) — see the region overview under `## impl Store`.
 
 **Repeated context** — server is the source of truth for materialised entities; resolution uses `incoming_wins` (version-vector + `(updated_at, last_writer)` tiebreak); encrypted-at-rest columns are decrypted only on the way out.
+
+### fn live_resource_owned_by_on
+
+**Identification** — transaction-aware write-specific live-resource ownership predicate; marker `// md:impl Store > fn live_resource_owned_by_on`.
+
+**Code** — complete and verbatim:
+
+```rust
+    // md:impl Store > fn live_resource_owned_by_on
+    pub async fn live_resource_owned_by_on(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        resource_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, AppError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM resources WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(resource_id)
+        .bind(user_id)
+        .fetch_optional(conn)
+        .await?;
+        Ok(row.is_some())
+    }
+```
+
+**What it does** — Determines whether a resource is both owned by the user and live inside the quota transaction, rejecting an already-tombstoned target before reading the aggregate. This early status-code gate does not replace the liveness predicate in `put_resource_blob_on`, which independently catches deletion between this check and the write and remains the tombstone refusal mechanism when quota is disabled.
+
+**Dependencies** —
+- `sqlx::query`, `fetch_optional` — looks up matching live metadata; expects missing, foreign, and tombstoned rows to produce `None` without disclosing which condition failed.
+
+**Used by** — the quota-enabled branch of `http::put_resource_data`, before quota accounting.
+
+**Repeated context** — GET and quota-disabled preliminary authorization deliberately use `resource_owned_by`; GET remains valid for retained tombstoned blobs, while quota-disabled writes rely on the write statement's own liveness predicate.
 
 ### fn list_notebooks
 
@@ -5273,6 +5307,7 @@ this companion.
 | 115a | `fn put_resource_blob_on` | `// md:impl Store > fn put_resource_blob_on` |
 | 116 | `fn get_resource_blob` | `// md:impl Store > fn get_resource_blob` |
 | 117 | `fn resource_owned_by` | `// md:impl Store > fn resource_owned_by` |
+| 117a | `fn live_resource_owned_by_on` | `// md:impl Store > fn live_resource_owned_by_on` |
 | 118 | `fn list_notebooks` | `// md:impl Store > fn list_notebooks` |
 | 119 | `fn list_tags` | `// md:impl Store > fn list_tags` |
 | 120 | `fn list_resources` | `// md:impl Store > fn list_resources` |
