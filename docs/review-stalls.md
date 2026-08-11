@@ -201,6 +201,21 @@ entry to Cleared with the exit that was taken and a link to it.
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
 | 2026-08-07 | [keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) | F-002 | 3 | — |
+| 2026-08-11 | [keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158) | Check, Test &amp; Lint | 1 | complete the independent-review fields |
+
+[keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158) is stuck on the required
+`Check, Test & Lint` job, and the failing step inside it is `check-review-governance.js`, not a test.
+It escalated on the repeated-state brake rather than the non-shrinking one: the job was re-run
+against an unchanged tree and an unchanged pull-request body, so round 5's loop state was
+byte-identical to round 4's and the blocking set could not shrink in between.
+
+The gate is the governance one that applies once a pull request leaves draft. It accepts a recorded
+independent review only when the reviewer and implementer fields differ **and** both review boxes
+are ticked **and** the evidence field carries a `https://github.com/` link; otherwise it falls
+through to the waiver path, whose message asks for a `docs/review-debt.md` change. That message is
+misleading here: no waiver is claimed. The independent review happened — a Kimi-family reviewer
+against a GPT-family implementer, returning no findings — and only its record in the body was
+incomplete. The exit is therefore completing those fields, not deferring the review as debt.
 
 [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) is stuck on `GENESIS`, and it
 is the companion of [keeplin#217](https://github.com/jsunyermias/keeplin/pull/217), which
