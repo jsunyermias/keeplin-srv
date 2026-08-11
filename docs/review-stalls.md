@@ -201,7 +201,7 @@ entry to Cleared with the exit that was taken and a link to it.
 | 2026-08-05 | [keeplin-srv#114](https://github.com/jsunyermias/keeplin-srv/pull/114) | F-001<br>F-002<br>F-003<br>F-004<br>F-005<br>F-006<br>F-007<br>F-008<br>F-010<br>F-011<br>F-012<br>F-013<br>F-014<br>F-018<br>GENESIS | 3 | — |
 | 2026-08-05 | [keeplin-srv#116](https://github.com/jsunyermias/keeplin-srv/pull/116) | GENESIS | 3 | |
 | 2026-08-07 | [keeplin-srv#126](https://github.com/jsunyermias/keeplin-srv/pull/126) | F-002 | 3 | — |
-| 2026-08-11 | [keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158) | Check, Test &amp; Lint | 1 | complete the independent-review fields |
+| 2026-08-11 | [keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158) | Check, Test & Lint | 1 | complete the independent-review fields |
 
 [keeplin-srv#158](https://github.com/jsunyermias/keeplin-srv/pull/158) is stuck on the required
 `Check, Test & Lint` job, and the failing step inside it is `check-review-governance.js`, not a test.
